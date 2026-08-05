@@ -43,7 +43,7 @@ This repository adds deployment controls around a pinned [Cloudflare OS](https:/
 
 ### Architecture
 
-<img src="docs/assets/architecture.svg" alt="Cloudflare OS deployment architecture: team members sign in and reach the pinned Cloudflare OS release, holding the Workshop kernel, Gadgets, Blueprints, and the default Gatekeepers. Service bindings connect it to deployment-owned Workers: optional AI, custom Gatekeepers, the Error Reporter, and KV and R2 storage.">
+<img src="docs/assets/architecture.svg" alt="Cloudflare OS deployment architecture: users sign in and reach the pinned Cloudflare OS release, holding the Workshop kernel, Gadgets, Blueprints, and the default Gatekeepers. Service bindings connect it to the Workers this repository owns: optional AI, custom Gatekeepers, the Error Reporter, and KV and R2 storage.">
 
 The deploy command derives temporary Wrangler files from upstream base configs, builds the frontend in Cloudflare Access mode, deploys the private Error Reporter and Gatekeepers before the Workshop, and removes generated files even on failure. Secrets never enter tracked configuration.
 
