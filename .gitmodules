@@ -1,3 +1,3 @@
 [submodule "cloudflare-os"]
 	path = cloudflare-os
-	url = git@gitlab.cfdata.org:cloudflare/developers/gadgets.git
+	url = https://github.com/cloudflare/cloudflare-os.git
