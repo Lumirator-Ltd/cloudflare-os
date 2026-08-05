@@ -145,7 +145,7 @@ The minimal example flow is:
 5. `GatekeeperVendor` advertises credential-free auto-provisioning.
 6. The Workshop service binding makes the vendor available to Cloudflare OS.
 
-Read the [package guide](../packages/custom-gatekeeper/README.md) and upstream [`write-gatekeeper` skill](../cloudflare-os/.agents/skills/write-gatekeeper/SKILL.md) before adding OAuth, URL-scoped resources, writes, simulations, hooks, configurator UI, or stricter observer verification.
+Read the [package guide](../packages/custom-gatekeeper/README.md) and upstream [`write-gatekeeper` skill](https://github.com/cloudflare/cloudflare-os/blob/main/.agents/skills/write-gatekeeper/SKILL.md) before adding OAuth, URL-scoped resources, writes, simulations, hooks, configurator UI, or stricter observer verification.
 
 ## Code extensions
 

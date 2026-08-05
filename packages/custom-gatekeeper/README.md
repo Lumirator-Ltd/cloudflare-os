@@ -19,7 +19,7 @@ Put API tokens and OAuth credentials in Wrangler secrets, never `wrangler.jsonc`
 
 `CustomVerifier.verify()` accepts every observer because the example returns the same low-stakes deployment text to every authenticated user. That is not a safe default for account-specific, tenant-specific, or confidential data.
 
-A real integration must decide which observers may retain data and implement verification at that data boundary. Use upstream's [`write-gatekeeper` skill](../../cloudflare-os/.agents/skills/write-gatekeeper/SKILL.md) for observer design, OAuth, URL-scoped resources, writes and simulation, hooks, and configurator UI.
+A real integration must decide which observers may retain data and implement verification at that data boundary. Use upstream's [`write-gatekeeper` skill](https://github.com/cloudflare/cloudflare-os/blob/main/.agents/skills/write-gatekeeper/SKILL.md) for observer design, OAuth, URL-scoped resources, writes and simulation, hooks, and configurator UI.
 
 ## Check
 

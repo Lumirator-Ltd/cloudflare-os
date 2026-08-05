@@ -112,7 +112,7 @@ Backend error reporting is enabled without a vendor account. Explicit upstream i
 | Organization APIs and capabilities | [`packages/custom-gatekeeper`](packages/custom-gatekeeper/README.md) | Yes |
 | Product behavior unavailable through Worker boundaries | Pinned upstream fork/commit | Yes |
 
-The complete control reference and recipes live in [Customization](docs/customization.md). The upstream [`write-gatekeeper` skill](cloudflare-os/.agents/skills/write-gatekeeper/SKILL.md) covers richer integrations.
+The complete control reference and recipes live in [Customization](docs/customization.md). The upstream [`write-gatekeeper` skill](https://github.com/cloudflare/cloudflare-os/blob/main/.agents/skills/write-gatekeeper/SKILL.md) covers richer integrations.
 
 ## Operations and upgrades
 
