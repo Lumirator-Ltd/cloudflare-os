@@ -15,7 +15,7 @@ Authentication and authorization are deliberately absent. Sign-in configuration 
 
 ### Branding
 
-Set the site name, logo, and accent color from the General tab in `/admin`. Logo uploads accept PNG, JPEG, WebP, and SVG files up to 5 MB. The app scales the longest edge to 256 pixels without cropping and stores a static PNG in the deployment's blueprint-content R2 bucket. Square images work best.
+Set the site name, logo, and accent color from the General tab in `/admin`. Logo uploads accept PNG, JPEG, WebP, and SVG files up to 5 MB. The browser scales the longest edge to 256 pixels without cropping and converts the result to PNG. The server then checks the PNG header and rejects anything over 256 KB or 512 pixels before storing it in the deployment's blueprint-content R2 bucket. Square images work best.
 
 The custom logo appears in the app chrome, sign-in screens, and browser tab on each user's next connection. Use **Restore default** to remove it.
 
