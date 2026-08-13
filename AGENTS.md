@@ -122,6 +122,7 @@ IMPORTANT: Frontend error reporting is a separate, opt-in path:
 - Use strict test-driven development: write and run the failing test before implementation.
 - Commit each small concern separately, and use pnpm only.
 - Before delivery, run unit tests, integration tests, build, and lint; report any failures without hiding them.
-- Create a pull request targeting `main`, then enable GitHub auto-merge without asking once CI passes.
+- For every feature-development branch, push only to `origin`, create a pull request on the `origin` repository targeting `main`, then enable GitHub auto-merge without asking once CI passes.
+- Never push to the `cloudflare` remote; it is fetch-only upstream reference material.
 - Never bypass failed checks, direct-push, or force-push.
 - If GitHub auto-merge is unavailable, report the platform blocker instead of bypassing it.
