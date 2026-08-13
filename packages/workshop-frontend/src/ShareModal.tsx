@@ -296,7 +296,7 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
   const toasts = useKumoToastManager()
   const [collaborators, setCollaborators] = useState<CollaboratorInfo[]>([])
   const [shareLinks, setShareLinks] = useState<ShareLinkInfo[]>([])
-  const [addUsername, setAddUsername] = useState('')
+  const [addEmail, setAddEmail] = useState('')
   const [addRole, setAddRole] = useState<CollaboratorRole>('use')
   const [adding, setAdding] = useState(false)
   const [newLinkRole, setNewLinkRole] = useState<CollaboratorRole>('use')
@@ -422,7 +422,7 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
     if (open) {
       loadData()
       if (!wasOpenRef.current) {
-        setAddUsername('')
+        setAddEmail('')
         setNewShareLink(null)
         setNewShareLinkId(null)
         setNewShareLinkCopied(false)
@@ -556,18 +556,18 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
   }
 
   const handleAddCollaborator = async () => {
-    const username = addUsername.trim()
-    if (!username || sharingProhibited || addingRef.current) return
+    const verifiedEmail = addEmail.trim()
+    if (!verifiedEmail || sharingProhibited || addingRef.current) return
 
     addingRef.current = true
     setAdding(true)
     try {
-      const result = await overseer.addCollaborator(username, addRole, undefined)
+      const result = await overseer.addCollaborator(verifiedEmail, addRole, undefined)
       if (result === null) {
-        toasts.add({ title: 'No account found for that username.', variant: 'error' })
+        toasts.add({ title: 'No account found for that email.', variant: 'error' })
       } else {
         const landedId = result.profile.id
-        setAddUsername('')
+        setAddEmail('')
         setInvitedName(result.profile.name)
         setInvitedLinkCopied(false)
         await loadData()
@@ -803,10 +803,10 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
             </div>
             <input
               type="search"
-              placeholder="Username or email"
-              aria-label="Username or email"
-              value={addUsername}
-              onChange={(e) => setAddUsername(e.target.value)}
+              placeholder="Verified email"
+              aria-label="Verified email"
+              value={addEmail}
+              onChange={(e) => setAddEmail(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter') handleAddCollaborator() }}
               name="gadget-share-people-search"
               autoComplete="off"
@@ -832,7 +832,7 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
               tone="primary"
               className="col-span-3 w-full !rounded-xl sm:col-span-1 sm:w-auto sm:min-w-[68px]"
               onClick={handleAddCollaborator}
-              disabled={!addUsername.trim() || adding || sharingProhibited}
+              disabled={!addEmail.trim() || adding || sharingProhibited}
             >
               {adding ? 'Inviting…' : 'Invite'}
             </WorkshopButton>

@@ -151,11 +151,11 @@ function verificationSection(rendered: HTMLElement, headingId: string): HTMLElem
   return section
 }
 
-async function invite(rendered: HTMLElement, username: string) {
-  const input = rendered.querySelector<HTMLInputElement>('input[aria-label="Username or email"]')!
+async function invite(rendered: HTMLElement, verifiedEmail: string) {
+  const input = rendered.querySelector<HTMLInputElement>('input[aria-label="Verified email"]')!
   const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!
   await act(async () => {
-    setValue.call(input, username)
+    setValue.call(input, verifiedEmail)
     input.dispatchEvent(new Event('input', { bubbles: true }))
   })
   await click(button(rendered, 'Invite'))
@@ -196,6 +196,13 @@ describe('ShareModal', () => {
     await act(async () => { await Promise.resolve() })
     return container
   }
+
+  it('presents verified email as the only direct-invite discovery input', async () => {
+    const rendered = await render(fakeOverseer())
+
+    expect(rendered.querySelector('input[aria-label="Verified email"]')).not.toBeNull()
+    expect(rendered.textContent).not.toContain('Username')
+  })
 
   it('does not present opaque stable IDs as email addresses', async () => {
     const rendered = await render(fakeOverseer())
