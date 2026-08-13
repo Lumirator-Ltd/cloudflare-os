@@ -1,4 +1,4 @@
-import { runInDurableObject } from "cloudflare:test";
+import { abortAllDurableObjects, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import type { IdentityRegistry } from "../src/identity-registry.js";
@@ -56,6 +56,29 @@ describe("IdentityRegistry", () => {
     const access = await registry().resolveEmailIdentity(email, false);
 
     expect(access).toEqual(gatekeeper);
+  });
+
+  it("persists Clerk subject and email indexes across Durable Object restarts", async () => {
+    const subject = `clerk-restart-${crypto.randomUUID()}`;
+    const clerkEmail = unique("restart-clerk");
+    const emailOnlyEmail = unique("restart-email-only");
+    const clerkIdentity = await registry().resolveClerkIdentity(subject, clerkEmail, true);
+    const emailOnlyIdentity = await registry().resolveEmailIdentity(emailOnlyEmail, true);
+    const clerkState = await registry().getIdentity(clerkIdentity.internalUserId);
+    const emailOnlyState = await registry().getIdentity(emailOnlyIdentity.internalUserId);
+
+    expect(clerkIdentity.internalUserId).not.toBe(emailOnlyIdentity.internalUserId);
+    expect(clerkState).toEqual(clerkIdentity);
+    expect(emailOnlyState).toEqual(emailOnlyIdentity);
+
+    await abortAllDurableObjects();
+
+    expect(await registry().resolveClerkIdentity(subject, clerkEmail, false))
+      .toEqual(clerkIdentity);
+    expect(await registry().resolveEmailIdentity(emailOnlyEmail, false))
+      .toEqual(emailOnlyIdentity);
+    expect(await registry().getIdentity(clerkIdentity.internalUserId)).toEqual(clerkState);
+    expect(await registry().getIdentity(emailOnlyIdentity.internalUserId)).toEqual(emailOnlyState);
   });
 
   it("denies an unknown identity when signups are disabled but allows an existing identity", async () => {
