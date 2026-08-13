@@ -11,6 +11,8 @@ const MAX_CLAIM_LENGTH = 256;
 const MAX_AUDIENCE_LENGTH = 1_024;
 const MAX_EMAIL_LENGTH = 320;
 const MAX_DATE_SECONDS = 8_640_000_000_000;
+const MAX_SESSION_TOKEN_LIFETIME_SECONDS = 300;
+const MAX_TOKEN_AGE_SECONDS = 300;
 
 /** Environment values used only by trusted backend Clerk verification. */
 export type ClerkAuthEnv = Readonly<{
@@ -48,6 +50,12 @@ type ClerkTokenOptions = Readonly<{
   jwtKey?: string;
 }>;
 
+type ClerkSessionProfile = Readonly<{
+  id: unknown;
+  userId: unknown;
+  status: unknown;
+}>;
+
 type ClerkUserProfile = Readonly<{
   id: unknown;
   primaryEmailAddress: null | Readonly<{
@@ -63,7 +71,10 @@ type ClerkClientOptions = Readonly<{
   telemetry: Readonly<{ disabled: true }>;
 }>;
 
-type ClerkUserClient = Readonly<{
+type ClerkBackendClient = Readonly<{
+  sessions: Readonly<{
+    getSession(sessionId: string): Promise<ClerkSessionProfile>;
+  }>;
   users: Readonly<{
     getUser(subject: string): Promise<ClerkUserProfile>;
   }>;
@@ -72,7 +83,7 @@ type ClerkUserClient = Readonly<{
 /** Injectable Clerk SDK boundary used to keep unit and cryptographic fixtures offline. */
 export type ClerkAuthDependencies = Readonly<{
   verifyToken(token: string, options: ClerkTokenOptions): Promise<unknown>;
-  createClient(options: ClerkClientOptions): ClerkUserClient;
+  createClient(options: ClerkClientOptions): ClerkBackendClient;
 }>;
 
 const defaultDependencies: ClerkAuthDependencies = {
@@ -157,6 +168,7 @@ function exactOrigin(value: string, allowHttp: boolean, requireOriginOnly: boole
 export function resolveClerkVerificationConfig(env: ClerkAuthEnv): ClerkVerificationConfig {
   const publishableKey = requireConfigString(env.CLERK_PUBLISHABLE_KEY, 2_048);
   const secretKey = requireConfigString(env.CLERK_SECRET_KEY);
+  // Only Wrangler's typed local flag enables development origins; string-like production vars do not.
   const local = env.DEV === true;
   const publicBaseUrl = requireConfigString(env.PUBLIC_BASE_URL, 2_048);
   const authorizedParties = [exactOrigin(publicBaseUrl, local, false)];
@@ -205,17 +217,37 @@ function validateSessionClaims(value: unknown, config: ClerkVerificationConfig) 
   if (typeof value !== "object" || value === null) throw verificationError();
   const claims = value as Record<string, unknown>;
   const now = Math.floor(Date.now() / 1_000);
+
+  // This boundary accepts only Clerk's standard active end-user session token shape. Machine tokens
+  // have distinct SDK-documented subjects/header types, while actor and agent sessions carry `act`.
   if (claims.iss !== config.issuer ||
       !isBoundedClaim(claims.sub, "user_") ||
       !isBoundedClaim(claims.sid, "sess_") ||
+      claims.sts !== "active" ||
+      claims.act !== undefined ||
       typeof claims.azp !== "string" || !config.authorizedParties.includes(claims.azp) ||
-      !isIntegerDate(claims.iat) || claims.iat > now ||
+      !isIntegerDate(claims.iat) || claims.iat > now || now - claims.iat > MAX_TOKEN_AGE_SECONDS ||
       !isIntegerDate(claims.nbf) || claims.nbf > now ||
-      !isIntegerDate(claims.exp) || claims.exp <= now ||
+      !isIntegerDate(claims.exp) || claims.exp <= now || claims.exp <= claims.iat ||
+      claims.exp - claims.iat > MAX_SESSION_TOKEN_LIFETIME_SECONDS ||
       (config.audience !== undefined && !hasExpectedAudience(claims.aud, config.audience))) {
     throw verificationError();
   }
-  return { subject: claims.sub, expiresAt: new Date(claims.exp * 1_000) };
+  return {
+    subject: claims.sub,
+    sessionId: claims.sid,
+    expiresAt: new Date(claims.exp * 1_000),
+  };
+}
+
+function validateBackendSession(
+    session: ClerkSessionProfile,
+    expectedSessionId: string,
+    expectedSubject: string,
+) {
+  if (session.id !== expectedSessionId || session.userId !== expectedSubject || session.status !== "active") {
+    throw verificationError();
+  }
 }
 
 function verifiedEmail(profile: ClerkUserProfile, expectedSubject: string): string {
@@ -249,7 +281,8 @@ export async function verifyClerkIdentity(
     throw verificationError();
   }
 
-  const { subject, expiresAt } = validateSessionClaims(claims, config);
+  const { subject, sessionId, expiresAt } = validateSessionClaims(claims, config);
+  let session: ClerkSessionProfile;
   let profile: ClerkUserProfile;
   try {
     const client = dependencies.createClient({
@@ -258,10 +291,14 @@ export async function verifyClerkIdentity(
       secretKey: config.secretKey,
       telemetry: { disabled: true },
     });
-    profile = await client.users.getUser(subject);
+    [session, profile] = await Promise.all([
+      client.sessions.getSession(sessionId),
+      client.users.getUser(subject),
+    ]);
   } catch {
     throw verificationError();
   }
 
+  validateBackendSession(session, sessionId, subject);
   return { subject, email: verifiedEmail(profile, subject), expiresAt };
 }

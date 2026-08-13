@@ -26,10 +26,11 @@ function claims(overrides: Record<string, unknown> = {}) {
     iss: ISSUER,
     sub: "user_stable123",
     sid: "sess_active123",
+    sts: "active",
     azp: "https://workshop.example",
     iat: NOW - 10,
     nbf: NOW - 10,
-    exp: NOW + 300,
+    exp: NOW + 290,
     ...overrides,
   };
 }
@@ -42,11 +43,17 @@ function dependencies(
         emailAddress: "verified@example.com",
         verification: { status: "verified" },
       },
+    },
+    session: Record<string, unknown> = {
+      id: "sess_active123",
+      userId: "user_stable123",
+      status: "active",
     }) {
   const verifyToken = vi.fn().mockResolvedValue(tokenClaims);
+  const getSession = vi.fn().mockResolvedValue(session);
   const getUser = vi.fn().mockResolvedValue(user);
-  const createClient = vi.fn().mockReturnValue({ users: { getUser } });
-  return { verifyToken, createClient, getUser };
+  const createClient = vi.fn().mockReturnValue({ sessions: { getSession }, users: { getUser } });
+  return { verifyToken, createClient, getSession, getUser };
 }
 
 describe("Clerk verification configuration", () => {
@@ -86,11 +93,14 @@ describe("Clerk verification configuration", () => {
       "https://localhost:3000",
     ]);
 
-    const production = env({
-      CLERK_DEV_AUTHORIZED_PARTIES: "https://attacker.example",
-    });
-    expect(resolveClerkVerificationConfig(production).authorizedParties)
-        .toEqual(["https://workshop.example"]);
+    for (const DEV of [undefined, false, "true", 1]) {
+      const production = env({
+        DEV,
+        CLERK_DEV_AUTHORIZED_PARTIES: "https://attacker.example",
+      });
+      expect(resolveClerkVerificationConfig(production).authorizedParties)
+          .toEqual(["https://workshop.example"]);
+    }
   });
 
   it.each([
@@ -132,7 +142,7 @@ describe("verifyClerkIdentity", () => {
     expect(result).toEqual({
       subject: "user_stable123",
       email: "verified@example.com",
-      expiresAt: new Date((NOW + 300) * 1000),
+      expiresAt: new Date((NOW + 290) * 1000),
     });
     expect(deps.verifyToken).toHaveBeenCalledWith(TOKEN, expect.objectContaining({
       apiUrl: "https://api.clerk.com",
@@ -144,7 +154,83 @@ describe("verifyClerkIdentity", () => {
       apiUrl: "https://api.clerk.com",
       telemetry: { disabled: true },
     }));
+    expect(deps.getSession).toHaveBeenCalledWith("sess_active123");
     expect(deps.getUser).toHaveBeenCalledWith("user_stable123");
+  });
+
+  it.each([undefined, "pending", "ended", "revoked", "unknown", null])(
+    "requires exact active token session status %j",
+    async (sts) => {
+      await expect(verifyClerkIdentity(TOKEN, env(), dependencies(claims({ sts }))))
+          .rejects.toThrow("Clerk identity could not be verified.");
+    },
+  );
+
+  it.each([null, { sub: "user_actor" }, { type: "agent", sub: "agent_123" }])(
+    "rejects actor and agent session claims %j",
+    async (act) => {
+      await expect(verifyClerkIdentity(TOKEN, env(), dependencies(claims({ act }))))
+          .rejects.toThrow("Clerk identity could not be verified.");
+    },
+  );
+
+  it("enforces a 300 second maximum token lifetime", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(NOW * 1000);
+    try {
+      await expect(verifyClerkIdentity(
+        TOKEN,
+        env(),
+        dependencies(claims({ iat: NOW - 10, exp: NOW + 290 })),
+      )).resolves.toMatchObject({ subject: "user_stable123" });
+      await expect(verifyClerkIdentity(
+        TOKEN,
+        env(),
+        dependencies(claims({ iat: NOW - 10, exp: NOW + 291 })),
+      )).rejects.toThrow("Clerk identity could not be verified.");
+      await expect(verifyClerkIdentity(
+        TOKEN,
+        env(),
+        dependencies(claims({ iat: NOW, exp: NOW })),
+      )).rejects.toThrow("Clerk identity could not be verified.");
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("enforces a 300 second maximum token age", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(NOW * 1000);
+    try {
+      await expect(verifyClerkIdentity(
+        TOKEN,
+        env(),
+        dependencies(claims({ iat: NOW - 299, exp: NOW + 1 })),
+      )).resolves.toMatchObject({ subject: "user_stable123" });
+      await expect(verifyClerkIdentity(
+        TOKEN,
+        env(),
+        dependencies(claims({ iat: NOW - 301, exp: NOW + 1 })),
+      )).rejects.toThrow("Clerk identity could not be verified.");
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it.each([
+    { id: "sess_other", userId: "user_stable123", status: "active" },
+    { id: "sess_active123", userId: "user_other", status: "active" },
+    { id: "sess_active123", userId: "user_stable123", status: "pending" },
+    { id: "sess_active123", userId: "user_stable123", status: "ended" },
+    { id: "sess_active123", userId: "user_stable123", status: "revoked" },
+  ])("rejects a mismatched or non-active backend session %#", async (session) => {
+    await expect(verifyClerkIdentity(TOKEN, env(), dependencies(claims(), undefined, session)))
+        .rejects.toThrow("Clerk identity could not be verified.");
+  });
+
+  it("rejects a missing backend session with a bounded error", async () => {
+    const deps = dependencies();
+    deps.getSession.mockRejectedValue(new Error("provider detail must not escape"));
+    await expect(verifyClerkIdentity(TOKEN, env(), deps))
+        .rejects.toThrow("Clerk identity could not be verified.");
   });
 
   it("independently requires the configured audience to be present and exact", async () => {
