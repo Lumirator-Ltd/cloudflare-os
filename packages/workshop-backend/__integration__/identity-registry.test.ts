@@ -121,6 +121,7 @@ describe("IdentityRegistry", () => {
           };
         };
       };
+      const originalUsers = mutable.users;
       let attempts = 0;
       const routedIds: string[] = [];
       const routedVersions: number[] = [];
@@ -140,25 +141,29 @@ describe("IdentityRegistry", () => {
         }),
       };
 
-      await expect(instance.resolveEmailIdentity(email, true))
-        .rejects.toThrow("Identity setup failed.");
-      expect(stateDuringFirstInitialize!).toEqual({
-        internalUserId: routedIds[0],
-        canonicalVerifiedEmail: email,
-        identityVersion: 1,
-        status: "active",
-      });
+      try {
+        await expect(instance.resolveEmailIdentity(email, true))
+          .rejects.toThrow("Identity setup failed.");
+        expect(stateDuringFirstInitialize!).toEqual({
+          internalUserId: routedIds[0],
+          canonicalVerifiedEmail: email,
+          identityVersion: 1,
+          status: "active",
+        });
 
-      const retried = await instance.resolveEmailIdentity(email, false);
-      expect(routedIds).toEqual([retried.internalUserId, retried.internalUserId]);
-      expect(routedVersions).toEqual([1, 1]);
-      expect(instance.getIdentity(retried.internalUserId)).toEqual({
-        internalUserId: retried.internalUserId,
-        canonicalVerifiedEmail: email,
-        identityVersion: 1,
-        status: "active",
-      });
-      expect(attempts).toBe(2);
+        const retried = await instance.resolveEmailIdentity(email, false);
+        expect(routedIds).toEqual([retried.internalUserId, retried.internalUserId]);
+        expect(routedVersions).toEqual([1, 1]);
+        expect(instance.getIdentity(retried.internalUserId)).toEqual({
+          internalUserId: retried.internalUserId,
+          canonicalVerifiedEmail: email,
+          identityVersion: 1,
+          status: "active",
+        });
+        expect(attempts).toBe(2);
+      } finally {
+        mutable.users = originalUsers;
+      }
     });
   });
 
