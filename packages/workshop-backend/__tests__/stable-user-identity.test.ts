@@ -26,6 +26,8 @@ function makeStorage(): SharingStorage {
   });
 }
 
+const unresolvedAddCollaborator: Overseer["addCollaborator"] = async () => null;
+
 describe("stable user identity contract", () => {
   it("canonicalizes verified-email discovery while persisting only stable user IDs", () => {
     const ownerInternalUserId = "user_internal_owner";
@@ -53,11 +55,9 @@ describe("stable user identity contract", () => {
   });
 
   it("keeps unresolved email discovery behind the existing null-returning RPC contract", async () => {
-    const addCollaborator: Overseer["addCollaborator"] = async () => null;
-
     expectTypeOf<Parameters<Overseer["addCollaborator"]>>()
       .toEqualTypeOf<[verifiedEmail: string, role: "use" | "build", note?: string]>();
-    await expect(addCollaborator("missing@example.com", "use", undefined))
+    await expect(unresolvedAddCollaborator("missing@example.com", "use", undefined))
       .resolves.toBeNull();
   });
 });
