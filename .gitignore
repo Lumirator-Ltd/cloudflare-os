@@ -3,6 +3,9 @@ node_modules/
 
 # Build outputs
 dist/
+
+# Local brainstorming companion artifacts
+.superpowers/
 # Generated gatekeeper UI bundles, rebuilt as a prerequisite of build/types:check/deploy
 packages/gatekeeper-*/src/generated/*-configurator-ui.txt
 packages/gatekeeper-*/src/generated/*-configurator-ui.js*
