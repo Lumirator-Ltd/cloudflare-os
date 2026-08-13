@@ -115,3 +115,13 @@ IMPORTANT: Frontend error reporting is a separate, opt-in path:
   Install automatic capture only in trusted first-party surfaces, never gadget/user-authored code.
   Exception messages and stacks reach the external Reporter, so never intentionally put secrets,
   prompts, tokens, headers, or request/response bodies in thrown errors or report metadata.
+
+## Delivery workflow (required)
+
+- Work on a feature branch only; never direct-push to `main`.
+- Use strict test-driven development: write and run the failing test before implementation.
+- Commit each small concern separately, and use pnpm only.
+- Before delivery, run unit tests, integration tests, build, and lint; report any failures without hiding them.
+- Create a pull request targeting `main`, then enable GitHub auto-merge without asking once CI passes.
+- Never bypass failed checks, direct-push, or force-push.
+- If GitHub auto-merge is unavailable, report the platform blocker instead of bypassing it.
