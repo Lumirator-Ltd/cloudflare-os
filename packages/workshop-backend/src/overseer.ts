@@ -27,6 +27,7 @@ import { ambientGatekeeperMode } from "./provisioning-policy";
 import { listFeaturedBlueprintsFromKv, readBlueprintContent, readBlueprintKvRecord, sanitizeBlueprintOutput } from "./blueprint-archive";
 import { WebFetchEnv } from "./web-fetch";
 import { UserDurableObject, UserAiModelRecord, type UserChatContext, type WorkspaceOutputEntry } from "./user";
+import type { IdentityRegistry } from "./identity-registry";
 import { AgentSpawnerBinding } from "./agent-spawner-binding";
 import { recordAnalytics } from "./analytics";
 import { reportIssue } from "@gadgets/backend-utils/error-reporting";
@@ -1010,12 +1011,12 @@ class OverseerImpl implements AgentHooks {
   // almost never changes.
   defaultGadgetId?: WorkpieceId;
 
-  // The owner's profile.id (username/email). Cached in memory (not persisted) for use
-  // in permission graph calculations. Populated when the owner calls open(), or lazily
-  // via an RPC to the owner's UserDO when needed.
+  // The owner's stable application user ID. Cached in memory (not persisted) for permission graph
+  // calculations. Populated when the owner calls open(), or lazily via the owner's User DO.
   ownerProfileId?: string;
 
   users: DurableObjectNamespace<UserDurableObject>;
+  identities: DurableObjectNamespace<IdentityRegistry>;
 
   // Tracks the size of the most-recent snapshot, and the size of all incremental updates since,
   // in order to help decide when to make a new snapshot.
@@ -1302,6 +1303,7 @@ class OverseerImpl implements AgentHooks {
     this.logger = logger.with({ gadgetId: ctx.id.toString() });
     this.storage = makeOverseerStorage(ctx.storage);
     this.users = this.ctx.exports.UserDurableObject;
+    this.identities = this.ctx.exports.IdentityRegistry;
     this.ownerId = this.storage.ownerId.get();
 
     // Run any pending storage migration before anything else can touch storage. This must happen
@@ -8647,9 +8649,11 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async addCollaborator(username: string, role: CollaboratorRole, note?: string)
       : Promise<CollaboratorInfo | null> {
-    // Look up the user DO to check if the account exists.
-    let userDoId = this.impl.users.idFromName(username);
-    let userDo = this.impl.users.get(userDoId);
+    // Verified email is discovery input only. Registry-backed users are routed by the resolved
+    // stable ID; legacy username/email users retain their existing direct route.
+    let internalUserId = await this.impl.identities.getByName("")
+        .findInternalUserIdByVerifiedEmail(username);
+    let userDo = this.impl.users.get(this.impl.users.idFromName(internalUserId ?? username));
     let profile = await userDo.whoamiIfExists();
     if (!profile) {
       return null;

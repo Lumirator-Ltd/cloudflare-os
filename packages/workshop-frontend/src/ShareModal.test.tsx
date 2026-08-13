@@ -73,7 +73,7 @@ import ShareModal from './ShareModal'
 const METADATA = { id: 'trip-planner', title: 'Trip planner' } as GadgetMetadata
 const WORKSPACE_URL = `${window.location.origin}/workspace/trip-planner`
 
-const CURRENT_USER: AiChatAuthorInfo = { type: 'user', id: 'dan@cloudflare.com', name: 'Dan' }
+const CURRENT_USER: AiChatAuthorInfo = { type: 'user', id: 'user_internal_dan', name: 'Dan' }
 
 const DOC_REQUIREMENT: ObserverBindingNeed = {
   gatekeeperId: 7,
@@ -112,7 +112,7 @@ function fakeOverseer(overrides: OverseerOverrides = {}): RpcStub<Overseer> {
       overrides.listObserverRequirements ??
       (async (role: CollaboratorRole) => requirements[role] ?? []),
     addCollaborator: async () => ({
-      profile: { type: 'user', id: 'ada@cloudflare.com', name: 'Ada' },
+      profile: { type: 'user', id: 'user_internal_ada', name: 'Ada' },
       role: 'use',
       addedBy: [],
     }),
@@ -194,6 +194,13 @@ describe('ShareModal', () => {
     await act(async () => { await Promise.resolve() })
     return container
   }
+
+  it('does not present opaque stable IDs as email addresses', async () => {
+    const rendered = await render(fakeOverseer())
+
+    expect(rendered.textContent).toContain('Dan')
+    expect(rendered.textContent).not.toContain(CURRENT_USER.id)
+  })
 
   it('reveals the workspace link to send after a direct invite', async () => {
     const rendered = await render(fakeOverseer())

@@ -201,9 +201,8 @@ function DependentKeepList({
         >
           <Checkbox
             label={(
-              <span className="flex min-w-0 items-baseline gap-1.5">
-                <span className="truncate text-[12px] font-medium text-kumo-default">{dep.profile.name}</span>
-                <span className="truncate text-[11px] text-kumo-subtle">{dep.profile.id}</span>
+              <span className="truncate text-[12px] font-medium text-kumo-default">
+                {dep.profile.name}
               </span>
             )}
             checked={keepSet.has(dep.profile.id)}
@@ -965,7 +964,7 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
                           {profile.name}{profile.id === currentUser?.id ? ' (you)' : ''}
                         </p>
                         <p className="truncate text-[12px] leading-[15px] tracking-[-0.15px] text-kumo-subtle">
-                          {row.kind === 'owner' ? profile.id : describeAccess(row.info)}
+                          {row.kind === 'owner' ? 'Workspace owner' : describeAccess(row.info)}
                         </p>
                       </div>
                       {row.kind === 'owner' ? (

@@ -178,6 +178,17 @@ export class IdentityRegistry extends DurableObject<Cloudflare.Env> {
     return await this.#initialize(record);
   }
 
+  /**
+   * Finds an existing active internal user ID by verified email without creating an identity.
+   *
+   * This is a backend-only discovery boundary for sharing. It returns no capability and does not
+   * initialize, reactivate, or otherwise mutate an identity.
+   */
+  findInternalUserIdByVerifiedEmail(verifiedEmail: string): string | null {
+    const record = this.storage.identities.byEmail.get(canonicalizeVerifiedEmail(verifiedEmail));
+    return record?.status === "active" ? record.internalUserId : null;
+  }
+
   /** Reads current identity state by opaque internal user ID for lease/version validation. */
   getIdentity(internalUserId: string): IdentityState | null {
     const record = this.storage.identities.get(internalUserId);
