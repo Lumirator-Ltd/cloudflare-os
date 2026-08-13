@@ -115,6 +115,24 @@ test("pnpm executable uses the Windows command shim", () => {
   }
 });
 
+test("Windows runners launch pnpm through cmd.exe with controlled arguments", () => {
+  const calls = [];
+  const execute = (executable, args, options) => {
+    calls.push({ executable, args, options });
+    return { status: 0 };
+  };
+
+  assert.equal(runIntegrationTests(execute, "win32"), 0);
+  assert.deepEqual(
+    calls,
+    expectedIntegrationCommands.map(({ args }) => ({
+      executable: "cmd.exe",
+      args: ["/d", "/s", "/c", "pnpm.cmd", ...args],
+      options: { stdio: "inherit" },
+    })),
+  );
+});
+
 test("runner mains execute commands in order with inherited stdio", () => {
   const unitCalls = [];
   const integrationCalls = [];

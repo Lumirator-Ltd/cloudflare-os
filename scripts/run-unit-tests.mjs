@@ -43,7 +43,7 @@ export function unitTestCommands(platform = process.platform) {
 }
 
 export function main(execute = spawnSync, platform = process.platform) {
-  return runCommands(unitTestCommands(platform), execute);
+  return runCommands(unitTestCommands(platform), execute, platform);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

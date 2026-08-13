@@ -23,7 +23,7 @@ export function integrationTestCommands(platform = process.platform) {
 }
 
 export function main(execute = spawnSync, platform = process.platform) {
-  return runCommands(integrationTestCommands(platform), execute);
+  return runCommands(integrationTestCommands(platform), execute, platform);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

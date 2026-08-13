@@ -12,9 +12,23 @@ export function immutableCommands(commands) {
   );
 }
 
-export function runCommands(commands, execute = spawnSync) {
+export function runCommands(
+  commands,
+  execute = spawnSync,
+  platform = process.platform,
+) {
   for (const { executable, args } of commands) {
-    const result = execute(executable, args, { stdio: "inherit" });
+    let spawnExecutable = executable;
+    let spawnArgs = args;
+
+    if (platform === "win32" && executable === "pnpm.cmd") {
+      spawnExecutable = "cmd.exe";
+      // This /c payload contains only runner-owned static arguments. Do not pass
+      // untrusted values here because cmd.exe interprets shell metacharacters.
+      spawnArgs = ["/d", "/s", "/c", executable, ...args];
+    }
+
+    const result = execute(spawnExecutable, spawnArgs, { stdio: "inherit" });
 
     if (result.error) {
       console.error(result.error);
