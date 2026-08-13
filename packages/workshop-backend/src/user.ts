@@ -186,6 +186,14 @@ function makeUserStorage(storage: DurableObjectStorage) {
       cloudflareBilling: <CloudflareBilling | null>null,
 
       created: false,
+
+      // Registry-backed users keep their stable internal identity separate from mutable contact
+      // email. Both remain null for legacy username/password and email-keyed users. The applied
+      // registry version prevents delayed initialization calls from restoring stale contact data.
+      identityInternalUserId: <string | null>null,
+      identityAppliedVersion: 0,
+      verifiedEmail: <string | null>null,
+
       profile: <AiChatAuthorInfo>{
         type: "user",
         name: "User",
@@ -293,6 +301,55 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     this.adminSettings = this.ctx.exports.AdminSettings;
 
     this.vendors = buildGatekeeperVendorMap(env);
+  }
+
+  /**
+   * Idempotently initializes a registry-routed user at an identity version.
+   *
+   * Newer versions update the mutable verified contact email, older versions are ignored, and a
+   * same-version retry must carry the same email. The initial display name is derived from the email
+   * local-part, but later calls never replace a user-customized name.
+   */
+  initializeIdentity(
+    internalUserId: string,
+    verifiedEmail: string,
+    identityVersion: number,
+  ): void {
+    if (this.ctx.id.name !== internalUserId) {
+      throw new Error("Internal user identity does not match this User Durable Object.");
+    }
+
+    this.storage.transaction(() => {
+      const existingInternalUserId = this.storage.identityInternalUserId.get();
+      if (existingInternalUserId !== null && existingInternalUserId !== internalUserId) {
+        throw new Error("User Durable Object is initialized for a different internal identity.");
+      }
+
+      if (existingInternalUserId === null) {
+        if (this.storage.created.get()) {
+          throw new Error("User Durable Object was already initialized without a registry identity.");
+        }
+        this.storage.identityInternalUserId.put(internalUserId);
+        this.storage.created.put(true);
+        this.storage.profile.put({
+          type: "user",
+          id: internalUserId,
+          name: verifiedEmail.split("@")[0],
+        });
+      }
+
+      const appliedVersion = this.storage.identityAppliedVersion.get();
+      if (identityVersion < appliedVersion) return;
+      if (identityVersion === appliedVersion) {
+        if (this.storage.verifiedEmail.get() !== verifiedEmail) {
+          throw new Error("Identity version is already applied with a different verified email.");
+        }
+        return;
+      }
+
+      this.storage.verifiedEmail.put(verifiedEmail);
+      this.storage.identityAppliedVersion.put(identityVersion);
+    });
   }
 
   async authenticate(token: string): Promise<void> {
