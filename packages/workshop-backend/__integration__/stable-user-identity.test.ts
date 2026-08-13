@@ -195,11 +195,14 @@ describe("stable human application identities", () => {
     using ownerWorkspace = await ownerApi.newGadget();
     const metadata = await ownerWorkspace.getMetadata();
 
-    const added = await ownerWorkspace.addCollaborator(collaborator.email, "build");
+    const mixedCaseEmail = `  ${collaborator.email.toUpperCase()}\t`;
+    const added = await ownerWorkspace.addCollaborator(mixedCaseEmail, "build");
     expect(added?.profile.id).toBe(collaborator.internalUserId);
     expect(added?.addedBy).toEqual([
       expect.objectContaining({ type: "user", sharer: owner.internalUserId }),
     ]);
+    expect(await exports.IdentityRegistry.getByName("")
+      .findInternalUserIdByVerifiedEmail(mixedCaseEmail)).toBe(collaborator.internalUserId);
 
     const { linkId } = await ownerWorkspace.createShareLink("use");
     const shareLink = (await ownerWorkspace.listShareLinks())
@@ -229,6 +232,39 @@ describe("stable human application identities", () => {
       [retained.internalUserId],
     );
     expect(affected.map(entry => entry.profile.id)).toEqual([collaborator.internalUserId]);
+  });
+
+  it("does not accept a stable internal user ID as collaborator discovery input", async () => {
+    const owner = await authenticatedRegistryUser("stable-id-owner");
+    const collaborator = await authenticatedRegistryUser("stable-id-collaborator");
+    using _ownerPublicApi = owner.publicApi;
+    using ownerApi = owner.api;
+    using _collaboratorPublicApi = collaborator.publicApi;
+    using _collaboratorApi = collaborator.api;
+    using ownerWorkspace = await ownerApi.newGadget();
+
+    expect(await ownerWorkspace.addCollaborator(collaborator.internalUserId, "use")).toBeNull();
+    expect(await ownerWorkspace.listCollaborators()).toEqual([]);
+  });
+
+  it("does not route arbitrary usernames or create identity mappings", async () => {
+    const owner = await authenticatedRegistryUser("username-owner");
+    using _ownerPublicApi = owner.publicApi;
+    using ownerApi = owner.api;
+    using ownerWorkspace = await ownerApi.newGadget();
+
+    // A routable but registry-orphaned User DO proves arbitrary usernames are not used as a
+    // fallback route when verified-email discovery fails.
+    const arbitraryUsername = `legacy-${crypto.randomUUID()}`;
+    const arbitraryUser = exports.UserDurableObject.getByName(arbitraryUsername);
+    await arbitraryUser.initializeIdentity(arbitraryUsername, uniqueEmail("orphan"), 1);
+    expect(await exports.IdentityRegistry.getByName("")
+      .findInternalUserIdByVerifiedEmail(arbitraryUsername)).toBeNull();
+
+    expect(await ownerWorkspace.addCollaborator(arbitraryUsername, "use")).toBeNull();
+    expect(await ownerWorkspace.listCollaborators()).toEqual([]);
+    expect(await exports.IdentityRegistry.getByName("")
+      .findInternalUserIdByVerifiedEmail(arbitraryUsername)).toBeNull();
   });
 
   it("uses stable IDs for presence and collaborator output indexes", async () => {

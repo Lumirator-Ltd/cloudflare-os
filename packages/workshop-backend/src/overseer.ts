@@ -8647,13 +8647,17 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     return (await this.impl.getSharingManager()).listCollaborators();
   }
 
-  async addCollaborator(username: string, role: CollaboratorRole, note?: string)
+  async addCollaborator(verifiedEmail: string, role: CollaboratorRole, note?: string)
       : Promise<CollaboratorInfo | null> {
-    // Verified email is discovery input only. Registry-backed users are routed by the resolved
-    // stable ID; legacy username/email users retain their existing direct route.
+    // Verified email is discovery input only. Sharing never routes caller-provided stable IDs or
+    // usernames directly to a User DO.
     let internalUserId = await this.impl.ctx.exports.IdentityRegistry.getByName("")
-        .findInternalUserIdByVerifiedEmail(username);
-    let userDo = this.impl.users.get(this.impl.users.idFromName(internalUserId ?? username));
+        .findInternalUserIdByVerifiedEmail(verifiedEmail);
+    if (internalUserId === null) {
+      return null;
+    }
+
+    let userDo = this.impl.users.get(this.impl.users.idFromName(internalUserId));
     let profile = await userDo.whoamiIfExists();
     if (!profile) {
       return null;
@@ -9017,7 +9021,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async listObserverRequirements(
       _role: CollaboratorRole): Promise<ObserverBindingNeed[]> { this.#deny(); }
   async listCollaborators(): Promise<CollaboratorInfo[]> { this.#deny(); }
-  async addCollaborator(_username: string, _role: CollaboratorRole, _note?: string)
+  async addCollaborator(_verifiedEmail: string, _role: CollaboratorRole, _note?: string)
       : Promise<CollaboratorInfo | null> { this.#deny(); }
   async removeCollaborator(_profileId: string, _keepUsers: string[])
       : Promise<AffectedCollaborator[]> { this.#deny(); }

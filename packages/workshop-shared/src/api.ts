@@ -1661,13 +1661,14 @@ export interface Overseer extends RpcTarget {
   listCollaborators(): Promise<CollaboratorInfo[]>;
 
   /**
-   * Adds a collaborator discovered by username or verified email.
+   * Adds a collaborator discovered only by their verified email address.
    *
-   * Discovery input is not durable identity: returned and persisted references use the resolved
-   * stable application user ID. The caller cannot grant a role higher than their own. Returns null
-   * when no account resolves.
+   * The email is canonicalized for lookup and is not durable identity: returned and persisted
+   * references use the resolved stable application user ID. Stable IDs and usernames are not
+   * accepted as discovery input. The caller cannot grant a role higher than their own. Returns
+   * null when no active account resolves.
    */
-  addCollaborator(username: string, role: CollaboratorRole,
+  addCollaborator(verifiedEmail: string, role: CollaboratorRole,
                   note?: string): Promise<CollaboratorInfo | null>;
 
   // Remove a collaborator (identified by profile.id).
