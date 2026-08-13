@@ -79,8 +79,17 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Unit tests
-        run: pnpm test:unit
+      - name: Root script tests
+        run: node --test scripts/*.test.js
+
+      - name: Workspace unit tests
+        run: >-
+          pnpm --filter "!@gadgets/integration-tests"
+          --filter "!@gadgets/workshop-backend"
+          --recursive --if-present test
+
+      - name: Backend unit tests
+        run: pnpm --filter @gadgets/workshop-backend test:unit
 
   integration-tests:
     name: Integration tests
@@ -102,5 +111,8 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Integration tests
-        run: pnpm test:integration
+      - name: Backend integration tests
+        run: pnpm --filter @gadgets/workshop-backend test:integration
+
+      - name: Cross-worker integration tests
+        run: pnpm --filter @gadgets/integration-tests test
