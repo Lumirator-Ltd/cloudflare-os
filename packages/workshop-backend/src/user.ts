@@ -188,8 +188,10 @@ function makeUserStorage(storage: DurableObjectStorage) {
       created: false,
 
       // Registry-backed users keep their stable internal identity separate from mutable contact
-      // email. Both remain null for legacy username/password and email-keyed users.
+      // email. Both remain null for legacy username/password and email-keyed users. The applied
+      // registry version prevents delayed initialization calls from restoring stale contact data.
       identityInternalUserId: <string | null>null,
+      identityAppliedVersion: 0,
       verifiedEmail: <string | null>null,
 
       profile: <AiChatAuthorInfo>{
@@ -302,11 +304,17 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   /**
-   * Idempotently initializes a registry-routed user and updates its mutable verified contact email.
-   * The initial display name is derived from the email local-part, but later calls never replace a
-   * user-customized name.
+   * Idempotently initializes a registry-routed user at an identity version.
+   *
+   * Newer versions update the mutable verified contact email, older versions are ignored, and a
+   * same-version retry must carry the same email. The initial display name is derived from the email
+   * local-part, but later calls never replace a user-customized name.
    */
-  initializeIdentity(internalUserId: string, verifiedEmail: string): void {
+  initializeIdentity(
+    internalUserId: string,
+    verifiedEmail: string,
+    identityVersion: number,
+  ): void {
     if (this.ctx.id.name !== internalUserId) {
       throw new Error("Internal user identity does not match this User Durable Object.");
     }
@@ -330,7 +338,17 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         });
       }
 
+      const appliedVersion = this.storage.identityAppliedVersion.get();
+      if (identityVersion < appliedVersion) return;
+      if (identityVersion === appliedVersion) {
+        if (this.storage.verifiedEmail.get() !== verifiedEmail) {
+          throw new Error("Identity version is already applied with a different verified email.");
+        }
+        return;
+      }
+
       this.storage.verifiedEmail.put(verifiedEmail);
+      this.storage.identityAppliedVersion.put(identityVersion);
     });
   }
 

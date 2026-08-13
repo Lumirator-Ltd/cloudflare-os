@@ -197,6 +197,7 @@ export class IdentityRegistry extends DurableObject<Cloudflare.Env> {
       await this.users.get(id).initializeIdentity(
         resolution.internalUserId,
         resolution.canonicalVerifiedEmail,
+        resolution.identityVersion,
       );
     } catch {
       throw new Error(SETUP_FAILED);

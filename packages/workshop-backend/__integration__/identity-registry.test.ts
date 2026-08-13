@@ -61,6 +61,7 @@ describe("IdentityRegistry", () => {
   it("persists Clerk subject and email indexes across Durable Object restarts", async () => {
     const subject = `clerk-restart-${crypto.randomUUID()}`;
     const clerkEmail = unique("restart-clerk");
+    const movedClerkEmail = unique("restart-clerk-moved");
     const emailOnlyEmail = unique("restart-email-only");
     const clerkIdentity = await registry().resolveClerkIdentity(subject, clerkEmail, true);
     const emailOnlyIdentity = await registry().resolveEmailIdentity(emailOnlyEmail, true);
@@ -73,11 +74,17 @@ describe("IdentityRegistry", () => {
 
     await abortAllDurableObjects();
 
-    expect(await registry().resolveClerkIdentity(subject, clerkEmail, false))
-      .toEqual(clerkIdentity);
+    const movedClerkIdentity = await registry()
+      .resolveClerkIdentity(subject, movedClerkEmail, false);
+    expect(movedClerkIdentity).toEqual({
+      ...clerkIdentity,
+      canonicalVerifiedEmail: movedClerkEmail,
+      identityVersion: clerkIdentity.identityVersion + 1,
+    });
     expect(await registry().resolveEmailIdentity(emailOnlyEmail, false))
       .toEqual(emailOnlyIdentity);
-    expect(await registry().getIdentity(clerkIdentity.internalUserId)).toEqual(clerkState);
+    expect(await registry().getIdentity(clerkIdentity.internalUserId))
+      .toEqual(movedClerkIdentity);
     expect(await registry().getIdentity(emailOnlyIdentity.internalUserId)).toEqual(emailOnlyState);
   });
 
@@ -109,18 +116,22 @@ describe("IdentityRegistry", () => {
       const mutable = instance as unknown as {
         users: {
           idFromName(name: string): string;
-          get(id: string): { initializeIdentity(id: string, email: string): Promise<void> };
+          get(id: string): {
+            initializeIdentity(id: string, email: string, identityVersion: number): Promise<void>;
+          };
         };
       };
       let attempts = 0;
       const routedIds: string[] = [];
+      const routedVersions: number[] = [];
       let stateDuringFirstInitialize: ReturnType<IdentityRegistry["getIdentity"]>;
       mutable.users = {
         idFromName: name => name,
         get: () => ({
-          async initializeIdentity(internalUserId) {
+          async initializeIdentity(internalUserId, _verifiedEmail, identityVersion) {
             attempts++;
             routedIds.push(internalUserId);
+            routedVersions.push(identityVersion);
             if (attempts === 1) {
               stateDuringFirstInitialize = instance.getIdentity(internalUserId);
               throw new Error("injected initialization failure");
@@ -140,6 +151,7 @@ describe("IdentityRegistry", () => {
 
       const retried = await instance.resolveEmailIdentity(email, false);
       expect(routedIds).toEqual([retried.internalUserId, retried.internalUserId]);
+      expect(routedVersions).toEqual([1, 1]);
       expect(instance.getIdentity(retried.internalUserId)).toEqual({
         internalUserId: retried.internalUserId,
         canonicalVerifiedEmail: email,
@@ -161,7 +173,9 @@ describe("IdentityRegistry", () => {
       const mutable = instance as unknown as {
         users: {
           idFromName(name: string): string;
-          get(id: string): { initializeIdentity(id: string, email: string): Promise<void> };
+          get(id: string): {
+            initializeIdentity(id: string, email: string, identityVersion: number): Promise<void>;
+          };
         };
       };
       const originalUsers = mutable.users;
@@ -170,7 +184,7 @@ describe("IdentityRegistry", () => {
       mutable.users = {
         idFromName: name => name,
         get: () => ({
-          async initializeIdentity() {
+          async initializeIdentity(_internalUserId, _verifiedEmail, _identityVersion) {
             initializeStarted.resolve();
             await releaseInitialize.promise;
           },
@@ -206,13 +220,13 @@ describe("IdentityRegistry", () => {
     expect(await registry().resolveEmailIdentity(occupiedEmail, false)).toEqual(other);
   });
 
-  it("initializes a User idempotently without replacing its customized display name", async () => {
+  it("applies newer User identity contact versions without replacing a customized name", async () => {
     const internalUserId = crypto.randomUUID().replaceAll("-", "");
     const user = exports.UserDurableObject.getByName(internalUserId);
     const firstEmail = unique("profile-first");
     const nextEmail = unique("profile-next");
 
-    await user.initializeIdentity(internalUserId, firstEmail);
+    await user.initializeIdentity(internalUserId, firstEmail, 1);
     expect(await user.whoami()).toEqual({
       type: "user",
       id: internalUserId,
@@ -221,19 +235,55 @@ describe("IdentityRegistry", () => {
     expect(await user.hasPasswordLogin()).toBe(false);
 
     await user.setOwnDisplayName("Customized");
-    await user.initializeIdentity(internalUserId, nextEmail);
+    await user.initializeIdentity(internalUserId, nextEmail, 2);
     expect(await user.whoami()).toEqual({ type: "user", id: internalUserId, name: "Customized" });
 
     await runInDurableObject(user, (instance: UserDurableObject) => {
       const inspected = instance as unknown as {
-        storage: { verifiedEmail: { get(): string | null } };
+        storage: {
+          identityAppliedVersion: { get(): number };
+          verifiedEmail: { get(): string | null };
+        };
       };
       expect(inspected.storage.verifiedEmail.get()).toBe(nextEmail);
+      expect(inspected.storage.identityAppliedVersion.get()).toBe(2);
     });
     await runInDurableObject(user, async (instance: UserDurableObject) => {
       await expect(Promise.resolve().then(() =>
-        instance.initializeIdentity(`${internalUserId}-other`, nextEmail)))
+        instance.initializeIdentity(`${internalUserId}-other`, nextEmail, 2)))
         .rejects.toThrow("Internal user identity does not match this User Durable Object.");
+    });
+  });
+
+  it("keeps newer User contact state when an older initialization arrives late", async () => {
+    const internalUserId = crypto.randomUUID().replaceAll("-", "");
+    const user = exports.UserDurableObject.getByName(internalUserId);
+    const oldEmail = unique("delayed-v1");
+    const currentEmail = unique("applied-v2");
+
+    await user.initializeIdentity(internalUserId, currentEmail, 2);
+    await user.initializeIdentity(internalUserId, oldEmail, 1);
+    await user.initializeIdentity(internalUserId, currentEmail, 2);
+    await runInDurableObject(user, async (instance: UserDurableObject) => {
+      await expect(Promise.resolve().then(() =>
+        instance.initializeIdentity(internalUserId, oldEmail, 2)))
+        .rejects.toThrow("Identity version is already applied with a different verified email.");
+    });
+
+    expect(await user.whoami()).toEqual({
+      type: "user",
+      id: internalUserId,
+      name: currentEmail.split("@")[0],
+    });
+    await runInDurableObject(user, (instance: UserDurableObject) => {
+      const inspected = instance as unknown as {
+        storage: {
+          identityAppliedVersion: { get(): number };
+          verifiedEmail: { get(): string | null };
+        };
+      };
+      expect(inspected.storage.verifiedEmail.get()).toBe(currentEmail);
+      expect(inspected.storage.identityAppliedVersion.get()).toBe(2);
     });
   });
 
