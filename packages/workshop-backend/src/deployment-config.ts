@@ -46,6 +46,7 @@ export async function getServerConfig(env: Cloudflare.Env): Promise<ServerConfig
     getAuthVendors(env),
   ]);
   return {
+    clerkPublishableKey: env.CF_ACCESS_AUD ? undefined : env.CLERK_PUBLISHABLE_KEY,
     authVendors,
     passwordAuthEnabled: isPasswordAuthEnabled(env),
     cloudflareLimitsEnabled: isCloudflareLimitsEnabled(env),

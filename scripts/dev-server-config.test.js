@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
+  getBackendDevVars,
   getDevServerConfig,
   getWranglerPortFromBackendHost,
 } from "./dev-server-config.js";
@@ -41,6 +42,37 @@ describe("getWranglerPortFromBackendHost", () => {
     assert.throws(
         () => getWranglerPortFromBackendHost("http://localhost:9000"),
         /VITE_BACKEND_HOST must include a valid host/);
+  });
+});
+
+describe("getBackendDevVars", () => {
+  it("preserves a verified-email admin from a JSON environment value", () => {
+    assert.deepEqual(getBackendDevVars({}, {
+      ADMINS: '["admin+clerk_test@example.com"]',
+      CLERK_PUBLISHABLE_KEY: "pk_test_public",
+      CLERK_SECRET_KEY: "secret-value",
+      CLERK_DEV_AUTHORIZED_PARTIES: "http://localhost:3000",
+    }), {
+      ADMINS: ["admin+clerk_test@example.com"],
+      DEV: true,
+      CLERK_PUBLISHABLE_KEY: "pk_test_public",
+      CLERK_SECRET_KEY: "secret-value",
+      CLERK_DEV_AUTHORIZED_PARTIES: "http://localhost:3000",
+    });
+  });
+
+  it("preserves an existing admin array and falls back only when unset", () => {
+    assert.deepEqual(getBackendDevVars({ ADMINS: ["existing@example.com"] }, {}).ADMINS,
+        ["existing@example.com"]);
+    assert.deepEqual(getBackendDevVars({}, {}).ADMINS, ["admin"]);
+  });
+
+  it("rejects malformed ADMINS without including its value in the error", () => {
+    assert.throws(() => getBackendDevVars({}, { ADMINS: "not-json" }), error => {
+      assert.match(error.message, /ADMINS must be a JSON array of strings/);
+      assert.doesNotMatch(error.message, /not-json/);
+      return true;
+    });
   });
 });
 

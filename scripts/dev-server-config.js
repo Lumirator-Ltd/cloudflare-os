@@ -1,3 +1,40 @@
+const BACKEND_DEV_PASSTHROUGH_VARS = [
+  "DISABLE_PASSWORD_AUTH", "AUTH_GATEKEEPERS", "ENABLE_CLOUDFLARE_LIMITS", "PUBLIC_BASE_URL",
+  "DAILY_LLM_CALL_LIMIT", "MINIMUM_CLOUDFLARE_BALANCE",
+  "CF_AI_GATEWAY", "CF_AI_GATEWAY_PROVIDERS", "CF_AI_GATEWAY_ACCOUNT_ID",
+  "CF_AI_GATEWAY_API_TOKEN", "CF_AI_GATEWAY_WAI", "CF_AI_GATEWAY_WAI_DIRECT",
+  "CLERK_PUBLISHABLE_KEY", "CLERK_SECRET_KEY", "CLERK_JWT_KEY", "CLERK_JWT_AUDIENCE",
+  "CLERK_DEV_AUTHORIZED_PARTIES",
+];
+
+function parseAdmins(value) {
+  let admins = value;
+  if (typeof admins === "string") {
+    try {
+      admins = JSON.parse(admins);
+    } catch {
+      throw new Error("ADMINS must be a JSON array of strings.");
+    }
+  }
+  if (!Array.isArray(admins) || admins.some(admin =>
+    typeof admin !== "string" || !admin || admin !== admin.trim())) {
+    throw new Error("ADMINS must be a JSON array of strings.");
+  }
+  return admins;
+}
+
+// Build local backend vars without printing their values. Shell/.dev.vars values override committed
+// defaults; an existing ADMINS array survives when the shell leaves it unset.
+export function getBackendDevVars(existingVars = {}, environment = process.env) {
+  const vars = { ...existingVars, DEV: true };
+  const configuredAdmins = environment.ADMINS ?? existingVars.ADMINS ?? ["admin"];
+  vars.ADMINS = parseAdmins(configuredAdmins);
+  for (const name of BACKEND_DEV_PASSTHROUGH_VARS) {
+    if (environment[name] !== undefined) vars[name] = environment[name];
+  }
+  return vars;
+}
+
 export function getWranglerPortFromBackendHost(backendHost) {
   const trimmed = backendHost.trim();
   if (!trimmed) return null;

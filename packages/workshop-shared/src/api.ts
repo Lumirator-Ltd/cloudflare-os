@@ -878,6 +878,9 @@ export type AuthVendorInfo = {
 // Deployment-level configuration that the client needs at boot to decide what UI to render.
 // Returned by `PublicApi.getServerConfig()`. Contains no secrets.
 export type ServerConfig = {
+  /** Clerk frontend publishable key for normal auth mode; absent in Cloudflare Access mode. */
+  clerkPublishableKey?: string;
+
   // Auth-capable, allowlisted gatekeeper vendors offered as sign-in methods. Empty when none are
   // configured (password-only).
   authVendors: AuthVendorInfo[];

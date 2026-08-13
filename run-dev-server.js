@@ -16,7 +16,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse } from "jsonc-parser";
-import { getDevServerConfig } from "./scripts/dev-server-config.js";
+import { getBackendDevVars, getDevServerConfig } from "./scripts/dev-server-config.js";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const PACKAGES_DIR = join(ROOT, "packages");
@@ -241,28 +241,10 @@ for (const gk of gatekeepers) {
 
   config.services = config.services || [];
 
-  // For local testing, create an account named "admin" to test admin features.
-  config.vars = config.vars || {};
-  config.vars.ADMINS = ["admin"];
-
-  // Pass through the optional OAuth sign-in / AI Gateway billing env vars from the shell
-  // environment, so you can run e.g.
-  //   ENABLE_CLOUDFLARE_LIMITS=true DAILY_LLM_CALL_LIMIT=1 pnpm dev-server
-  // without editing any config files.
-  const OPTIONAL_FEATURE_VARS = [
-    "DISABLE_PASSWORD_AUTH", "AUTH_GATEKEEPERS", "ENABLE_CLOUDFLARE_LIMITS", "PUBLIC_BASE_URL",
-    "DAILY_LLM_CALL_LIMIT", "MINIMUM_CLOUDFLARE_BALANCE",
-    // Platform AI Gateway — makes the cross-provider model catalog available. The
-    // ACCOUNT_ID/API_TOKEN pair is required whenever CF_AI_GATEWAY is set (all inference goes
-    // over HTTPS with tokens).
-    "CF_AI_GATEWAY", "CF_AI_GATEWAY_PROVIDERS", "CF_AI_GATEWAY_ACCOUNT_ID",
-    "CF_AI_GATEWAY_API_TOKEN", "CF_AI_GATEWAY_WAI", "CF_AI_GATEWAY_WAI_DIRECT",
-  ];
-  // OAuth app credentials (GOOGLE_/GITHUB_/CLOUDFLARE_OAUTH_*) are NOT passed to the backend anymore;
-  // they are injected into the gatekeeper Workers (see SHARED_GATEKEEPER_CREDS below).
-  for (const name of OPTIONAL_FEATURE_VARS) {
-    if (process.env[name] !== undefined) config.vars[name] = process.env[name];
-  }
+  // Pass trusted local auth/feature values through from the shell or root .dev.vars without
+  // printing them. Existing Wrangler ADMINS survive; ["admin"] is only the no-config fallback.
+  // OAuth app credentials (GOOGLE_/GITHUB_/CLOUDFLARE_OAUTH_*) remain gatekeeper-only.
+  config.vars = getBackendDevVars(config.vars, process.env);
 
   for (const gk of gatekeepers) {
     const binding = {
