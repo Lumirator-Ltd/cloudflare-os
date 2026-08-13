@@ -10,6 +10,7 @@ import { getUsageInfo } from "./ai-gateway-billing/limits/usage-checker.js";
 import { listConnectedAccounts, selectAccount } from "./ai-gateway-billing/cloudflare/connection-service.js";
 import { PendingLogin, LoginConnectCallbackImpl } from "./auth/login-flow.js";
 import { deploymentOutputForBlueprint, listFormatOffers, readAdminConfig } from "./admin-config.js";
+import { IdentityRegistry } from "./identity-registry.js";
 
 // Re-export the optional-feature Durable Objects + entrypoints so they can be bound in wrangler.
 export { PendingLogin, LoginConnectCallbackImpl };
@@ -49,6 +50,9 @@ export { LanguageModelGatekeeper };
 
 // Re-export entrypoint types from admin-settings.ts.
 export { AdminSettings };
+
+// Re-export the singleton identity registry Durable Object.
+export { IdentityRegistry };
 
 // Re-export entrypoint types from user.ts.
 export { UserDurableObject, GatekeeperConnectCallbackImpl };

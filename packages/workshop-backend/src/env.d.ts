@@ -36,6 +36,8 @@ declare global {
       // Note: gatekeeper service bindings (GATEKEEPER_*) are intentionally NOT declared here. Core
       // discovers them generically by scanning env for the GATEKEEPER_ prefix (buildGatekeeperVendorMap)
       // and never references a specific gatekeeper by name, so naming one here would be wrong.
+      // IdentityRegistry is also intentionally absent: like the other local Durable Objects it is
+      // reached through ctx.exports rather than an explicit environment binding.
 
       // Optional product analytics stream. Deployments can bind this to a
       // structured Cloudflare Pipelines stream; local/dev configs omit it and analytics no-op.
