@@ -1184,7 +1184,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     this.storage.nextAccountId.put(accountId + 1);
 
     let props = {
-      userId: this.ctx.id.toString(),
+      userId: this.ctx.id.name!,
       accountId,
       vendorId,
     };
@@ -1750,7 +1750,7 @@ export class GatekeeperConnectCallbackImpl
     extends WorkerEntrypoint<Cloudflare.Env, GatekeeperConnectCallbackProps>
     implements GatekeeperConnectCallback {
   #getUserStub() {
-    let userId = this.ctx.exports.UserDurableObject.idFromString(this.ctx.props.userId);
+    let userId = this.ctx.exports.UserDurableObject.idFromName(this.ctx.props.userId);
     return this.ctx.exports.UserDurableObject.get(userId);
   }
 

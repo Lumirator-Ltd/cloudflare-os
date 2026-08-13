@@ -387,8 +387,11 @@ export interface AuthenticatedApi extends RpcTarget {
   // 50 KB. Pass null to remove the avatar.
   setAvatar(data: Uint8Array | null): Promise<void>;
 
-  // Fetch a user's avatar image by user ID. Returns null if no avatar has been set.
-  // Accepts any user ID so that other users' avatars can be displayed (e.g. in chat).
+  /**
+   * Fetches an avatar by stable application user ID. Returns null if none has been set.
+   *
+   * The ID is opaque and is accepted for other users so their avatars can be displayed.
+   */
   getAvatar(userId: string): Promise<Uint8Array | null>;
 
   // Open an existing gadget.
@@ -1657,10 +1660,13 @@ export interface Overseer extends RpcTarget {
   // List all collaborators. Available to owner and all collaborators.
   listCollaborators(): Promise<CollaboratorInfo[]>;
 
-  // Add a collaborator by username/email. The caller must be the owner or an existing
-  // collaborator. `role` is the access level to grant; the caller may not grant a role higher
-  // than their own effective role. Returns the new collaborator's info, or null if the username
-  // doesn't correspond to an existing account.
+  /**
+   * Adds a collaborator discovered by username or verified email.
+   *
+   * Discovery input is not durable identity: returned and persisted references use the resolved
+   * stable application user ID. The caller cannot grant a role higher than their own. Returns null
+   * when no account resolves.
+   */
   addCollaborator(username: string, role: CollaboratorRole,
                   note?: string): Promise<CollaboratorInfo | null>;
 
@@ -1774,6 +1780,7 @@ export type AiChatHistoryPage = {
   };
 };
 
+/** Lightweight display and stable identity information for a chat actor. */
 export type AiChatAuthorInfo = {
   // Is the author a human, AI, or Gadget?
   //
@@ -1782,7 +1789,10 @@ export type AiChatAuthorInfo = {
   // and `name` is the gadget title.
   type: "user" | "agent" | "gadget";
 
-  // Unique user identifier, e.g. "kenton@cloudflare.com" or "gpt-5.1-pro".
+  /**
+   * Stable actor identifier. Human IDs are opaque internal application IDs; agent/model IDs retain
+   * their configured model identity.
+   */
   id: string;
 
   // Display name for author, e.g. "Kenton Varda" or "GPT"
@@ -2860,6 +2870,7 @@ export type CollaboratorRole = "build" | "use";
 export type PresenceParticipant = {
   // Opaque key matching this participant across add/remove events.
   key: string;
+  /** The participant profile, carrying their stable application user ID. */
   user: AiChatAuthorInfo;
   role: CollaboratorRole;
 };
@@ -2882,7 +2893,8 @@ export type PermissionEdge = {
 } & ({
   // Granted directly by another user.
   type: "user";
-  sharer: string;  // profile.id of the person who shared
+  /** Stable application user ID of the person who shared. */
+  sharer: string;
   note?: string;
 } | {
   // Gained by redeeming a share key.

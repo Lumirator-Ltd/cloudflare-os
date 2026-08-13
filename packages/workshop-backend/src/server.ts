@@ -219,8 +219,8 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   async #openGadgetInternal(id: string, shareKey?: string,
                             configureObservers?: RpcStub<ObserverConfigCallback>)
       : Promise<NativeRpcStub<Overseer>> {
-    let userId = this.#userId.toString();
-    let profileId = this.#userId.name!;
+    let userId = this.#userId.name!;
+    let profileId = userId;
     let overseerId;
     try {
       overseerId = this.overseers.idFromString(id);
@@ -288,7 +288,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     await this.#user.newGadget(id, "Untitled Workspace");
     recordAnalytics(this.ctx, this.env, {
       event_name: "gadget_created",
-      user_id: this.#userId.toString(),
+      user_id: this.#userId.name!,
       gadget_id: id,
       source: "blank",
     });
@@ -419,7 +419,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
 
       recordAnalytics(this.ctx, this.env, {
         event_name: "blueprint_imported",
-        user_id: this.#userId.toString(),
+        user_id: this.#userId.name!,
         blueprint_id: blueprintId,
       });
 
@@ -541,7 +541,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
 
     recordAnalytics(this.ctx, this.env, {
       event_name: "gadget_created",
-      user_id: this.#userId.toString(),
+      user_id: this.#userId.name!,
       gadget_id: id,
       blueprint_id: blueprintId,
       source: "blueprint",
@@ -686,7 +686,7 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
     await this.users.get(userId).authenticate(split[1]);
     recordAnalytics(this.ctx, this.env, {
       event_name: "user_authenticated",
-      user_id: userId.toString(),
+      user_id: userId.name!,
       source: "session_token",
     });
     return new AuthenticatedApiImpl(this.ctx, this.env, userId, this.abortSession);
@@ -705,13 +705,13 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
     if (accountCreated) {
       recordAnalytics(this.ctx, this.env, {
         event_name: "account_created",
-        user_id: userId.toString(),
+        user_id: userId.name!,
         source: "cf_access",
       });
     }
     recordAnalytics(this.ctx, this.env, {
       event_name: "user_authenticated",
-      user_id: userId.toString(),
+      user_id: userId.name!,
       source: "cf_access",
     });
     return new AuthenticatedApiImpl(this.ctx, this.env, userId, this.abortSession);
@@ -733,7 +733,7 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
 
     recordAnalytics(this.ctx, this.env, {
       event_name: "user_authenticated",
-      user_id: id.toString(),
+      user_id: id.name!,
       source: "password",
     });
 
@@ -762,7 +762,7 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
 
     recordAnalytics(this.ctx, this.env, {
       event_name: "account_created",
-      user_id: id.toString(),
+      user_id: id.name!,
       source: "password",
     });
 
