@@ -1,16 +1,31 @@
 import { spawnSync } from "node:child_process";
+import { pathToFileURL } from "node:url";
 
-function run(command, args) {
-  const result = spawnSync(command, args, { stdio: "inherit" });
+import {
+  immutableCommands,
+  pnpmExecutable,
+  runCommands,
+} from "./test-runner.mjs";
 
-  if (result.error) {
-    console.error(result.error);
-    process.exit(1);
-  }
-  if (result.status !== 0) {
-    process.exit(result.status ?? 1);
-  }
+export function integrationTestCommands(platform = process.platform) {
+  const pnpm = pnpmExecutable(platform);
+
+  return immutableCommands([
+    {
+      executable: pnpm,
+      args: ["--filter", "@gadgets/workshop-backend", "test:integration"],
+    },
+    {
+      executable: pnpm,
+      args: ["--filter", "@gadgets/integration-tests", "test"],
+    },
+  ]);
 }
 
-run("pnpm", ["--filter", "@gadgets/workshop-backend", "test:integration"]);
-run("pnpm", ["--filter", "@gadgets/integration-tests", "test"]);
+export function main(execute = spawnSync, platform = process.platform) {
+  return runCommands(integrationTestCommands(platform), execute);
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  process.exitCode = main();
+}
