@@ -8,6 +8,7 @@ import type { RpcStub } from 'capnweb'
 import type {
   AiChatAuthorInfo,
   AuthenticatedApi,
+  CollaboratorInfo,
   CollaboratorRole,
   GadgetMetadata,
   ObserverBindingNeed,
@@ -97,6 +98,7 @@ const SHARE_LINK: ShareLinkInfo = {
 }
 
 type OverseerOverrides = {
+  collaborators?: CollaboratorInfo[]
   requirements?: Partial<Record<CollaboratorRole, ObserverBindingNeed[]>>
   listObserverRequirements?: (role: CollaboratorRole) => Promise<ObserverBindingNeed[]>
   shareLinks?: ShareLinkInfo[]
@@ -106,7 +108,7 @@ type OverseerOverrides = {
 function fakeOverseer(overrides: OverseerOverrides = {}): RpcStub<Overseer> {
   const requirements = overrides.requirements ?? { use: [], build: [] }
   return {
-    listCollaborators: async () => [],
+    listCollaborators: async () => overrides.collaborators ?? [],
     listShareLinks: async () => overrides.shareLinks ?? [],
     listObserverRequirements:
       overrides.listObserverRequirements ??
@@ -200,6 +202,25 @@ describe('ShareModal', () => {
 
     expect(rendered.textContent).toContain('Dan')
     expect(rendered.textContent).not.toContain(CURRENT_USER.id)
+  })
+
+  it('does not render a direct sharer opaque stable ID', async () => {
+    const opaqueSharerId = 'user_internal_opaque_sharer'
+    const rendered = await render(fakeOverseer({
+      collaborators: [{
+        profile: { type: 'user', id: 'user_internal_ada', name: 'Ada' },
+        role: 'use',
+        addedBy: [{
+          type: 'user',
+          sharer: opaqueSharerId,
+          created: new Date('2026-08-01T00:00:00Z'),
+          role: 'use',
+        }],
+      }],
+    }))
+
+    expect(rendered.textContent).toContain('Added directly')
+    expect(rendered.textContent).not.toContain(opaqueSharerId)
   })
 
   it('reveals the workspace link to send after a direct invite', async () => {

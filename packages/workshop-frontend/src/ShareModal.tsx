@@ -517,7 +517,7 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
     if (info.addedBy.length > 1) return `Access from ${info.addedBy.length} sources`
     const edge = info.addedBy[0]
     if (!edge) return 'Collaborator'
-    if (edge.type === 'user') return `Added directly by ${edge.sharer}`
+    if (edge.type === 'user') return 'Added directly'
     const key = shareLinks.find(item => item.linkId === edge.keyId)
     return key?.note ? `Joined through “${key.note}”` : 'Joined through a share link'
   }
