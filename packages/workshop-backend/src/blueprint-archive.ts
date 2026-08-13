@@ -23,9 +23,8 @@ const textDecoder = new TextDecoder();
 
 export type BlueprintKvRecord = {
   metadata: BlueprintMetadata;
-  // The User DO that published or uploaded this blueprint, and which owns the authoritative
-  // "featured" bit for it. Undefined for a blueprint the deployment installed itself, which
-  // has no owning user.
+  // Stable application ID of the user who published or uploaded this blueprint and owns its
+  // authoritative "featured" bit. Undefined for deployment-installed blueprints.
   ownerId?: string;
   gadgetId?: string;  // undefined = uploaded, not published from a gadget on this instance
 };

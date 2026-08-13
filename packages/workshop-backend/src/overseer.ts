@@ -27,7 +27,6 @@ import { ambientGatekeeperMode } from "./provisioning-policy";
 import { listFeaturedBlueprintsFromKv, readBlueprintContent, readBlueprintKvRecord, sanitizeBlueprintOutput } from "./blueprint-archive";
 import { WebFetchEnv } from "./web-fetch";
 import { UserDurableObject, UserAiModelRecord, type UserChatContext, type WorkspaceOutputEntry } from "./user";
-import type { IdentityRegistry } from "./identity-registry";
 import { AgentSpawnerBinding } from "./agent-spawner-binding";
 import { recordAnalytics } from "./analytics";
 import { reportIssue } from "@gadgets/backend-utils/error-reporting";
@@ -1016,7 +1015,6 @@ class OverseerImpl implements AgentHooks {
   ownerProfileId?: string;
 
   users: DurableObjectNamespace<UserDurableObject>;
-  identities: DurableObjectNamespace<IdentityRegistry>;
 
   // Tracks the size of the most-recent snapshot, and the size of all incremental updates since,
   // in order to help decide when to make a new snapshot.
@@ -1303,7 +1301,6 @@ class OverseerImpl implements AgentHooks {
     this.logger = logger.with({ gadgetId: ctx.id.toString() });
     this.storage = makeOverseerStorage(ctx.storage);
     this.users = this.ctx.exports.UserDurableObject;
-    this.identities = this.ctx.exports.IdentityRegistry;
     this.ownerId = this.storage.ownerId.get();
 
     // Run any pending storage migration before anything else can touch storage. This must happen
@@ -6505,9 +6502,12 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       return { accepted: false, message: "Please include a prompt." };
     }
 
-    // Resolve the caller.
-    let caller = this.impl.users.getByName(input.callerEmail);
-    let callerId = caller.id.toString();
+    // Resolve trusted gateway email input at the same discovery boundary as sharing. Registry users
+    // are always referenced by stable application ID; legacy email users retain their direct route.
+    let internalUserId = await this.impl.ctx.exports.IdentityRegistry.getByName("")
+        .findInternalUserIdByVerifiedEmail(input.callerEmail);
+    let callerId = internalUserId ?? input.callerEmail;
+    let caller = this.impl.users.getByName(callerId);
     let callerProfile = await caller.whoamiIfExists();
     if (!callerProfile) {
       let siteName = resolveSiteName((await readAdminConfig(this.impl.env)).siteName);
@@ -8651,7 +8651,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       : Promise<CollaboratorInfo | null> {
     // Verified email is discovery input only. Registry-backed users are routed by the resolved
     // stable ID; legacy username/email users retain their existing direct route.
-    let internalUserId = await this.impl.identities.getByName("")
+    let internalUserId = await this.impl.ctx.exports.IdentityRegistry.getByName("")
         .findInternalUserIdByVerifiedEmail(username);
     let userDo = this.impl.users.get(this.impl.users.idFromName(internalUserId ?? username));
     let profile = await userDo.whoamiIfExists();
@@ -9316,13 +9316,6 @@ class UseGadgetClientInterface extends RpcTarget implements GadgetClient {
   constructor(private impl: OverseerImpl, private id: WorkpieceId,
       private clientUserId: string) {
     super();
-  }
-
-  // Fresh stub per call; see OverseerClientInterface.#clientUser.
-  get #clientUser(): DurableObjectStub<UserDurableObject> {
-    return wrapDoStubForTelemetry(
-        this.impl.users.get(this.impl.users.idFromName(this.clientUserId)),
-        this.impl.logger);
   }
 
   #deny(): never {

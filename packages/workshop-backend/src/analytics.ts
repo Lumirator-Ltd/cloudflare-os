@@ -20,12 +20,14 @@ export type ProductAnalyticsRecord = {
   event_id: string;
   event_ts: string;
   event_name: string;
+  // Stable application user ID; never a Durable Object ID string or mutable email address.
   user_id?: string;
   gadget_id?: string;
   properties: Record<string, unknown>;
 };
 
-// Events about a specific gadget.
+// Events about a specific gadget. Human `user_id` and `gadget_owner_user_id` fields carry stable
+// application user IDs; `gadget_id` remains the workspace Durable Object ID.
 export type ProductAnalyticsGadgetInput =
   | {
       event_name: "gadget_created";

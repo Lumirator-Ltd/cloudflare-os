@@ -117,7 +117,7 @@ async function makeTargetOverseer(gadgetId?: number) {
       joinPresence: () => () => {},
       joinOutputsFanout: () => () => {},
       users: {
-        idFromString: (id: string) => id,
+        idFromName: (id: string) => id,
         get: () => ({
           whoami: async () => ({id: "profile-id", name: "Test User"}),
         }),

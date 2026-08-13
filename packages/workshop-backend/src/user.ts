@@ -867,7 +867,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     }
     let done = examined < OUTPUTS_BACKFILL_PAGE;
 
-    let ownerId = this.ctx.id.toString();
+    let ownerId = this.ctx.id.name!;
     let overseers = this.ctx.exports.OverseerDurableObject;
     let results = await Promise.allSettled(targets.map(id =>
         overseers.get(overseers.idFromString(id)).getOutputsForOwnerBackfill(ownerId)));
@@ -1025,7 +1025,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     }
 
     if (kvRecord) {
-      if (kvRecord.ownerId !== this.ctx.id.toString()) {
+      if (kvRecord.ownerId !== this.ctx.id.name) {
         throw new Error("You don't own this blueprint.");
       }
 
