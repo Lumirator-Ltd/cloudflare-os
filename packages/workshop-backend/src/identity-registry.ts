@@ -201,6 +201,14 @@ export class IdentityRegistry extends DurableObject<Cloudflare.Env> {
     } catch {
       throw new Error(SETUP_FAILED);
     }
-    return resolution;
+
+    const current = this.storage.identities.get(resolution.internalUserId);
+    if (current?.status !== "active" ||
+        current.internalUserId !== resolution.internalUserId ||
+        current.canonicalVerifiedEmail !== resolution.canonicalVerifiedEmail ||
+        current.identityVersion !== resolution.identityVersion) {
+      throw new Error(COLLISION_LOCKED);
+    }
+    return activeResolution(current);
   }
 }

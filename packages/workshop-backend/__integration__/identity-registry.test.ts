@@ -78,7 +78,7 @@ describe("IdentityRegistry", () => {
     expect(results.every(result => result.identityVersion === 1)).toBe(true);
   });
 
-  it("keeps a committed mapping for an idempotent User initialization retry", async () => {
+  it("commits and retains the same mapping for an idempotent User initialization retry", async () => {
     const email = unique("retry");
     const stub = registry();
 
@@ -90,21 +90,97 @@ describe("IdentityRegistry", () => {
         };
       };
       let attempts = 0;
+      const routedIds: string[] = [];
+      let stateDuringFirstInitialize: ReturnType<IdentityRegistry["getIdentity"]>;
       mutable.users = {
         idFromName: name => name,
         get: () => ({
-          async initializeIdentity() {
-            if (++attempts === 1) throw new Error("injected initialization failure");
+          async initializeIdentity(internalUserId) {
+            attempts++;
+            routedIds.push(internalUserId);
+            if (attempts === 1) {
+              stateDuringFirstInitialize = instance.getIdentity(internalUserId);
+              throw new Error("injected initialization failure");
+            }
           },
         }),
       };
 
       await expect(instance.resolveEmailIdentity(email, true))
         .rejects.toThrow("Identity setup failed.");
+      expect(stateDuringFirstInitialize!).toEqual({
+        internalUserId: routedIds[0],
+        canonicalVerifiedEmail: email,
+        identityVersion: 1,
+        status: "active",
+      });
+
       const retried = await instance.resolveEmailIdentity(email, false);
-      expect(retried.internalUserId).toMatch(/^[0-9a-f]{64}$/);
+      expect(routedIds).toEqual([retried.internalUserId, retried.internalUserId]);
+      expect(instance.getIdentity(retried.internalUserId)).toEqual({
+        internalUserId: retried.internalUserId,
+        canonicalVerifiedEmail: email,
+        identityVersion: 1,
+        status: "active",
+      });
       expect(attempts).toBe(2);
     });
+  });
+
+  it("rejects a resolution collision-locked while User initialization is pending", async () => {
+    const subject = `clerk-race-${crypto.randomUUID()}`;
+    const oldEmail = unique("race-old");
+    const occupiedEmail = unique("race-occupied");
+    const affected = await registry().resolveClerkIdentity(subject, oldEmail, true);
+    const other = await registry().resolveEmailIdentity(occupiedEmail, true);
+
+    await runInDurableObject(registry(), async (instance: IdentityRegistry) => {
+      const mutable = instance as unknown as {
+        users: {
+          idFromName(name: string): string;
+          get(id: string): { initializeIdentity(id: string, email: string): Promise<void> };
+        };
+      };
+      const originalUsers = mutable.users;
+      const initializeStarted = Promise.withResolvers<void>();
+      const releaseInitialize = Promise.withResolvers<void>();
+      mutable.users = {
+        idFromName: name => name,
+        get: () => ({
+          async initializeIdentity() {
+            initializeStarted.resolve();
+            await releaseInitialize.promise;
+          },
+        }),
+      };
+
+      try {
+        const pendingResolution = instance.resolveClerkIdentity(subject, oldEmail, false);
+        await initializeStarted.promise;
+
+        await expect(instance.resolveClerkIdentity(subject, occupiedEmail, false))
+          .rejects.toThrow("Identity collision requires deployment operator assistance.");
+        releaseInitialize.resolve();
+
+        await expect(pendingResolution)
+          .rejects.toThrow("Identity collision requires deployment operator assistance.");
+        expect(instance.getIdentity(affected.internalUserId)).toEqual({
+          internalUserId: affected.internalUserId,
+          canonicalVerifiedEmail: null,
+          identityVersion: affected.identityVersion + 1,
+          status: "collisionLocked",
+        });
+      } finally {
+        releaseInitialize.resolve();
+        mutable.users = originalUsers;
+      }
+    });
+
+    await expectRegistryRejection(
+      instance => instance.resolveEmailIdentity(oldEmail, false),
+      "New sign-ups are currently disabled on this deployment.",
+    );
+    expect(await registry().resolveEmailIdentity(occupiedEmail, false)).toEqual(other);
   });
 
   it("initializes a User idempotently without replacing its customized display name", async () => {
