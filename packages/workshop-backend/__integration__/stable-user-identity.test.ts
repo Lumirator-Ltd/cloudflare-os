@@ -109,41 +109,47 @@ function blueprintMetadata(author: AiChatAuthorInfo) {
 describe("stable human application identities", () => {
   it("uses the internal ID for profiles, avatars, chat authors, and analytics", async () => {
     const sentAnalytics: Array<Record<string, unknown>> = [];
-    (env as Cloudflare.Env).PRODUCT_ANALYTICS = {
-      async send(records: Array<Record<string, unknown>>) {
-        sentAnalytics.push(...records);
-      },
-    } as Pipeline;
+    const mutableEnv = env as Cloudflare.Env;
+    const originalProductAnalytics = mutableEnv.PRODUCT_ANALYTICS;
+    try {
+      mutableEnv.PRODUCT_ANALYTICS = {
+        async send(records: Array<Record<string, unknown>>) {
+          sentAnalytics.push(...records);
+        },
+      } as Pipeline;
 
-    const account = await authenticatedRegistryUser("application");
-    using _publicApi = account.publicApi;
-    using api = account.api;
+      const account = await authenticatedRegistryUser("application");
+      using _publicApi = account.publicApi;
+      using api = account.api;
 
-    expect(await api.whoami()).toMatchObject({
-      type: "user",
-      id: account.internalUserId,
-    });
+      expect(await api.whoami()).toMatchObject({
+        type: "user",
+        id: account.internalUserId,
+      });
 
-    const avatar = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
-    await api.setAvatar(avatar);
-    expect(await env.AVATARS.get(account.internalUserId, "arrayBuffer")).not.toBeNull();
-    expect(await env.AVATARS.get(account.durableObjectId, "arrayBuffer")).toBeNull();
+      const avatar = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+      await api.setAvatar(avatar);
+      expect(await env.AVATARS.get(account.internalUserId, "arrayBuffer")).not.toBeNull();
+      expect(await env.AVATARS.get(account.durableObjectId, "arrayBuffer")).toBeNull();
 
-    using workspace = await api.newGadget();
-    const chatId = await workspace.newChat("hello", null);
-    const history = await workspace.getChatHistory(chatId);
-    expect(history.messages).toHaveLength(1);
-    expect(history.messages[0].author).toMatchObject({
-      type: "user",
-      id: account.internalUserId,
-    });
-    expect(history.messages[0].author.id).not.toBe(account.email);
-    expect(history.messages[0].author.id).not.toBe(account.durableObjectId);
+      using workspace = await api.newGadget();
+      const chatId = await workspace.newChat("hello", null);
+      const history = await workspace.getChatHistory(chatId);
+      expect(history.messages).toHaveLength(1);
+      expect(history.messages[0].author).toMatchObject({
+        type: "user",
+        id: account.internalUserId,
+      });
+      expect(history.messages[0].author.id).not.toBe(account.email);
+      expect(history.messages[0].author.id).not.toBe(account.durableObjectId);
 
-    await vi.waitFor(() => {
-      expect(sentAnalytics.some(record => record.user_id === account.internalUserId)).toBe(true);
-      expect(sentAnalytics.some(record => record.user_id === account.durableObjectId)).toBe(false);
-    });
+      await vi.waitFor(() => {
+        expect(sentAnalytics.some(record => record.user_id === account.internalUserId)).toBe(true);
+        expect(sentAnalytics.some(record => record.user_id === account.durableObjectId)).toBe(false);
+      });
+    } finally {
+      mutableEnv.PRODUCT_ANALYTICS = originalProductAnalytics;
+    }
   });
 
   it("passes the stable internal ID as Gatekeeper Workshop-user context", async () => {
@@ -273,10 +279,11 @@ describe("stable human application identities", () => {
     const workspaceId = exports.OverseerDurableObject.newUniqueId();
     await owner.user.newGadget(workspaceId.toString(), "Stable identity workspace");
     const workspaceDo = exports.OverseerDurableObject.get(workspaceId);
+    using ownerOnBroken = new NativeRpcStub<() => void>(() => {});
     using ownerWorkspace = await workspaceDo.open(
       owner.identity.internalUserId,
       owner.identity.internalUserId,
-      new NativeRpcStub<() => void>(() => {}),
+      ownerOnBroken,
     );
     await ownerWorkspace.addCollaborator(collaborator.email, "build");
 
@@ -289,10 +296,11 @@ describe("stable human application identities", () => {
     expect((await initialized.promise).map(participant => participant.user.id))
       .toContain(owner.identity.internalUserId);
 
+    using collaboratorOnBroken = new NativeRpcStub<() => void>(() => {});
     using _collaboratorWorkspace = await workspaceDo.open(
       collaborator.identity.internalUserId,
       collaborator.identity.internalUserId,
-      new NativeRpcStub<() => void>(() => {}),
+      collaboratorOnBroken,
     );
     expect((await added.promise).user.id).toBe(collaborator.identity.internalUserId);
 
@@ -333,10 +341,11 @@ describe("stable human application identities", () => {
     await owner.user.newGadget(workspaceId.toString(), "Backfill workspace");
     const workspaceDo = exports.OverseerDurableObject.get(workspaceId);
     {
+      using onBroken = new NativeRpcStub<() => void>(() => {});
       using workspace = await workspaceDo.open(
         owner.identity.internalUserId,
         owner.identity.internalUserId,
-        new NativeRpcStub<() => void>(() => {}),
+        onBroken,
       );
       using gadget = await workspace.createGadget("Backfilled output");
       await gadget.getTitle();
