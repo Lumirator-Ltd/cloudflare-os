@@ -418,10 +418,11 @@ export interface GatekeeperVendor extends WorkerEntrypoint {
   // Get the list of resource types this vendor supports. Each entry describes a category of
   // resource the vendor can provide access to, along with a URL pattern for matching.
   //
-  // `options.userId` specifies the opaque, deployment-local stable application ID of the user who
-  // is driving the query. A gatekeeper may use it for deployment-scoped RBAC but must not interpret
-  // it as an email address or external-provider identity. If this method returns an empty list, the
-  // gatekeeper is totally hidden from the user.
+  // `options.userId` specifies a deployment-local application identifier for the user driving the
+  // query. Registry-backed authentication supplies an opaque stable ID; deployments that still
+  // enable legacy password authentication may supply its local username. A gatekeeper may use the
+  // value for deployment-scoped RBAC but must never interpret it as an email address or external-
+  // provider identity. If this method returns an empty list, the gatekeeper is hidden from the user.
   //
   // TODO: Providing the user ID here is a temporary hack to enable a hidden internal gatekeeper.
   //   Later on we should come up with a better way to manage which users see which gatekeepers.
