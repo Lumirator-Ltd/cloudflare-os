@@ -73,6 +73,9 @@ type Env = Cloudflare.Env & {
   CF_ACCESS_AUD?: string,  // audience
   CF_ACCESS_ISS?: string,  // team URL, i.e. https://<team>.cloudflareaccess.com
   DEV?: boolean;
+  TEST_ONLY_CLERK_VERIFIER?: {
+    verify(token: string): Promise<{ subject: string; email: string; expiresAt: Date }>;
+  };
   FLAGS?: Flagship;
 }
 
@@ -647,6 +650,15 @@ class LoginAttemptImpl extends RpcTarget implements LoginAttempt {
   }
 }
 
+function verifyClerkSessionToken(token: string, env: Env) {
+  // Integration harnesses can bind a trusted local verifier only under the typed local DEV flag.
+  // Production configurations have neither this binding nor the flag and always use Clerk.
+  if (env.DEV === true && env.TEST_ONLY_CLERK_VERIFIER) {
+    return env.TEST_ONLY_CLERK_VERIFIER.verify(token);
+  }
+  return verifyClerkIdentity(token, env);
+}
+
 @validateRpc()
 class PublicApiImpl extends RpcTarget implements PublicApi {
   users: DurableObjectNamespace<UserDurableObject>;
@@ -718,7 +730,7 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
   }
 
   async authenticateWithClerk(token: string): Promise<ClerkAuthentication> {
-    const verified = await verifyClerkIdentity(token, this.env);
+    const verified = await verifyClerkSessionToken(token, this.env);
     const signupsEnabled = (await readAdminConfig(this.env)).signupsEnabled;
     const registry = this.ctx.exports.IdentityRegistry.getByName("");
     const resolved = await registry.resolveClerkIdentity(
@@ -737,13 +749,20 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
       initialResolution: resolved,
       signupsEnabled,
       abortSession: this.abortSession,
-      verify: replacement => verifyClerkIdentity(replacement, this.env),
-      resolve: (subject, email, allowSignups) =>
-        registry.resolveClerkIdentity(subject, email, allowSignups),
-      // Eager registry subscriptions are added in the identity-invalidation concern. The hard
-      // verified deadline remains authoritative even if this process-local registration is absent.
-      register: async () => {},
-      unregister: async () => {},
+      verify: replacement => verifyClerkSessionToken(replacement, this.env),
+      resolve: (subject, email, allowSignups, initiatingSubscriberId) =>
+        registry.resolveClerkIdentity(subject, email, allowSignups, initiatingSubscriberId),
+      register: async (subscriberId, identity, invalidate) => {
+        await registry.registerClerkSession(
+          identity.internalUserId,
+          identity.identityVersion,
+          subscriberId,
+          async () => invalidate(),
+        );
+      },
+      unregister: async (subscriberId, internalUserId) => {
+        await registry.unregisterClerkSession(internalUserId, subscriberId);
+      },
     });
     this.#clerkSessions.add(clerkSession);
 

@@ -64,6 +64,12 @@ export function stubFor<T extends RpcTarget>(target: T): RpcStub<T> {
   return new RpcStub(target) as unknown as RpcStub<T>;
 }
 
+/** Mint a serialisable callback-function stub from the same Cap'n Web instance as `connect()`. */
+export function callbackStubFor<Args extends unknown[], Result>(
+    target: (...args: Args) => Result): RpcStub<(...args: Args) => Result> {
+  return new RpcStub(target) as unknown as RpcStub<(...args: Args) => Result>;
+}
+
 // The server stores and compares these bytes verbatim and never re-derives them, so the tests skip
 // the frontend's argon2id (64 MiB per call) in favour of a deterministic stand-in.
 function passwordHashFor(username: string): Uint8Array {

@@ -85,6 +85,22 @@ describe("Clerk RPC session deadlines", () => {
     expect(abortSession).toHaveBeenCalledOnce();
   });
 
+  it("safely re-arms deadlines beyond the maximum JavaScript timeout", async () => {
+    const now = Date.UTC(2026, 0, 1);
+    const maximumTimeout = 0x7fffffff;
+    const { abortSession } = await setup({
+      now,
+      expiresAt: now + maximumTimeout + 1_000,
+    });
+
+    await vi.advanceTimersByTimeAsync(maximumTimeout);
+    expect(abortSession).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(999);
+    expect(abortSession).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(abortSession).toHaveBeenCalledOnce();
+  });
+
   it("replaces the old deadline only after a successful verified refresh", async () => {
     const now = Date.UTC(2026, 0, 1);
     const replacementExpiry = now + 10_000;

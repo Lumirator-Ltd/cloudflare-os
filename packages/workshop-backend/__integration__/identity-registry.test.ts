@@ -292,6 +292,69 @@ describe("IdentityRegistry", () => {
     });
   });
 
+  it("eagerly invalidates all stale Clerk sessions except the refresh that initiated an email move",
+      async () => {
+    const subject = `clerk-subscribers-${crypto.randomUUID()}`;
+    const oldEmail = unique("subscriber-old");
+    const newEmail = unique("subscriber-new");
+    const initial = await registry().resolveClerkIdentity(subject, oldEmail, true);
+    const invalidated: string[] = [];
+
+    await runInDurableObject(registry(), async (instance: IdentityRegistry) => {
+      type Subscriber = (() => Promise<void>) & {
+        dup(): Subscriber;
+        onRpcBroken(callback: () => void): void;
+        [Symbol.dispose](): void;
+      };
+      const subscriber = (name: string): Subscriber => {
+        const callback = async () => { invalidated.push(name); };
+        return Object.assign(callback, {
+          dup() { return callback as Subscriber; },
+          onRpcBroken() {},
+          [Symbol.dispose]() {},
+        }) as Subscriber;
+      };
+      await instance.registerClerkSession(
+        initial.internalUserId, initial.identityVersion, "initiator", subscriber("initiator") as never);
+      await instance.registerClerkSession(
+        initial.internalUserId, initial.identityVersion, "stale", subscriber("stale") as never);
+
+      const moved = await instance.resolveClerkIdentity(
+        subject, newEmail, false, "initiator");
+      expect(moved.identityVersion).toBe(initial.identityVersion + 1);
+      await Promise.resolve();
+      expect(invalidated).toEqual(["stale"]);
+
+      // Re-registering the initiator proves its expected version is current before refresh succeeds.
+      expect(() => instance.registerClerkSession(
+        moved.internalUserId, moved.identityVersion, "initiator", subscriber("initiator-v2") as never))
+        .not.toThrow();
+    });
+  });
+
+  it("does not persist live Clerk subscribers across a registry restart", async () => {
+    const subject = `clerk-lost-subscriber-${crypto.randomUUID()}`;
+    const oldEmail = unique("lost-subscriber-old");
+    const newEmail = unique("lost-subscriber-new");
+    const initial = await registry().resolveClerkIdentity(subject, oldEmail, true);
+    let invalidations = 0;
+
+    await runInDurableObject(registry(), async (instance: IdentityRegistry) => {
+      const callback = async () => { invalidations++; };
+      const subscriber = Object.assign(callback, {
+        dup() { return subscriber; },
+        onRpcBroken() {},
+        [Symbol.dispose]() {},
+      });
+      await instance.registerClerkSession(
+        initial.internalUserId, initial.identityVersion, "lost", subscriber as never);
+    });
+    await abortAllDurableObjects();
+    await registry().resolveClerkIdentity(subject, newEmail, false);
+
+    expect(invalidations).toBe(0);
+  });
+
   it("moves a Clerk identity email, removes the old alias, and increments its version", async () => {
     const oldEmail = unique("old-alias");
     const newEmail = unique("new-alias");

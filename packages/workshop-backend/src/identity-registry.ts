@@ -1,5 +1,5 @@
 import { collection, createTypedStorage } from "@gadgets/typed-storage";
-import { DurableObject } from "cloudflare:workers";
+import { DurableObject, type RpcStub } from "cloudflare:workers";
 import type { UserDurableObject } from "./user.js";
 
 /** The authorization state of an internal Workshop identity. */
@@ -24,6 +24,8 @@ export type IdentityState = {
 type IdentityRecord = IdentityState & {
   subjectKeys: string[];
 };
+
+type ClerkSessionInvalidator = () => Promise<void>;
 
 function makeIdentityRegistryStorage(storage: DurableObjectStorage) {
   return createTypedStorage(storage, {
@@ -82,6 +84,7 @@ function activeResolution(record: IdentityRecord): IdentityResolution {
 export class IdentityRegistry extends DurableObject<Cloudflare.Env> {
   private storage: IdentityRegistryStorage;
   private users: DurableObjectNamespace<UserDurableObject>;
+  private clerkSessions = new Map<string, Map<string, RpcStub<ClerkSessionInvalidator>>>();
 
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
@@ -94,14 +97,17 @@ export class IdentityRegistry extends DurableObject<Cloudflare.Env> {
     subject: string,
     verifiedEmail: string,
     signupsEnabled: boolean,
+    initiatingSubscriberId?: string,
   ): Promise<IdentityResolution> {
     const email = canonicalizeVerifiedEmail(verifiedEmail);
     const subjectKey = clerkSubjectKey(subject);
-    const record = this.storage.transaction(() => {
+    const result = this.storage.transaction((): { record: IdentityRecord; changed: boolean } => {
       const subjectIdentity = this.storage.identities.bySubject.get(subjectKey);
       if (subjectIdentity) {
         if (subjectIdentity.status !== "active") throw new Error(COLLISION_LOCKED);
-        if (subjectIdentity.canonicalVerifiedEmail === email) return subjectIdentity;
+        if (subjectIdentity.canonicalVerifiedEmail === email) {
+          return { record: subjectIdentity, changed: false };
+        }
 
         const emailIdentity = this.storage.identities.byEmail.get(email);
         if (emailIdentity && emailIdentity.internalUserId !== subjectIdentity.internalUserId) {
@@ -112,7 +118,7 @@ export class IdentityRegistry extends DurableObject<Cloudflare.Env> {
             status: "collisionLocked",
           };
           this.storage.identities.put(locked);
-          return locked;
+          return { record: locked, changed: true };
         }
 
         const moved: IdentityRecord = {
@@ -121,7 +127,7 @@ export class IdentityRegistry extends DurableObject<Cloudflare.Env> {
           identityVersion: subjectIdentity.identityVersion + 1,
         };
         this.storage.identities.put(moved);
-        return moved;
+        return { record: moved, changed: true };
       }
 
       const emailIdentity = this.storage.identities.byEmail.get(email);
@@ -132,7 +138,7 @@ export class IdentityRegistry extends DurableObject<Cloudflare.Env> {
           subjectKeys: [...emailIdentity.subjectKeys, subjectKey],
         };
         this.storage.identities.put(bound);
-        return bound;
+        return { record: bound, changed: false };
       }
 
       if (!signupsEnabled) throw new Error(SIGNUPS_DISABLED);
@@ -144,10 +150,46 @@ export class IdentityRegistry extends DurableObject<Cloudflare.Env> {
         subjectKeys: [subjectKey],
       };
       this.storage.identities.put(created);
-      return created;
+      return { record: created, changed: false };
     });
 
-    return await this.#initialize(record);
+    if (result.changed) {
+      this.#invalidateClerkSessions(result.record.internalUserId, initiatingSubscriberId);
+    }
+    return await this.#initialize(result.record);
+  }
+
+  /** Registers an ephemeral abort callback after validating the identity's exact active version. */
+  registerClerkSession(
+    internalUserId: string,
+    identityVersion: number,
+    subscriberId: string,
+    subscriber: RpcStub<ClerkSessionInvalidator>,
+  ): void {
+    const current = this.storage.identities.get(internalUserId);
+    if (current?.status !== "active" || current.identityVersion !== identityVersion ||
+        current.canonicalVerifiedEmail === null) {
+      throw new Error(COLLISION_LOCKED);
+    }
+
+    const ownedSubscriber = subscriber.dup();
+    let sessions = this.clerkSessions.get(internalUserId);
+    if (!sessions) {
+      sessions = new Map();
+      this.clerkSessions.set(internalUserId, sessions);
+    }
+    sessions.get(subscriberId)?.[Symbol.dispose]();
+    sessions.set(subscriberId, ownedSubscriber);
+  }
+
+  /** Unregisters one live Clerk session callback; missing registrations are harmless. */
+  unregisterClerkSession(internalUserId: string, subscriberId: string): void {
+    const sessions = this.clerkSessions.get(internalUserId);
+    const subscriber = sessions?.get(subscriberId);
+    if (!subscriber) return;
+    sessions!.delete(subscriberId);
+    if (sessions!.size === 0) this.clerkSessions.delete(internalUserId);
+    subscriber[Symbol.dispose]();
   }
 
   /** Resolves a Gatekeeper or Access verified email to an initialized active identity. */
@@ -199,6 +241,17 @@ export class IdentityRegistry extends DurableObject<Cloudflare.Env> {
       identityVersion: record.identityVersion,
       status: record.status,
     };
+  }
+
+  #invalidateClerkSessions(internalUserId: string, exceptSubscriberId?: string): void {
+    const sessions = this.clerkSessions.get(internalUserId);
+    if (!sessions) return;
+    for (const [subscriberId, subscriber] of sessions) {
+      if (subscriberId === exceptSubscriberId) continue;
+      sessions.delete(subscriberId);
+      void subscriber().catch(() => {}).finally(() => subscriber[Symbol.dispose]());
+    }
+    if (sessions.size === 0) this.clerkSessions.delete(internalUserId);
   }
 
   async #initialize(record: IdentityRecord): Promise<IdentityResolution> {

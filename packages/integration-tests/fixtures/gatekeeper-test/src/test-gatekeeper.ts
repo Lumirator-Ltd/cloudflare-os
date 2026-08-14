@@ -20,10 +20,10 @@
 // is one control knob here, `allow`, and the reason string is what carries the distinction to the
 // user. Tests exercise both narratives by choosing reason text.
 
-import { DurableObject, WorkerEntrypoint, type RpcStub } from "cloudflare:workers";
+import { DurableObject, RpcTarget, WorkerEntrypoint, type RpcStub } from "cloudflare:workers";
 import type {
-  AccountDescription, ActionKind, ApprovalQueue, Gatekeeper, GatekeeperConnectCallback,
-  GatekeeperUser, GatekeeperUserVerifier, ResourceDescription, ResourceConfiguratorFrame,
+  AccountDescription, ActionKind, AppUiContext, ApprovalQueue, Gatekeeper, GatekeeperConnectCallback,
+  GatekeeperUiFrame, GatekeeperUser, GatekeeperUserVerifier, ResourceDescription, ResourceConfiguratorFrame,
   SupportedResource, VendorDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
 
@@ -83,6 +83,40 @@ function control(exports: Cloudflare.Exports): DurableObjectStub<TestControl> {
 }
 
 // ---------------------------------------------------------------------------
+// Trusted Clerk-verifier fixture.
+//
+// The Workshop binds this entrypoint only when an integration test explicitly patches its inline
+// config. It is not a Gatekeeper and is never present in production configuration.
+
+export class ClerkTestVerifier extends WorkerEntrypoint<Cloudflare.Env> {
+  async verify(token: string): Promise<{ subject: string; email: string; expiresAt: Date }> {
+    let value: unknown;
+    try {
+      const base64 = token.replaceAll("-", "+").replaceAll("_", "/")
+        .padEnd(Math.ceil(token.length / 4) * 4, "=");
+      value = JSON.parse(atob(base64));
+    } catch {
+      throw new Error("Clerk identity could not be verified.");
+    }
+    if (typeof value !== "object" || value === null) {
+      throw new Error("Clerk identity could not be verified.");
+    }
+    const claims = value as Record<string, unknown>;
+    if (typeof claims.subject !== "string" || !claims.subject.startsWith("user_") ||
+        typeof claims.email !== "string" || !claims.email.includes("@") ||
+        typeof claims.expiresAt !== "number" || !Number.isFinite(claims.expiresAt) ||
+        claims.expiresAt <= Date.now() || claims.active !== true) {
+      throw new Error("Clerk identity could not be verified.");
+    }
+    return {
+      subject: claims.subject,
+      email: claims.email,
+      expiresAt: new Date(claims.expiresAt),
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Vendor
 
 type AccountProps = { label: string };
@@ -135,6 +169,7 @@ export class TestAccount
       uniqueName: this.ctx.props.label,
       avatar: AVATAR,
       singleton: { tsType: "TestThing" },
+      providesUi: { title: "Test Gatekeeper App", icon: AVATAR },
     };
   }
 
@@ -181,8 +216,18 @@ export class TestAccount
 
   async revoke(): Promise<void> {}
 
-  startResourceConfigurator(_resourceUrlPattern: string): Promise<ResourceConfiguratorFrame> {
-    throw new Error("The test gatekeeper has no resource configurator; bind a URL directly.");
+  async startResourceConfigurator(resourceUrlPattern: string): Promise<ResourceConfiguratorFrame> {
+    return {
+      iframeHtml: "<!doctype html><title>Test resource configurator</title>",
+      ui: new TestUi(`configurator:${resourceUrlPattern}`) as unknown as RpcStub<RpcTarget>,
+    };
+  }
+
+  async startAppUi(context: AppUiContext): Promise<GatekeeperUiFrame> {
+    return {
+      iframeHtml: "<!doctype html><title>Test gatekeeper app</title>",
+      ui: new TestUi(`app:${context.isAdmin ? "admin" : "user"}`) as unknown as RpcStub<RpcTarget>,
+    };
   }
 
   reconnect(): Promise<{ url: string }> {
@@ -211,8 +256,27 @@ export class TestVerifier
 // ---------------------------------------------------------------------------
 // Gatekeeper (one per bound resource, running as a facet under the gadget's Overseer)
 
-/** No operations: these tests never open a gadget's session, only verify observers. */
-export type TestSession = Record<string, never>;
+/** Test-only capability returned by UI frames and direct gatekeeper sessions. */
+class TestUi extends RpcTarget {
+  constructor(private label: string) {
+    super();
+  }
+
+  async ping(): Promise<string> {
+    return this.label;
+  }
+}
+
+/** Session API used to prove a retained cross-worker descendant dies with the Workshop socket. */
+export interface TestSession {
+  ping(): Promise<string>;
+}
+
+class TestSessionImpl extends RpcTarget implements TestSession {
+  async ping(): Promise<string> {
+    return "gatekeeper-session";
+  }
+}
 
 export class TestGatekeeper
     extends DurableObject<Cloudflare.Env, BindingProps> implements Gatekeeper<TestSession> {
@@ -246,7 +310,7 @@ export class TestGatekeeper
   }
 
   async startSession(_approvalQueue: RpcStub<ApprovalQueue>): Promise<TestSession> {
-    return {};
+    return new TestSessionImpl();
   }
 
   /**
