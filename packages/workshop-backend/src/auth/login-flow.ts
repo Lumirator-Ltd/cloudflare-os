@@ -137,7 +137,7 @@ export class LoginConnectCallbackImpl
       // email resolution but before the local token is ready. Re-read exact durable authority and
       // revoke the just-created token rather than delivering stale authority.
       const secret = await mintCurrentIdentitySessionToken({
-        mint: () => userStub.createGatekeeperSession(),
+        mint: () => userStub.createGatekeeperSession(identity, this.ctx.props.vendorId),
         revoke: token => userStub.revokeGatekeeperSession(token),
         assertCurrent: () => assertCurrentIdentityAuthority(
           registry, identity.internalUserId, authority),
@@ -148,8 +148,8 @@ export class LoginConnectCallbackImpl
       if (this.ctx.props.vendorId === CLOUDFLARE_VENDOR_ID) {
         await userStub.linkConnectedAccountFromLogin(account, this.ctx.props.vendorId, expiresAt);
       }
-      // Session tokens remain "<doName>:<secret>"; the route prefix is now the opaque stable
-      // internal user ID, never the provider email.
+      // Session tokens remain "<doName>:<secret>"; the opaque record also retains this exact
+      // registry version/email so a post-check delivery race cannot upgrade it on reconnect.
       await pending.deliver(`${identity.internalUserId}:${secret}`);
       loginLogger.info("gatekeeper login finished", {
         event: "gatekeeper.login.finished", outcome: "ok",

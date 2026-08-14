@@ -34,36 +34,51 @@ export async function assertCurrentIdentityAuthority(
   throw new Error(CURRENT_IDENTITY_AUTHORITY_REQUIRED);
 }
 
-/** Polls privileged authority until it fails or the owning API socket is disposed. */
+/** Polls privileged authority with an absolute bound until failure or socket disposal. */
 export function startIdentityAuthorityWatchdog(
     assertCurrent: () => Promise<void>,
     abort: (reason: Error) => void,
 ): { dispose(): void } {
   let active = true;
-  let timer: ReturnType<typeof setTimeout> | undefined;
+  let pollTimer: ReturnType<typeof setTimeout> | undefined;
+  let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+
+  const stop = (reason?: Error) => {
+    if (!active) return;
+    active = false;
+    if (pollTimer !== undefined) clearTimeout(pollTimer);
+    if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+    pollTimer = undefined;
+    deadlineTimer = undefined;
+    if (reason) abort(reason);
+  };
+
+  const schedule = () => {
+    // Register the poll first. When it settles successfully at the bound, its microtask refreshes
+    // the deadline before the second timer runs. If it hangs, the independent deadline still fires.
+    pollTimer = setTimeout(poll, IDENTITY_AUTHORITY_WATCHDOG_INTERVAL_MS);
+    deadlineTimer = setTimeout(
+      () => stop(new Error(CURRENT_IDENTITY_AUTHORITY_REQUIRED)),
+      IDENTITY_AUTHORITY_WATCHDOG_INTERVAL_MS,
+    );
+  };
 
   const poll = async () => {
-    timer = undefined;
+    pollTimer = undefined;
     try {
       await assertCurrent();
     } catch {
-      if (active) {
-        active = false;
-        abort(new Error(CURRENT_IDENTITY_AUTHORITY_REQUIRED));
-      }
+      stop(new Error(CURRENT_IDENTITY_AUTHORITY_REQUIRED));
       return;
     }
-    if (active) timer = setTimeout(poll, IDENTITY_AUTHORITY_WATCHDOG_INTERVAL_MS);
+    if (!active) return;
+    if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+    deadlineTimer = undefined;
+    schedule();
   };
 
-  timer = setTimeout(poll, IDENTITY_AUTHORITY_WATCHDOG_INTERVAL_MS);
-  return {
-    dispose() {
-      active = false;
-      if (timer !== undefined) clearTimeout(timer);
-      timer = undefined;
-    },
-  };
+  schedule();
+  return { dispose: () => stop() };
 }
 
 /** Mints a local token only if its captured registry authority is still exact after minting. */

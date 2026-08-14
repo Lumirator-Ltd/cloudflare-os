@@ -12,6 +12,7 @@ import type { AdminSettings } from "./admin-settings.js";
 import { isReservedBlueprintKey, readBlueprintKvRecord } from "./blueprint-archive.js";
 import { filterEnabledResources, isResourceDisabled, readAdminConfig } from "./admin-config.js";
 import { buildGatekeeperVendorMap } from "./auth/auth-vendors.js";
+import type { IdentityResolution } from "./identity-registry.js";
 
 const logger = createWorkshopLogger("workshop.user");
 
@@ -73,10 +74,19 @@ export type UserChatContext = {
   quickModel?: AiModelConfig;
 }
 
-type LoginSessionRecord = {
-  tokenId: string,  // sha256 hash of token, hex-formatted
-  created: Date,
-}
+type SessionRecordBase = {
+  tokenId: string;  // sha256 hash of token, hex-formatted
+  created: Date;
+};
+
+/** Exact registry authority persisted with a Gatekeeper-authenticated local session. */
+export type RegistrySessionAuthentication =
+  Pick<IdentityResolution, "canonicalVerifiedEmail" | "identityVersion"> & {
+    kind: "gatekeeper";
+    provider: string;
+  };
+
+type LoginSessionRecord = SessionRecordBase & Partial<RegistrySessionAuthentication>;
 
 // Blueprint record stored in the user's `blueprints` collection.
 type BlueprintUserRecord = {
@@ -352,7 +362,8 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     });
   }
 
-  async authenticate(token: string): Promise<void> {
+  /** Authenticates a local token and returns its captured registry authority when present. */
+  async authenticate(token: string): Promise<RegistrySessionAuthentication | null> {
     let tokenBytes: Uint8Array;
     try {
       tokenBytes = Uint8Array.fromBase64(token);
@@ -367,14 +378,24 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     if (!session) {
       throw createAuthError(AUTH_ERROR_CODES.invalidSessionToken);
     }
+    if (session.kind !== "gatekeeper" || session.provider === undefined ||
+        session.canonicalVerifiedEmail === undefined || session.identityVersion === undefined) {
+      return null;
+    }
+    return {
+      kind: session.kind,
+      provider: session.provider,
+      canonicalVerifiedEmail: session.canonicalVerifiedEmail,
+      identityVersion: session.identityVersion,
+    };
   }
 
-  async #newSessionToken(): Promise<string> {
+  async #newSessionToken(authentication?: RegistrySessionAuthentication): Promise<string> {
     let sessionToken = new Uint8Array(32);
     crypto.getRandomValues(sessionToken);
 
     let tokenId = new Uint8Array(await crypto.subtle.digest('SHA-256', sessionToken)).toHex();
-    this.storage.sessions.put({ tokenId, created: new Date() });
+    this.storage.sessions.put({ tokenId, created: new Date(), ...authentication });
 
     return sessionToken.toBase64();
   }
@@ -427,15 +448,23 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return this.#newSessionToken();
   }
 
-  // Mint a retained local Workshop session only after IdentityRegistry initialized this stable user.
-  // Gatekeeper identity and signup policy are resolved at the backend callback boundary before this
-  // method is called; the User DO never treats an email as routing authority.
-  async createGatekeeperSession(): Promise<string> {
+  /**
+   * Mints a retained Gatekeeper session bound to the exact initialized registry authority.
+   *
+   * Identity resolution and signup policy remain at the backend callback boundary; this User DO
+   * only verifies that the supplied resolution is the exact version and email already initialized.
+   */
+  async createGatekeeperSession(
+    identity: Pick<IdentityResolution, "canonicalVerifiedEmail" | "identityVersion">,
+    provider: string,
+  ): Promise<string> {
     if (!this.storage.created.get() ||
-        this.storage.identityInternalUserId.get() !== this.ctx.id.name) {
-      throw new Error("Gatekeeper session identity is not initialized.");
+        this.storage.identityInternalUserId.get() !== this.ctx.id.name ||
+        this.storage.identityAppliedVersion.get() !== identity.identityVersion ||
+        this.storage.verifiedEmail.get() !== identity.canonicalVerifiedEmail) {
+      throw new Error("Gatekeeper session identity is not initialized at this exact version.");
     }
-    return this.#newSessionToken();
+    return this.#newSessionToken({ kind: "gatekeeper", provider, ...identity });
   }
 
   /** Revokes one just-minted Gatekeeper session when registry authority changes during issuance. */

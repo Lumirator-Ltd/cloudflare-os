@@ -818,22 +818,41 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
 
     const internalUserId = split[0];
     const userId = this.users.idFromName(internalUserId);
-    await this.users.get(userId).authenticate(split[1]);
+    const user = this.users.get(userId);
+    const sessionAuthentication = await user.authenticate(split[1]);
+    const rejectStaleSession = async (error: Error): Promise<never> => {
+      try {
+        await user.revokeGatekeeperSession(split[1]);
+      } catch {
+        // Rejection is authoritative even when best-effort stale-token cleanup is unavailable.
+      }
+      throw error;
+    };
 
-    // Registry-routed Gatekeeper sessions carry their stable internal ID as the token prefix. Read
-    // current active authority for this socket without changing the reusable local token's lifetime;
-    // the registry callback below invalidates the socket if that captured authority later changes.
-    const identity = await this.ctx.exports.IdentityRegistry.getByName("")
-      .getIdentity(internalUserId);
+    // A registry-backed local token carries the exact authority captured at issuance. Never upgrade
+    // an old unversioned token to whatever registry version happens to be current; only legacy
+    // password users (which have no registry identity) retain that compatibility until Task 7.
+    const registry = this.ctx.exports.IdentityRegistry.getByName("");
+    const identity = await registry.getIdentity(internalUserId);
     let authority: VerifiedAuthorityContext | undefined;
-    if (identity) {
-      if (identity.status !== "active" || identity.canonicalVerifiedEmail === null) {
-        throw new Error(COLLISION_LOCKED);
+    if (sessionAuthentication) {
+      if (identity?.status === "collisionLocked") {
+        return rejectStaleSession(new Error(COLLISION_LOCKED));
       }
       authority = {
-        canonicalVerifiedEmail: identity.canonicalVerifiedEmail,
-        identityVersion: identity.identityVersion,
+        canonicalVerifiedEmail: sessionAuthentication.canonicalVerifiedEmail,
+        identityVersion: sessionAuthentication.identityVersion,
       };
+      try {
+        await assertCurrentIdentityAuthority(registry, internalUserId, authority);
+      } catch {
+        return rejectStaleSession(new Error(CURRENT_IDENTITY_AUTHORITY_REQUIRED));
+      }
+    } else if (identity) {
+      const error = identity.status === "collisionLocked"
+        ? new Error(COLLISION_LOCKED)
+        : new Error(CURRENT_IDENTITY_AUTHORITY_REQUIRED);
+      return rejectStaleSession(error);
     }
 
     if (authority) await this.#registerIdentitySession(internalUserId, authority);

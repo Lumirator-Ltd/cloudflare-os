@@ -87,15 +87,84 @@ describe("privileged authority watchdog", () => {
     }
   });
 
-  it("stops polling when its owning socket is disposed", async () => {
+  it("aborts at the absolute deadline when an authority check never settles", async () => {
+    vi.useFakeTimers();
+    try {
+      const assertCurrent = vi.fn(() => new Promise<void>(() => {}));
+      const abort = vi.fn();
+      startIdentityAuthorityWatchdog(assertCurrent, abort);
+
+      await vi.advanceTimersByTimeAsync(IDENTITY_AUTHORITY_WATCHDOG_INTERVAL_MS - 1);
+      expect(assertCurrent).not.toHaveBeenCalled();
+      expect(abort).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(assertCurrent).toHaveBeenCalledOnce();
+      expect(abort).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ message: CURRENT_IDENTITY_AUTHORITY_REQUIRED }),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not restart after a timed-out check settles late", async () => {
+    vi.useFakeTimers();
+    try {
+      const pending = Promise.withResolvers<void>();
+      const assertCurrent = vi.fn(() => pending.promise);
+      const abort = vi.fn();
+      startIdentityAuthorityWatchdog(assertCurrent, abort);
+
+      await vi.advanceTimersByTimeAsync(IDENTITY_AUTHORITY_WATCHDOG_INTERVAL_MS);
+      expect(abort).toHaveBeenCalledOnce();
+      pending.resolve();
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(IDENTITY_AUTHORITY_WATCHDOG_INTERVAL_MS * 2);
+
+      expect(assertCurrent).toHaveBeenCalledOnce();
+      expect(abort).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("clears both polling and deadline timers when its owning socket is disposed", async () => {
     vi.useFakeTimers();
     try {
       const assertCurrent = vi.fn().mockResolvedValue(undefined);
-      const watchdog = startIdentityAuthorityWatchdog(assertCurrent, vi.fn());
+      const abort = vi.fn();
+      const watchdog = startIdentityAuthorityWatchdog(assertCurrent, abort);
       watchdog.dispose();
 
       await vi.advanceTimersByTimeAsync(IDENTITY_AUTHORITY_WATCHDOG_INTERVAL_MS * 2);
       expect(assertCurrent).not.toHaveBeenCalled();
+      expect(abort).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("disposal during a pending check prevents its deadline and late resolution restarting it",
+      async () => {
+    vi.useFakeTimers();
+    try {
+      const pending = Promise.withResolvers<void>();
+      let watchdog!: { dispose(): void };
+      const assertCurrent = vi.fn(() => {
+        watchdog.dispose();
+        return pending.promise;
+      });
+      const abort = vi.fn();
+      watchdog = startIdentityAuthorityWatchdog(assertCurrent, abort);
+
+      await vi.advanceTimersByTimeAsync(IDENTITY_AUTHORITY_WATCHDOG_INTERVAL_MS);
+      pending.resolve();
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(IDENTITY_AUTHORITY_WATCHDOG_INTERVAL_MS * 2);
+
+      expect(assertCurrent).toHaveBeenCalledOnce();
+      expect(abort).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }

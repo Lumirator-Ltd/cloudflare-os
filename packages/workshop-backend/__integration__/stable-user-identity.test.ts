@@ -39,6 +39,17 @@ async function connect(): Promise<CapnWebRpcStub<PublicApi>> {
   return newWebSocketRpcSession<PublicApi>(response.webSocket);
 }
 
+async function registryAuthenticationError(
+    publicApi: CapnWebRpcStub<PublicApi>, token: string): Promise<unknown> {
+  try {
+    using api = await publicApi.authenticate(token);
+    await api.whoami();
+    return null;
+  } catch (error) {
+    return error;
+  }
+}
+
 async function authenticatedRegistryUser(prefix: string): Promise<{
   email: string;
   internalUserId: string;
@@ -48,15 +59,10 @@ async function authenticatedRegistryUser(prefix: string): Promise<{
   api: CapnWebRpcStub<AuthenticatedApi>;
 }> {
   const { email, identity, user } = await registryUser(prefix);
-  const tokenBytes = crypto.getRandomValues(new Uint8Array(32));
-  const token = tokenBytes.toBase64();
-  const tokenId = new Uint8Array(await crypto.subtle.digest("SHA-256", tokenBytes)).toHex();
-  await runInDurableObject(user, (instance: UserDurableObject) => {
-    const mutable = instance as unknown as {
-      storage: { sessions: { put(value: { tokenId: string; created: Date }): void } };
-    };
-    mutable.storage.sessions.put({ tokenId, created: new Date() });
-  });
+  const token = await user.createGatekeeperSession({
+    canonicalVerifiedEmail: identity.canonicalVerifiedEmail,
+    identityVersion: identity.identityVersion,
+  }, "test");
   const publicApi = await connect();
   const api = await publicApi.authenticate(`${identity.internalUserId}:${token}`);
   return {
@@ -107,6 +113,86 @@ function blueprintMetadata(author: AiChatAuthorInfo) {
 }
 
 describe("stable human application identities", () => {
+  it("reuses a Gatekeeper token only while its exact registry identity version remains current",
+      async () => {
+    const { identity, user } = await registryUser("version-bound-token");
+    const token = await user.createGatekeeperSession({
+      canonicalVerifiedEmail: identity.canonicalVerifiedEmail,
+      identityVersion: identity.identityVersion,
+    }, "test");
+
+    {
+      using publicApi = await connect();
+      using api = await publicApi.authenticate(`${identity.internalUserId}:${token}`);
+      await expect(api.whoami()).resolves.toMatchObject({ id: identity.internalUserId });
+    }
+
+    const registry = exports.IdentityRegistry.getByName("");
+    const subject = `subject-${crypto.randomUUID()}`;
+    await registry.resolveClerkIdentity(subject, identity.canonicalVerifiedEmail, false);
+    await registry.resolveClerkIdentity(subject, uniqueEmail("version-bound-moved"), false);
+
+    using stalePublicApi = await connect();
+    expect(await registryAuthenticationError(
+      stalePublicApi, `${identity.internalUserId}:${token}`,
+    )).toEqual(expect.objectContaining({ message: expect.stringMatching(/identity authority/i) }));
+  });
+
+  it("rejects an old unversioned registry token instead of assigning current authority", async () => {
+    const { identity, user } = await registryUser("unversioned-token");
+    const tokenBytes = crypto.getRandomValues(new Uint8Array(32));
+    const token = tokenBytes.toBase64();
+    const tokenId = new Uint8Array(await crypto.subtle.digest("SHA-256", tokenBytes)).toHex();
+    await runInDurableObject(user, (instance: UserDurableObject) => {
+      const mutable = instance as unknown as {
+        storage: { sessions: { put(value: { tokenId: string; created: Date }): void } };
+      };
+      mutable.storage.sessions.put({ tokenId, created: new Date() });
+    });
+
+    using publicApi = await connect();
+    expect(await registryAuthenticationError(
+      publicApi, `${identity.internalUserId}:${token}`,
+    )).toEqual(expect.objectContaining({ message: expect.stringMatching(/identity authority/i) }));
+  });
+
+  it("rejects a token whose version moves after its issuance check but before delivery", async () => {
+    const { identity, user } = await registryUser("post-check-delivery");
+    const token = await user.createGatekeeperSession({
+      canonicalVerifiedEmail: identity.canonicalVerifiedEmail,
+      identityVersion: identity.identityVersion,
+    }, "test");
+    const registry = exports.IdentityRegistry.getByName("");
+    expect(await registry.getIdentity(identity.internalUserId)).toMatchObject({
+      canonicalVerifiedEmail: identity.canonicalVerifiedEmail,
+      identityVersion: identity.identityVersion,
+      status: "active",
+    });
+
+    const releaseDelivery = Promise.withResolvers<void>();
+    const delivered = (async () => {
+      await releaseDelivery.promise;
+      return `${identity.internalUserId}:${token}`;
+    })();
+    const subject = `subject-${crypto.randomUUID()}`;
+    await registry.resolveClerkIdentity(subject, identity.canonicalVerifiedEmail, false);
+    await registry.resolveClerkIdentity(subject, uniqueEmail("post-check-moved"), false);
+    releaseDelivery.resolve();
+
+    using publicApi = await connect();
+    expect(await registryAuthenticationError(publicApi, await delivered)).toEqual(
+      expect.objectContaining({ message: expect.stringMatching(/identity authority/i) }),
+    );
+    const tokenBytes = Uint8Array.fromBase64(token);
+    const tokenId = new Uint8Array(await crypto.subtle.digest("SHA-256", tokenBytes)).toHex();
+    await runInDurableObject(user, (instance: UserDurableObject) => {
+      const mutable = instance as unknown as {
+        storage: { sessions: { get(id: string): unknown } };
+      };
+      expect(mutable.storage.sessions.get(tokenId)).toBeUndefined();
+    });
+  });
+
   it("uses the internal ID for profiles, avatars, chat authors, and analytics", async () => {
     const sentAnalytics: Array<Record<string, unknown>> = [];
     const mutableEnv = env as Cloudflare.Env;
