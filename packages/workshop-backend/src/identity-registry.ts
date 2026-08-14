@@ -1,6 +1,9 @@
 import { collection, createTypedStorage } from "@gadgets/typed-storage";
 import { DurableObject, type RpcStub } from "cloudflare:workers";
 import type { UserDurableObject } from "./user.js";
+import { createWorkshopLogger } from "./observability.js";
+
+const logger = createWorkshopLogger("workshop.identity.registry");
 
 /** The authorization state of an internal Workshop identity. */
 export type IdentityStatus = "active" | "collisionLocked";
@@ -97,7 +100,6 @@ export class IdentityRegistry extends DurableObject<Cloudflare.Env> {
     subject: string,
     verifiedEmail: string,
     signupsEnabled: boolean,
-    initiatingSubscriberId?: string,
   ): Promise<IdentityResolution> {
     const email = canonicalizeVerifiedEmail(verifiedEmail);
     const subjectKey = clerkSubjectKey(subject);
@@ -153,9 +155,7 @@ export class IdentityRegistry extends DurableObject<Cloudflare.Env> {
       return { record: created, changed: false };
     });
 
-    if (result.changed) {
-      this.#invalidateClerkSessions(result.record.internalUserId, initiatingSubscriberId);
-    }
+    if (result.changed) this.#invalidateClerkSessions(result.record.internalUserId);
     return await this.#initialize(result.record);
   }
 
@@ -180,6 +180,11 @@ export class IdentityRegistry extends DurableObject<Cloudflare.Env> {
     }
     sessions.get(subscriberId)?.[Symbol.dispose]();
     sessions.set(subscriberId, ownedSubscriber);
+    // @ts-expect-error The runtime supports Cap'n Web lifecycle notifications on this callback stub,
+    // but the native Workers RpcStub declaration does not expose onRpcBroken yet.
+    ownedSubscriber.onRpcBroken(() => {
+      this.#removeClerkSession(internalUserId, subscriberId, ownedSubscriber);
+    });
   }
 
   /** Unregisters one live Clerk session callback; missing registrations are harmless. */
@@ -243,15 +248,39 @@ export class IdentityRegistry extends DurableObject<Cloudflare.Env> {
     };
   }
 
-  #invalidateClerkSessions(internalUserId: string, exceptSubscriberId?: string): void {
+  #invalidateClerkSessions(internalUserId: string): void {
     const sessions = this.clerkSessions.get(internalUserId);
     if (!sessions) return;
     for (const [subscriberId, subscriber] of sessions) {
-      if (subscriberId === exceptSubscriberId) continue;
-      sessions.delete(subscriberId);
-      void subscriber().catch(() => {}).finally(() => subscriber[Symbol.dispose]());
+      void this.#invalidateClerkSession(internalUserId, subscriberId, subscriber);
     }
-    if (sessions.size === 0) this.clerkSessions.delete(internalUserId);
+  }
+
+  async #invalidateClerkSession(
+      internalUserId: string,
+      subscriberId: string,
+      subscriber: RpcStub<ClerkSessionInvalidator>): Promise<void> {
+    try {
+      await subscriber();
+    } catch (error) {
+      logger.warn("failed to invalidate Clerk session callback", {
+        event: "clerk.session.invalidate.failed", failureCount: 1, error,
+      });
+    } finally {
+      this.#removeClerkSession(internalUserId, subscriberId, subscriber);
+    }
+  }
+
+  #removeClerkSession(
+      internalUserId: string,
+      subscriberId: string,
+      expected?: RpcStub<ClerkSessionInvalidator>): void {
+    const sessions = this.clerkSessions.get(internalUserId);
+    const subscriber = sessions?.get(subscriberId);
+    if (!subscriber || (expected && subscriber !== expected)) return;
+    sessions!.delete(subscriberId);
+    if (sessions!.size === 0) this.clerkSessions.delete(internalUserId);
+    subscriber[Symbol.dispose]();
   }
 
   async #initialize(record: IdentityRecord): Promise<IdentityResolution> {

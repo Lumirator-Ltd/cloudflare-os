@@ -1,6 +1,6 @@
 import { abortAllDurableObjects, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { IdentityRegistry } from "../src/identity-registry.js";
 import type { UserDurableObject } from "../src/user.js";
 
@@ -292,8 +292,7 @@ describe("IdentityRegistry", () => {
     });
   });
 
-  it("eagerly invalidates all stale Clerk sessions except the refresh that initiated an email move",
-      async () => {
+  it("eagerly invalidates every Clerk session when an identity email changes", async () => {
     const subject = `clerk-subscribers-${crypto.randomUUID()}`;
     const oldEmail = unique("subscriber-old");
     const newEmail = unique("subscriber-new");
@@ -319,17 +318,90 @@ describe("IdentityRegistry", () => {
       await instance.registerClerkSession(
         initial.internalUserId, initial.identityVersion, "stale", subscriber("stale") as never);
 
-      const moved = await instance.resolveClerkIdentity(
-        subject, newEmail, false, "initiator");
+      const moved = await instance.resolveClerkIdentity(subject, newEmail, false);
       expect(moved.identityVersion).toBe(initial.identityVersion + 1);
       await Promise.resolve();
-      expect(invalidated).toEqual(["stale"]);
-
-      // Re-registering the initiator proves its expected version is current before refresh succeeds.
-      expect(() => instance.registerClerkSession(
-        moved.internalUserId, moved.identityVersion, "initiator", subscriber("initiator-v2") as never))
-        .not.toThrow();
+      expect(invalidated).toEqual(["initiator", "stale"]);
     });
+  });
+
+  it("retains an invalidation callback until its invocation settles", async () => {
+    const subject = `clerk-pending-subscriber-${crypto.randomUUID()}`;
+    const initial = await registry().resolveClerkIdentity(
+      subject, unique("pending-subscriber-old"), true);
+    const release = Promise.withResolvers<void>();
+    let disposed = 0;
+
+    await runInDurableObject(registry(), async (instance: IdentityRegistry) => {
+      const callback = Object.assign(async () => { await release.promise; }, {
+        dup() { return callback; },
+        onRpcBroken() {},
+        [Symbol.dispose]() { disposed++; },
+      });
+      instance.registerClerkSession(
+        initial.internalUserId, initial.identityVersion, "pending", callback as never);
+
+      await instance.resolveClerkIdentity(subject, unique("pending-subscriber-new"), false);
+      instance.unregisterClerkSession(initial.internalUserId, "pending");
+      expect(disposed).toBe(1);
+      release.resolve();
+      await Promise.resolve();
+      expect(disposed).toBe(1);
+    });
+  });
+
+  it("removes and disposes a Clerk callback when its RPC breaks", async () => {
+    const subject = `clerk-broken-subscriber-${crypto.randomUUID()}`;
+    const initial = await registry().resolveClerkIdentity(
+      subject, unique("broken-subscriber-old"), true);
+    let invalidations = 0;
+    let disposed = 0;
+    let broken: (() => void) | undefined;
+
+    await runInDurableObject(registry(), async (instance: IdentityRegistry) => {
+      const callback = Object.assign(async () => { invalidations++; }, {
+        dup() { return callback; },
+        onRpcBroken(listener: () => void) { broken = listener; },
+        [Symbol.dispose]() { disposed++; },
+      });
+      instance.registerClerkSession(
+        initial.internalUserId, initial.identityVersion, "broken", callback as never);
+      expect(broken).toBeTypeOf("function");
+      broken!();
+
+      await instance.resolveClerkIdentity(subject, unique("broken-subscriber-new"), false);
+      await Promise.resolve();
+      expect(invalidations).toBe(0);
+      expect(disposed).toBe(1);
+    });
+  });
+
+  it("cleans up and logs a bounded warning when invalidation RPC fails", async () => {
+    const subject = `clerk-failing-subscriber-${crypto.randomUUID()}`;
+    const initial = await registry().resolveClerkIdentity(
+      subject, unique("failing-subscriber-old"), true);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    let disposed = 0;
+
+    try {
+      await runInDurableObject(registry(), async (instance: IdentityRegistry) => {
+        const callback = Object.assign(async () => { throw new Error("callback failed"); }, {
+          dup() { return callback; },
+          onRpcBroken() {},
+          [Symbol.dispose]() { disposed++; },
+        });
+        instance.registerClerkSession(
+          initial.internalUserId, initial.identityVersion, "failing", callback as never);
+
+        await instance.resolveClerkIdentity(subject, unique("failing-subscriber-new"), false);
+        await vi.waitFor(() => expect(disposed).toBe(1));
+        expect(warn.mock.calls.flat()).toEqual(expect.arrayContaining([
+          expect.objectContaining({ event: "clerk.session.invalidate.failed" }),
+        ]));
+      });
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("does not persist live Clerk subscribers across a registry restart", async () => {

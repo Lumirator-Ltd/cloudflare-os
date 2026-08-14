@@ -73,9 +73,6 @@ type Env = Cloudflare.Env & {
   CF_ACCESS_AUD?: string,  // audience
   CF_ACCESS_ISS?: string,  // team URL, i.e. https://<team>.cloudflareaccess.com
   DEV?: boolean;
-  TEST_ONLY_CLERK_VERIFIER?: {
-    verify(token: string): Promise<{ subject: string; email: string; expiresAt: Date }>;
-  };
   FLAGS?: Flagship;
 }
 
@@ -650,37 +647,34 @@ class LoginAttemptImpl extends RpcTarget implements LoginAttempt {
   }
 }
 
-function verifyClerkSessionToken(token: string, env: Env) {
-  // Integration harnesses can bind a trusted local verifier only under the typed local DEV flag.
-  // Production configurations have neither this binding nor the flag and always use Clerk.
-  if (env.DEV === true && env.TEST_ONLY_CLERK_VERIFIER) {
-    return env.TEST_ONLY_CLERK_VERIFIER.verify(token);
-  }
-  return verifyClerkIdentity(token, env);
-}
-
 @validateRpc()
 class PublicApiImpl extends RpcTarget implements PublicApi {
   users: DurableObjectNamespace<UserDurableObject>;
-  #clerkSessions = new Set<{ dispose(): Promise<void> }>();
+  #clerkSession: "authenticating" | { dispose(): Promise<void> } | undefined;
 
   constructor(private ctx: ExecutionContext, private env: Env,
       private abortSession: (reason: Error) => void,
       private abortSignal: AbortSignal,
+      private verifyClerk: (token: string) => ReturnType<typeof verifyClerkIdentity>,
       private accessPayload?: JWTPayload) {
     super();
     this.users = this.ctx.exports.UserDurableObject;
-    this.abortSignal.addEventListener("abort", () => this.#disposeClerkSessions(), { once: true });
+    this.abortSignal.addEventListener("abort", () => this.#disposeClerkSession(), { once: true });
   }
 
   [Symbol.dispose](): void {
-    this.#disposeClerkSessions();
+    this.#disposeClerkSession();
   }
 
-  #disposeClerkSessions(): void {
-    const sessions = [...this.#clerkSessions];
-    this.#clerkSessions.clear();
-    for (const session of sessions) void session.dispose();
+  #disposeClerkSession(): void {
+    const session = this.#clerkSession;
+    this.#clerkSession = undefined;
+    if (!session || session === "authenticating") return;
+    void session.dispose().catch(error => {
+      logger.warn("failed to dispose Clerk session", {
+        event: "clerk.session.dispose.failed", error,
+      });
+    });
   }
 
   async getServerConfig(): Promise<ServerConfig> {
@@ -730,51 +724,66 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
   }
 
   async authenticateWithClerk(token: string): Promise<ClerkAuthentication> {
-    const verified = await verifyClerkSessionToken(token, this.env);
-    const signupsEnabled = (await readAdminConfig(this.env)).signupsEnabled;
-    const registry = this.ctx.exports.IdentityRegistry.getByName("");
-    const resolved = await registry.resolveClerkIdentity(
-      verified.subject,
-      verified.email,
-      signupsEnabled,
-    );
-    if (verified.expiresAt.getTime() <= Date.now()) {
-      const error = new Error("Clerk session expired.");
-      this.abortSession(error);
+    if (this.#clerkSession !== undefined) {
+      throw new Error("This API socket is already authenticated with Clerk.");
+    }
+    if (this.abortSignal.aborted) throw new Error("This API socket is closed.");
+    this.#clerkSession = "authenticating";
+
+    try {
+      const verified = await this.verifyClerk(token);
+      const signupsEnabled = (await readAdminConfig(this.env)).signupsEnabled;
+      const registry = this.ctx.exports.IdentityRegistry.getByName("");
+      const resolved = await registry.resolveClerkIdentity(
+        verified.subject,
+        verified.email,
+        signupsEnabled,
+      );
+      if (verified.expiresAt.getTime() <= Date.now()) {
+        const error = new Error("Clerk session expired.");
+        this.abortSession(error);
+        throw error;
+      }
+
+      const clerkSession = await createClerkSession({
+        initialIdentity: verified,
+        initialResolution: resolved,
+        signupsEnabled,
+        abortSession: this.abortSession,
+        verify: replacement => this.verifyClerk(replacement),
+        resolve: (subject, email, allowSignups) =>
+          registry.resolveClerkIdentity(subject, email, allowSignups),
+        register: async (subscriberId, identity, invalidate) => {
+          await registry.registerClerkSession(
+            identity.internalUserId,
+            identity.identityVersion,
+            subscriberId,
+            async () => invalidate(),
+          );
+        },
+        unregister: async (subscriberId, internalUserId) => {
+          await registry.unregisterClerkSession(internalUserId, subscriberId);
+        },
+      });
+      if (this.#clerkSession !== "authenticating" || this.abortSignal.aborted) {
+        await clerkSession.dispose();
+        throw new Error("This API socket is closed.");
+      }
+      this.#clerkSession = clerkSession;
+
+      const userId = this.users.idFromName(resolved.internalUserId);
+      return {
+        api: new AuthenticatedApiImpl(this.ctx, this.env, userId, this.abortSession, {
+          canonicalVerifiedEmail: resolved.canonicalVerifiedEmail,
+          identityVersion: resolved.identityVersion,
+        }) as unknown as RpcStub<AuthenticatedApi>,
+        session: clerkSession.control as unknown as ClerkAuthentication["session"],
+        expiresAt: new Date(verified.expiresAt.getTime()),
+      };
+    } catch (error) {
+      if (this.#clerkSession === "authenticating") this.#clerkSession = undefined;
       throw error;
     }
-
-    const clerkSession = await createClerkSession({
-      initialIdentity: verified,
-      initialResolution: resolved,
-      signupsEnabled,
-      abortSession: this.abortSession,
-      verify: replacement => verifyClerkSessionToken(replacement, this.env),
-      resolve: (subject, email, allowSignups, initiatingSubscriberId) =>
-        registry.resolveClerkIdentity(subject, email, allowSignups, initiatingSubscriberId),
-      register: async (subscriberId, identity, invalidate) => {
-        await registry.registerClerkSession(
-          identity.internalUserId,
-          identity.identityVersion,
-          subscriberId,
-          async () => invalidate(),
-        );
-      },
-      unregister: async (subscriberId, internalUserId) => {
-        await registry.unregisterClerkSession(internalUserId, subscriberId);
-      },
-    });
-    this.#clerkSessions.add(clerkSession);
-
-    const userId = this.users.idFromName(resolved.internalUserId);
-    return {
-      api: new AuthenticatedApiImpl(this.ctx, this.env, userId, this.abortSession, {
-        canonicalVerifiedEmail: resolved.canonicalVerifiedEmail,
-        identityVersion: resolved.identityVersion,
-      }) as unknown as RpcStub<AuthenticatedApi>,
-      session: clerkSession.control as unknown as ClerkAuthentication["session"],
-      expiresAt: new Date(verified.expiresAt.getTime()),
-    };
   }
 
   async authenticateFromCfAccess(): Promise<AuthenticatedApi> {
@@ -876,7 +885,11 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
 }
 
 export default {
-  async fetch(req: Request, env: Env, ctx: ExecutionContext) {
+  async fetch(
+      req: Request,
+      env: Env,
+      ctx: ExecutionContext,
+      verifyClerk = (token: string) => verifyClerkIdentity(token, env)) {
     let url = new URL(req.url);
 
     if (url.pathname === SITE_LOGO_PATH) {
@@ -948,7 +961,8 @@ export default {
       };
 
       return await newWorkersRpcResponse(req,
-          new PublicApiImpl(ctx, env, abortSession, abortController.signal, accessPayload),
+          new PublicApiImpl(
+            ctx, env, abortSession, abortController.signal, verifyClerk, accessPayload),
           { abortSignal: abortController.signal });
     }
 

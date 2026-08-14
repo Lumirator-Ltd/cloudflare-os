@@ -2,11 +2,14 @@ import { RpcTarget } from "capnweb";
 import type { ClerkSessionControl } from "@gadgets/workshop-shared/api";
 import type { VerifiedClerkIdentity } from "./clerk-auth.js";
 import type { IdentityResolution } from "./identity-registry.js";
+import { createWorkshopLogger } from "./observability.js";
 
+const logger = createWorkshopLogger("workshop.clerk.session");
 const MAX_TIMEOUT_MILLISECONDS = 0x7fffffff;
 const SESSION_EXPIRED = "Clerk session expired.";
 const SESSION_CLOSED = "Clerk session is closed.";
 const IDENTITY_CHANGED = "Clerk identity changed.";
+const REFRESH_IN_PROGRESS = "Clerk session refresh is already in progress.";
 
 type CreateClerkSessionOptions = {
   initialIdentity: VerifiedClerkIdentity;
@@ -18,7 +21,6 @@ type CreateClerkSessionOptions = {
     subject: string,
     email: string,
     signupsEnabled: boolean,
-    initiatingSubscriberId: string,
   ): Promise<IdentityResolution>;
   register(
     subscriberId: string,
@@ -52,7 +54,9 @@ class ClerkSessionState {
   #currentResolution: IdentityResolution;
   #timeout: ReturnType<typeof setTimeout> | undefined;
   #closed = false;
+  #refreshing = false;
   #unregistered = false;
+  #unregistering: Promise<void> | undefined;
 
   constructor(private options: CreateClerkSessionOptions) {
     this.#currentIdentity = options.initialIdentity;
@@ -77,6 +81,12 @@ class ClerkSessionState {
   }
 
   async refresh(token: string): Promise<Date> {
+    if (this.#refreshing) {
+      const error = new Error(REFRESH_IN_PROGRESS);
+      this.#abort(error);
+      throw error;
+    }
+    this.#refreshing = true;
     try {
       this.#requireOpenBeforeCurrentDeadline();
       const verified = await this.options.verify(token);
@@ -90,7 +100,6 @@ class ClerkSessionState {
         verified.subject,
         verified.email,
         this.options.signupsEnabled,
-        this.#subscriberId,
       );
       this.#requireOpenBeforeCurrentDeadline();
       this.#requireUnexpired(verified.expiresAt);
@@ -113,6 +122,8 @@ class ClerkSessionState {
     } catch (error) {
       this.#abort(error instanceof Error ? error : new Error(SESSION_CLOSED));
       throw error;
+    } finally {
+      this.#refreshing = false;
     }
   }
 
@@ -121,28 +132,27 @@ class ClerkSessionState {
   }
 
   async dispose(): Promise<void> {
-    if (this.#closed) {
-      await this.#unregister();
-      return;
+    if (!this.#closed) {
+      this.#closed = true;
+      if (this.#timeout !== undefined) clearTimeout(this.#timeout);
+      this.#timeout = undefined;
     }
-    this.#closed = true;
-    if (this.#timeout !== undefined) clearTimeout(this.#timeout);
-    this.#timeout = undefined;
-    await this.#unregister();
+    try {
+      await this.#unregister();
+    } catch {
+      // An abort path may already have an unregister in flight. Once it fails, retry exactly once
+      // while this awaited disposal still has an execution context in which to complete the RPC.
+      await this.#unregister();
+    }
   }
 
   #validateReplacement(
       verified: VerifiedClerkIdentity, resolved: IdentityResolution): void {
     if (resolved.status !== "active" ||
-        resolved.internalUserId !== this.#currentResolution.internalUserId) {
-      throw new Error(IDENTITY_CHANGED);
-    }
-    const emailChanged =
-      resolved.canonicalVerifiedEmail !== this.#currentResolution.canonicalVerifiedEmail;
-    if (resolved.canonicalVerifiedEmail !== verified.email.trim().toLowerCase() ||
-        (emailChanged
-          ? resolved.identityVersion <= this.#currentResolution.identityVersion
-          : resolved.identityVersion !== this.#currentResolution.identityVersion)) {
+        resolved.internalUserId !== this.#currentResolution.internalUserId ||
+        resolved.canonicalVerifiedEmail !== this.#currentResolution.canonicalVerifiedEmail ||
+        resolved.identityVersion !== this.#currentResolution.identityVersion ||
+        resolved.canonicalVerifiedEmail !== verified.email.trim().toLowerCase()) {
       throw new Error(IDENTITY_CHANGED);
     }
   }
@@ -182,17 +192,27 @@ class ClerkSessionState {
     this.#closed = true;
     if (this.#timeout !== undefined) clearTimeout(this.#timeout);
     this.#timeout = undefined;
-    void this.#unregister().catch(() => {});
+    void this.#unregister().catch(error => {
+      logger.warn("failed to unregister aborted Clerk session", {
+        event: "clerk.session.unregister.failed", error,
+      });
+    });
     this.options.abortSession(reason);
   }
 
   async #unregister(): Promise<void> {
     if (this.#unregistered) return;
-    this.#unregistered = true;
-    await this.options.unregister(
+    if (this.#unregistering) return this.#unregistering;
+    const unregistering = this.options.unregister(
       this.#subscriberId,
       this.#currentResolution.internalUserId,
-    );
+    ).then(() => {
+      this.#unregistered = true;
+    }).finally(() => {
+      if (this.#unregistering === unregistering) this.#unregistering = undefined;
+    });
+    this.#unregistering = unregistering;
+    return unregistering;
   }
 }
 

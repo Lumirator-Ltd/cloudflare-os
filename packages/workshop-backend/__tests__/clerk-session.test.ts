@@ -34,8 +34,8 @@ type SetupOptions = {
     subject: string,
     email: string,
     signupsEnabled: boolean,
-    initiatingSubscriberId: string,
   ) => Promise<IdentityResolution>;
+  unregister?: (subscriberId: string, internalUserId: string) => Promise<void>;
 };
 
 async function setup(options: SetupOptions = {}) {
@@ -43,7 +43,7 @@ async function setup(options: SetupOptions = {}) {
   vi.useFakeTimers();
   vi.setSystemTime(now);
   const abortSession = vi.fn();
-  const unregister = vi.fn(async () => {});
+  const unregister = vi.fn(options.unregister ?? (async () => {}));
   const registrations: Array<{
     subscriberId: string;
     identity: IdentityResolution;
@@ -118,8 +118,7 @@ describe("Clerk RPC session deadlines", () => {
     expect(abortSession).toHaveBeenCalledOnce();
   });
 
-  it("accepts an email move atomically and re-registers the initiating subscriber at the new version",
-      async () => {
+  it("rejects a registry move after a lost broadcast and aborts the initiating session", async () => {
     const now = Date.UTC(2026, 0, 1);
     const moved = resolution({
       canonicalVerifiedEmail: "alice+moved@example.com",
@@ -132,16 +131,33 @@ describe("Clerk RPC session deadlines", () => {
       resolve,
     });
 
-    await expect(result.control.refresh("moved-email-token"))
-      .resolves.toEqual(new Date(now + 120_000));
-    expect(resolve).toHaveBeenCalledWith(
-      SUBJECT, moved.canonicalVerifiedEmail, true, registrations[0].subscriberId);
-    expect(registrations).toHaveLength(2);
-    expect(registrations[1]).toMatchObject({
-      subscriberId: registrations[0].subscriberId,
-      identity: moved,
-    });
-    expect(abortSession).not.toHaveBeenCalled();
+    // This models the causal split allowed by the platform: a registry restart loses the ephemeral
+    // callback, so descendants remain usable under the accepted v1 deadline until refresh observes
+    // the durable v2 record. The separate real capability-graph test proves hard expiry breaks them.
+    await expect(result.control.refresh("moved-email-token")).rejects.toThrow("identity changed");
+    expect(resolve).toHaveBeenCalledWith(SUBJECT, moved.canonicalVerifiedEmail, true);
+    expect(registrations).toHaveLength(1);
+    expect(abortSession).toHaveBeenCalledOnce();
+  });
+
+  it("fails closed when a second refresh finishes before an in-flight refresh", async () => {
+    const now = Date.UTC(2026, 0, 1);
+    const firstVerification = Promise.withResolvers<VerifiedClerkIdentity>();
+    const verify = vi.fn(async (token: string) => token === "first"
+      ? await firstVerification.promise
+      : identity(now + 20_000));
+    const { abortSession, result } = await setup({ now, verify });
+
+    const first = result.control.refresh("first");
+    const second = result.control.refresh("second");
+    await expect(second).rejects.toThrow(/refresh.*progress/i);
+    expect(verify).toHaveBeenCalledOnce();
+    expect(abortSession).toHaveBeenCalledOnce();
+
+    firstVerification.resolve(identity(now + 10_000));
+    await expect(first).rejects.toThrow(/closed/i);
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(abortSession).toHaveBeenCalledOnce();
   });
 
   it.each([
@@ -212,6 +228,26 @@ describe("Clerk RPC session deadlines", () => {
     expect(unregister).toHaveBeenCalledWith(registrations[0].subscriberId, USER_ID);
     await vi.runAllTimersAsync();
     expect(abortSession).not.toHaveBeenCalled();
+  });
+
+  it("logs and retries registry unregister after an abort-time RPC failure", async () => {
+    const unregister = vi.fn()
+      .mockRejectedValueOnce(new Error("registry unavailable"))
+      .mockResolvedValueOnce(undefined);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    try {
+      const { result } = await setup({ unregister });
+      await result.control.logout().catch(() => {});
+      await vi.waitFor(() => expect(unregister).toHaveBeenCalledOnce());
+      await expect(result.dispose()).resolves.toBeUndefined();
+      expect(unregister).toHaveBeenCalledTimes(2);
+      expect(warn.mock.calls.flat()).toEqual(expect.arrayContaining([
+        expect.objectContaining({ event: "clerk.session.unregister.failed" }),
+      ]));
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("aborts eagerly when the registry invalidates the live identity", async () => {
