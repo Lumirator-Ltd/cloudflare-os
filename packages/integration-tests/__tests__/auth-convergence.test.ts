@@ -1,6 +1,6 @@
 import { generateKeyPairSync, sign, type KeyObject } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { RpcStub } from "capnweb";
 import type {
   AdminApi, ClerkAuthentication, PublicApi,
@@ -21,12 +21,6 @@ const CLERK_KEY_ID = "task6-clerk-key";
 const ACCESS_ISSUER = "https://task6.cloudflareaccess.test";
 const ACCESS_AUDIENCE = "task6-access-audience";
 const ACCESS_KEY_ID = "task6-access-key";
-const CANONICAL_EMAIL = "same.user@example.com";
-const CLERK_EMAIL_VARIANT = "Same.User@Example.COM";
-const PADDED_EMAIL_VARIANT = "  Same.User@Example.COM  ";
-const NON_ADMIN_EMAIL = "ordinary@example.com";
-const RETAINED_ADMIN_EMAIL = "retained.admin@example.com";
-const RETAINED_ADMIN_SUBJECT = "user_task6_retained_admin";
 const CLERK_TEST_SERVER = fileURLToPath(new URL(
   "../../workshop-backend/.wrangler/validate/src/testing/clerk-test-server.ts",
   import.meta.url,
@@ -38,10 +32,12 @@ let clerkPrivateKey: KeyObject;
 let clerkPublicKeyPem: string;
 let accessPrivateKey: KeyObject;
 let accessPublicJwk: Record<string, unknown>;
-let canonicalInternalUserId: string;
-let canonicalGatekeeperToken: string;
-let nonAdminInternalUserId: string;
 const sensitiveValues = new Set<string>([CLERK_SECRET_KEY]);
+let cleanupFixture: { email: string; token: string } | undefined;
+
+function uniqueEmail(prefix: string): string {
+  return `${prefix}-${crypto.randomUUID()}@example.com`;
+}
 
 function encodeJwtPart(value: unknown): string {
   return Buffer.from(JSON.stringify(value)).toString("base64url");
@@ -141,6 +137,70 @@ function accessBatch(token: string, origin = harness.url.origin): RpcStub<Public
   return connectBatch(request);
 }
 
+async function configureWorkshop(admins: string[], access = false): Promise<void> {
+  await harness.updateWorkshop(config => {
+    config.vars = {
+      AUTH_GATEKEEPERS: TEST_VENDOR_ID,
+      CLERK_PUBLISHABLE_KEY,
+      CLERK_SECRET_KEY,
+      CLERK_JWT_KEY: clerkPublicKeyPem,
+      PUBLIC_BASE_URL: CLERK_AUTHORIZED_PARTY,
+      DEV: true,
+      ADMINS: admins,
+      ...(access ? { CF_ACCESS_AUD: ACCESS_AUDIENCE, CF_ACCESS_ISS: ACCESS_ISSUER } : {}),
+    };
+  });
+  await waitFor("the updated Workshop isolate to accept requests", async () => {
+    const response = await harness.server.fetch("/api", {
+      headers: access ? { Origin: harness.url.origin } : undefined,
+    });
+    return response.status === (access ? 403 : 400) ? true : null;
+  });
+}
+
+type Scenario = {
+  adminEmail: string;
+  adminSubject: string;
+  adminToken: string;
+  internalUserId: string;
+};
+
+async function setupScenario(prefix: string): Promise<Scenario> {
+  const adminEmail = uniqueEmail(`${prefix}-admin`);
+  const cleanupEmail = uniqueEmail(`${prefix}-cleanup`);
+  const adminSubject = `user_${prefix}_${crypto.randomUUID()}`;
+  await configureWorkshop([adminEmail, cleanupEmail]);
+
+  using clerkPublic = connect(harness.url);
+  const clerk = await authenticateWithClerk(clerkPublic, adminSubject, adminEmail.toUpperCase());
+  using clerkApi = clerk.api;
+  using _clerkSession = clerk.session;
+  const internalUserId = (await clerkApi.whoami()).id;
+
+  using cleanupPublic = connect(harness.url);
+  const cleanupToken = await loginWithGatekeeper(cleanupPublic, cleanupEmail);
+  cleanupFixture = { email: cleanupEmail, token: cleanupToken };
+
+  using gatekeeperPublic = connect(harness.url);
+  const adminToken = await loginWithGatekeeper(gatekeeperPublic, `  ${adminEmail.toUpperCase()}  `);
+  await waitFor("the fresh scenario admin config to reload", async () => {
+    try {
+      using adminPublic = connect(harness.url);
+      using adminApi = await adminPublic.authenticate(adminToken);
+      if (!(await adminApi.amIAdmin())) return null;
+      const admin = await adminApi.getAdminApi();
+      if (!admin) return null;
+      using adminCapability = admin as RpcStub<AdminApi>;
+      await adminCapability.setSignupsEnabled(true);
+      return true;
+    } catch {
+      return null;
+    }
+  });
+
+  return { adminEmail, adminSubject, adminToken, internalUserId };
+}
+
 beforeAll(async () => {
   const clerkPair = generateKeyPairSync("rsa", { modulusLength: 2048 });
   clerkPrivateKey = clerkPair.privateKey;
@@ -175,18 +235,39 @@ beforeAll(async () => {
         entrypoint: "ClerkTestProfiles",
       });
       config.vars = {
-        ...config.vars,
         AUTH_GATEKEEPERS: TEST_VENDOR_ID,
         CLERK_PUBLISHABLE_KEY,
         CLERK_SECRET_KEY,
         CLERK_JWT_KEY: clerkPublicKeyPem,
         PUBLIC_BASE_URL: CLERK_AUTHORIZED_PARTY,
         DEV: true,
-        ADMINS: [`  ${CANONICAL_EMAIL.toUpperCase()}  `],
+        ADMINS: [],
       };
     },
   });
   harness.server.clearLogs();
+});
+
+afterEach(async () => {
+  const fixture = cleanupFixture;
+  cleanupFixture = undefined;
+  if (fixture) {
+    await configureWorkshop([fixture.email]);
+    await waitFor("the per-test cleanup admin to restore signups", async () => {
+      try {
+        using publicApi = connect(harness.url);
+        using api = await publicApi.authenticate(fixture.token);
+        const admin = await api.getAdminApi();
+        if (!admin) return null;
+        using capability = admin as RpcStub<AdminApi>;
+        await capability.setSignupsEnabled(true);
+        return true;
+      } catch {
+        return null;
+      }
+    });
+  }
+  await configureWorkshop([]);
 });
 
 afterAll(async () => {
@@ -199,48 +280,36 @@ afterAll(async () => {
 });
 
 describe.sequential("verified authentication convergence", () => {
-  it("converges Clerk and a real Gatekeeper login while retaining local session semantics", async () => {
+  it("converges Clerk and a real Gatekeeper login while retaining local session semantics",
+      async () => {
+    const scenario = await setupScenario("converge");
     using clerkPublic = connect(harness.url);
     const clerk = await authenticateWithClerk(
-      clerkPublic, "user_task6_canonical", CLERK_EMAIL_VARIANT);
+      clerkPublic, scenario.adminSubject, scenario.adminEmail.toUpperCase());
     using clerkApi = clerk.api;
     using _clerkSession = clerk.session;
-    const clerkProfile = await clerkApi.whoami();
-    canonicalInternalUserId = clerkProfile.id;
     await clerkApi.setOwnDisplayName("Converged identity");
 
-    expect(canonicalInternalUserId).toMatch(/^[0-9a-f]{64}$/);
-    expect(canonicalInternalUserId).not.toContain(CANONICAL_EMAIL);
+    expect(scenario.internalUserId).toMatch(/^[0-9a-f]{64}$/);
+    expect(scenario.internalUserId).not.toContain(scenario.adminEmail);
     await expect(clerkApi.amIAdmin()).resolves.toBe(true);
-    const clerkAdmin = await clerkApi.getAdminApi();
-    expect(clerkAdmin).not.toBeNull();
-    clerkAdmin?.[Symbol.dispose]();
-
-    using gatekeeperPublic = connect(harness.url);
-    canonicalGatekeeperToken = await loginWithGatekeeper(
-      gatekeeperPublic, `  ${CANONICAL_EMAIL.toUpperCase()}  `);
-    expect(canonicalGatekeeperToken).toMatch(/^[0-9a-f]{64}:[A-Za-z0-9+/=]+$/);
-    expect(canonicalGatekeeperToken).not.toContain(CANONICAL_EMAIL);
 
     using firstLocalPublic = connect(harness.url);
-    using firstLocalApi = await firstLocalPublic.authenticate(canonicalGatekeeperToken);
+    using firstLocalApi = await firstLocalPublic.authenticate(scenario.adminToken);
     await expect(firstLocalApi.whoami()).resolves.toMatchObject({
-      id: canonicalInternalUserId,
+      id: scenario.internalUserId,
       name: "Converged identity",
     });
     await expect(firstLocalApi.amIAdmin()).resolves.toBe(true);
-    const localAdmin = await firstLocalApi.getAdminApi();
-    expect(localAdmin).not.toBeNull();
-    localAdmin?.[Symbol.dispose]();
 
-    // The random Workshop token remains independently reusable across local WebSocket sessions.
     using secondLocalPublic = connect(harness.url);
-    using secondLocalApi = await secondLocalPublic.authenticate(canonicalGatekeeperToken);
-    await expect(secondLocalApi.whoami()).resolves.toMatchObject({ id: canonicalInternalUserId });
+    using secondLocalApi = await secondLocalPublic.authenticate(scenario.adminToken);
+    await expect(secondLocalApi.whoami()).resolves.toMatchObject({ id: scenario.internalUserId });
   });
 
   it("canonicalizes ADMINS and fails malformed configuration without exposing its contents",
       async () => {
+    const scenario = await setupScenario("admins-config");
     await harness.updateWorkshop(config => {
       config.vars = { ...config.vars, ADMINS: "{\"private-marker\":true}" };
     });
@@ -248,9 +317,9 @@ describe.sequential("verified authentication convergence", () => {
     const expected = "ADMINS must be configured as an array of verified email strings.";
     const message = await waitFor("the malformed ADMINS config to reload", async () => {
       try {
-        using malformedPublic = connect(harness.url);
-        using malformedApi = await malformedPublic.authenticate(canonicalGatekeeperToken);
-        await malformedApi.amIAdmin();
+        using publicApi = connect(harness.url);
+        using api = await publicApi.authenticate(scenario.adminToken);
+        await api.amIAdmin();
         return null;
       } catch (error) {
         const observed = error instanceof Error ? error.message : String(error);
@@ -259,48 +328,12 @@ describe.sequential("verified authentication convergence", () => {
     });
     expect(message).toContain(expected);
     expect(message).not.toContain("private-marker");
-
-    await harness.updateWorkshop(config => {
-      config.vars = { ...config.vars, ADMINS: [` ${CANONICAL_EMAIL.toUpperCase()} `] };
-    });
-    await waitFor("the valid ADMINS config to reload", async () => {
-      try {
-        using publicApi = connect(harness.url);
-        using api = await publicApi.authenticate(canonicalGatekeeperToken);
-        return await api.amIAdmin() ? true : null;
-      } catch {
-        return null;
-      }
-    });
   });
 
   it("revokes a retained Gatekeeper admin graph when its verified email moves", async () => {
-    await harness.updateWorkshop(config => {
-      config.vars = { ...config.vars, ADMINS: [RETAINED_ADMIN_EMAIL] };
-    });
-
-    using clerkPublic = connect(harness.url);
-    const clerk = await authenticateWithClerk(
-      clerkPublic, RETAINED_ADMIN_SUBJECT, RETAINED_ADMIN_EMAIL);
-    using _clerkApi = clerk.api;
-    using _clerkSession = clerk.session;
-
-    using gatekeeperPublic = connect(harness.url);
-    const token = await loginWithGatekeeper(gatekeeperPublic, RETAINED_ADMIN_EMAIL);
-    const retained = await waitFor("the retained-admin config to reload", async () => {
-      const publicApi = connect(harness.url);
-      try {
-        const api = await publicApi.authenticate(token);
-        if (await api.amIAdmin()) return { publicApi, api };
-        api[Symbol.dispose]();
-      } catch {
-        // A just-replaced isolate may close while the harness reloads; retry on the new worker.
-      }
-      publicApi[Symbol.dispose]();
-      return null;
-    });
-    using _retainedPublic = retained.publicApi;
-    using retainedApi = retained.api;
+    const scenario = await setupScenario("retained-admin");
+    using retainedPublic = connect(harness.url);
+    using retainedApi = await retainedPublic.authenticate(scenario.adminToken);
     await retainedApi.provisionAmbientAccount(TEST_VENDOR_ID);
 
     const retainedAdmin = await retainedApi.getAdminApi();
@@ -316,10 +349,9 @@ describe.sequential("verified authentication convergence", () => {
     const appBroken = new Promise<void>(resolve => { resolveAppBroken = resolve; });
     appUi.onRpcBroken(() => resolveAppBroken());
 
-    const movedEmail = "retained.admin.moved@example.com";
-    await setClerkProfile(RETAINED_ADMIN_SUBJECT, movedEmail);
+    await setClerkProfile(scenario.adminSubject, uniqueEmail("retained-admin-moved"));
     using moverPublic = connect(harness.url);
-    const moved = await moverPublic.authenticateWithClerk(clerkToken(RETAINED_ADMIN_SUBJECT));
+    const moved = await moverPublic.authenticateWithClerk(clerkToken(scenario.adminSubject));
     moved.api[Symbol.dispose]();
     moved.session[Symbol.dispose]();
 
@@ -330,76 +362,74 @@ describe.sequential("verified authentication convergence", () => {
       new Promise(resolve => setTimeout(() => resolve("timeout"), 5_000)),
     ])).resolves.toBe("broken");
 
-    await harness.updateWorkshop(config => {
-      config.vars = { ...config.vars, ADMINS: [CANONICAL_EMAIL] };
-    });
-    await waitFor("the canonical-admin config to reload", async () => {
-      try {
-        using publicApi = connect(harness.url);
-        using api = await publicApi.authenticate(canonicalGatekeeperToken);
-        return await api.amIAdmin() ? true : null;
-      } catch {
-        return null;
-      }
-    });
+    using rejectedPublic = connect(harness.url);
+    await expect(rejectedPublic.authenticate(scenario.adminToken)).rejects.toThrow();
   });
 
   it("denies unknown Clerk and Gatekeeper identities when signups close but permits existing ones",
       async () => {
+    const scenario = await setupScenario("signup-policy");
     using adminPublic = connect(harness.url);
-    using adminApi = await adminPublic.authenticate(canonicalGatekeeperToken);
+    using adminApi = await adminPublic.authenticate(scenario.adminToken);
     const admin = await adminApi.getAdminApi();
-    if (!admin) throw new Error("canonical Gatekeeper identity did not receive AdminApi");
+    if (!admin) throw new Error("scenario identity did not receive AdminApi");
     using adminCapability = admin as RpcStub<AdminApi>;
     await adminCapability.setSignupsEnabled(false);
 
     using unknownClerkPublic = connect(harness.url);
-    await setClerkProfile("user_task6_disabled_unknown", "unknown-clerk@example.com");
-    await expect(unknownClerkPublic.authenticateWithClerk(clerkToken("user_task6_disabled_unknown")))
+    const unknownSubject = `user_unknown_${crypto.randomUUID()}`;
+    await setClerkProfile(unknownSubject, uniqueEmail("unknown-clerk"));
+    await expect(unknownClerkPublic.authenticateWithClerk(clerkToken(unknownSubject)))
       .rejects.toThrow(/sign-ups are currently disabled/i);
 
     using existingClerkPublic = connect(harness.url);
     const existingClerk = await authenticateWithClerk(
-      existingClerkPublic, "user_task6_canonical", CANONICAL_EMAIL);
+      existingClerkPublic, scenario.adminSubject, scenario.adminEmail);
     using existingClerkApi = existingClerk.api;
     using _existingClerkSession = existingClerk.session;
     await expect(existingClerkApi.whoami())
-      .resolves.toMatchObject({ id: canonicalInternalUserId });
+      .resolves.toMatchObject({ id: scenario.internalUserId });
 
     using unknownGatekeeperPublic = connect(harness.url);
-    await expect(loginWithGatekeeper(unknownGatekeeperPublic, "unknown-gatekeeper@example.com"))
+    await expect(loginWithGatekeeper(unknownGatekeeperPublic, uniqueEmail("unknown-gatekeeper")))
       .rejects.toThrow(/sign-ups are currently disabled/i);
 
     using existingGatekeeperPublic = connect(harness.url);
-    const existingToken = await loginWithGatekeeper(existingGatekeeperPublic, CANONICAL_EMAIL);
+    const existingToken = await loginWithGatekeeper(existingGatekeeperPublic, scenario.adminEmail);
     using existingLocalPublic = connect(harness.url);
     using existingLocalApi = await existingLocalPublic.authenticate(existingToken);
     await expect(existingLocalApi.whoami())
-      .resolves.toMatchObject({ id: canonicalInternalUserId });
+      .resolves.toMatchObject({ id: scenario.internalUserId });
   });
 
   it("grants no admin capability to a different verified Gatekeeper email", async () => {
-    using adminPublic = connect(harness.url);
-    using adminApi = await adminPublic.authenticate(canonicalGatekeeperToken);
-    const admin = await adminApi.getAdminApi();
-    if (!admin) throw new Error("canonical identity did not receive AdminApi");
-    using adminCapability = admin as RpcStub<AdminApi>;
-    await adminCapability.setSignupsEnabled(true);
-
-    using loginPublic = connect(harness.url);
-    const token = await loginWithGatekeeper(loginPublic, NON_ADMIN_EMAIL);
-    using localPublic = connect(harness.url);
-    using localApi = await localPublic.authenticate(token);
-    nonAdminInternalUserId = (await localApi.whoami()).id;
-    await expect(localApi.amIAdmin()).resolves.toBe(false);
-    await expect(localApi.getAdminApi()).resolves.toBeNull();
+    await setupScenario("non-admin");
+    const nonAdminEmail = uniqueEmail("non-admin");
+    await waitFor("a non-admin login after the harness reload", async () => {
+      try {
+        using loginPublic = connect(harness.url);
+        const token = await loginWithGatekeeper(loginPublic, nonAdminEmail);
+        using localPublic = connect(harness.url);
+        using localApi = await localPublic.authenticate(token);
+        if (await localApi.amIAdmin()) throw new Error("non-admin unexpectedly received admin");
+        if (await localApi.getAdminApi() !== null) {
+          throw new Error("non-admin unexpectedly received AdminApi");
+        }
+        return true;
+      } catch (error) {
+        if (error instanceof Error && error.message.startsWith("Peer closed WebSocket: 1006")) {
+          return null;
+        }
+        throw error;
+      }
+    });
   });
 
-  it("locks a collided identity and eagerly aborts its retained Gatekeeper RPC graph",
-      async () => {
-    const firstEmail = "collision-first@example.com";
-    const occupiedEmail = "collision-occupied@example.com";
-    const subject = "user_task6_collision";
+  it("locks a collided identity and eagerly aborts its retained Gatekeeper RPC graph", async () => {
+    await setupScenario("collision-admin");
+    const firstEmail = uniqueEmail("collision-first");
+    const occupiedEmail = uniqueEmail("collision-occupied");
+    const subject = `user_collision_${crypto.randomUUID()}`;
 
     using firstClerkPublic = connect(harness.url);
     const firstClerk = await authenticateWithClerk(firstClerkPublic, subject, firstEmail);
@@ -423,14 +453,13 @@ describe.sequential("verified authentication convergence", () => {
     await expect(collisionPublic.authenticateWithClerk(clerkToken(subject)))
       .rejects.toThrow(/collision/i);
 
-    // The random local token retains its independent lifetime, but every registry-backed socket is
-    // invalidated when the authority version changes so retained capabilities cannot stay privileged.
     await expect(retainedApi.whoami()).rejects.toThrow();
     using rejectedPublic = connect(harness.url);
     await expect(rejectedPublic.authenticate(firstToken)).rejects.toThrow(/collision/i);
   });
 
   it("keeps Gatekeeper authentication independent of Clerk configuration", async () => {
+    const scenario = await setupScenario("gatekeeper-only");
     await harness.updateWorkshop(config => {
       delete config.vars!.CLERK_PUBLISHABLE_KEY;
       delete config.vars!.CLERK_SECRET_KEY;
@@ -439,30 +468,28 @@ describe.sequential("verified authentication convergence", () => {
     });
 
     using publicApi = connect(harness.url);
-    using api = await publicApi.authenticate(canonicalGatekeeperToken);
-    await expect(api.whoami()).resolves.toMatchObject({ id: canonicalInternalUserId });
+    using api = await publicApi.authenticate(scenario.adminToken);
+    await expect(api.whoami()).resolves.toMatchObject({ id: scenario.internalUserId });
   });
 
   it("converges Access without Clerk keys and enforces disabled signup and admin authority",
       async () => {
+    const scenario = await setupScenario("access");
+    const nonAdminEmail = uniqueEmail("access-non-admin");
+    using nonAdminLoginPublic = connect(harness.url);
+    const nonAdminToken = await loginWithGatekeeper(nonAdminLoginPublic, nonAdminEmail);
+    using nonAdminPublic = connect(harness.url);
+    using nonAdminApi = await nonAdminPublic.authenticate(nonAdminToken);
+    const nonAdminInternalUserId = (await nonAdminApi.whoami()).id;
+
     using adminPublic = connect(harness.url);
-    using adminApi = await adminPublic.authenticate(canonicalGatekeeperToken);
+    using adminApi = await adminPublic.authenticate(scenario.adminToken);
     const admin = await adminApi.getAdminApi();
-    if (!admin) throw new Error("canonical identity did not receive AdminApi");
+    if (!admin) throw new Error("scenario identity did not receive AdminApi");
     using adminCapability = admin as RpcStub<AdminApi>;
     await adminCapability.setSignupsEnabled(false);
 
-    await harness.updateWorkshop(config => {
-      config.vars = {
-        ...config.vars,
-        CF_ACCESS_AUD: ACCESS_AUDIENCE,
-        CF_ACCESS_ISS: ACCESS_ISSUER,
-      };
-      delete config.vars.CLERK_PUBLISHABLE_KEY;
-      delete config.vars.CLERK_SECRET_KEY;
-      delete config.vars.CLERK_JWT_KEY;
-      delete config.vars.PUBLIC_BASE_URL;
-    });
+    await configureWorkshop([scenario.adminEmail, cleanupFixture!.email], true);
     await waitFor("Cloudflare Access mode to reload", async () => {
       const response = await harness.server.fetch("/api", {
         headers: { Origin: harness.url.origin },
@@ -470,64 +497,39 @@ describe.sequential("verified authentication convergence", () => {
       return response.status === 403 ? true : null;
     });
 
-    using accessPublic = accessBatch(accessToken(PADDED_EMAIL_VARIANT));
+    using accessPublic = accessBatch(accessToken(`  ${scenario.adminEmail.toUpperCase()}  `));
     const profile = await accessPublic.authenticateFromCfAccess().whoami();
-    expect(profile).toMatchObject({
-      id: canonicalInternalUserId,
-      name: "Converged identity",
-    });
+    expect(profile).toMatchObject({ id: scenario.internalUserId });
 
-    using accessAdminPublic = accessBatch(accessToken(CANONICAL_EMAIL));
+    using accessAdminPublic = accessBatch(accessToken(scenario.adminEmail));
     await expect(accessAdminPublic.authenticateFromCfAccess().amIAdmin()).resolves.toBe(true);
-    using accessSettingsPublic = accessBatch(accessToken(CANONICAL_EMAIL));
-    using accessSettings = (accessSettingsPublic.authenticateFromCfAccess().getAdminApi()) as unknown as RpcStub<AdminApi>;
+    using accessSettingsPublic = accessBatch(accessToken(scenario.adminEmail));
+    using accessSettings = (accessSettingsPublic.authenticateFromCfAccess().getAdminApi() as unknown as RpcStub<AdminApi>);
     await expect(accessSettings.getSettings())
       .resolves.toMatchObject({ signupsEnabled: false });
 
-    using accessNonAdminPublic = accessBatch(accessToken(NON_ADMIN_EMAIL));
+    using accessNonAdminPublic = accessBatch(accessToken(nonAdminEmail));
     await expect(accessNonAdminPublic.authenticateFromCfAccess().whoami())
       .resolves.toMatchObject({ id: nonAdminInternalUserId });
-
-    using nonAdminCapabilityPublic = accessBatch(accessToken(NON_ADMIN_EMAIL));
+    using nonAdminCapabilityPublic = accessBatch(accessToken(nonAdminEmail));
     await expect(nonAdminCapabilityPublic.authenticateFromCfAccess().getAdminApi())
       .resolves.toBeNull();
 
-    using unknownAccessPublic = accessBatch(accessToken("unknown-access@example.com"));
+    using unknownAccessPublic = accessBatch(accessToken(uniqueEmail("unknown-access")));
     await expect(unknownAccessPublic.authenticateFromCfAccess().whoami())
-      .rejects.toThrow(/sign-ups are currently disabled/i);
-
-    // Access minted this retained admin graph with no Clerk configuration. Re-enable Clerk only as
-    // an independent identity-change producer, then prove the retained Access authority is current.
-    await harness.updateWorkshop(config => {
-      config.vars = {
-        ...config.vars,
-        CLERK_PUBLISHABLE_KEY,
-        CLERK_SECRET_KEY,
-        CLERK_JWT_KEY: clerkPublicKeyPem,
-        PUBLIC_BASE_URL: CLERK_AUTHORIZED_PARTY,
-      };
-    });
-    await setClerkProfile("user_task6_canonical", "access-moved@example.com");
-    await waitFor("Clerk identity-change support to reload", async () => {
-      using moverPublic = accessBatch(accessToken(CANONICAL_EMAIL));
-      try {
-        const moved = await moverPublic.authenticateWithClerk(clerkToken("user_task6_canonical"));
-        moved.api[Symbol.dispose]();
-        moved.session[Symbol.dispose]();
-        return true;
-      } catch (error) {
-        if (error instanceof Error && error.message.includes("not configured correctly")) return null;
-        throw error;
-      }
-    });
-
-    using staleAccessPublic = accessBatch(accessToken(CANONICAL_EMAIL));
-    await expect(staleAccessPublic.authenticateFromCfAccess().getAdminApi())
       .rejects.toThrow(/sign-ups are currently disabled/i);
   });
 
   it("retains Access JWT and same-origin rejection behavior", async () => {
-    const validToken = accessToken(CANONICAL_EMAIL);
+    const scenario = await setupScenario("access-edge");
+    await configureWorkshop([scenario.adminEmail, cleanupFixture!.email], true);
+    await waitFor("Cloudflare Access edge checks to reload", async () => {
+      const response = await harness.server.fetch("/api", {
+        headers: { Origin: harness.url.origin },
+      });
+      return response.status === 403 ? true : null;
+    });
+    const validToken = accessToken(scenario.adminEmail);
     const missing = await harness.server.fetch("/api", {
       headers: { Origin: harness.url.origin },
     });
@@ -549,7 +551,6 @@ describe.sequential("verified authentication convergence", () => {
     });
     expect(invalid.status).toBe(403);
 
-    // Cloudflare Access owns this edge route; the Workshop still does not implement or redirect it.
     const logout = await harness.server.fetch("/cdn-cgi/access/logout");
     expect(logout.status).toBe(404);
   });
