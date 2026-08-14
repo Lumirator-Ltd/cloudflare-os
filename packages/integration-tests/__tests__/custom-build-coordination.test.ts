@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import {
   closeSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   openSync,
   readFileSync,
@@ -14,6 +15,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, expect, it } from "vitest";
+import {
+  BUILD_COORDINATION_DIR_ENV,
+  runCustomBuildOnce,
+} from "../src/custom-build.js";
 
 const RUNNER = fileURLToPath(
   new URL("../fixtures/custom-build-runner.mjs", import.meta.url).href,
@@ -29,6 +34,7 @@ const SUCCESSFUL_BUILD = fileURLToPath(
 );
 const tempDirs: string[] = [];
 const activeChildren = new Set<ChildProcess>();
+const originalCoordinationDir = process.env[BUILD_COORDINATION_DIR_ENV];
 
 type RunnerResult = { code: number | null; output: string };
 type Runner = { child: ChildProcess; completion: Promise<RunnerResult> };
@@ -106,7 +112,55 @@ function processIsAlive(pid: number): boolean {
 afterEach(() => {
   for (const child of activeChildren) terminateTestProcess(child);
   activeChildren.clear();
+  if (originalCoordinationDir === undefined) delete process.env[BUILD_COORDINATION_DIR_ENV];
+  else process.env[BUILD_COORDINATION_DIR_ENV] = originalCoordinationDir;
   for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
+
+it("consumes a result published after its initial read instead of rebuilding after election", async () => {
+  const coordinationDir = mkdtempSync(join(tmpdir(), "gadgets-build-election-recheck-"));
+  tempDirs.push(coordinationDir);
+  process.env[BUILD_COORDINATION_DIR_ENV] = coordinationDir;
+  const output = join(coordinationDir, "unexpected-build.txt");
+
+  await runCustomBuildOnce({
+    command: command(SUCCESSFUL_BUILD, output),
+    cwd: coordinationDir,
+  }, {
+    afterInitialResultRead({ resultPath }) {
+      // The first builder atomically published this result and removed its lock while this contender
+      // was paused immediately before election.
+      writeFileSync(resultPath, JSON.stringify({ status: "success" }));
+    },
+  });
+
+  expect(existsSync(output)).toBe(false);
+  expect(readdirSync(coordinationDir).some(entry => entry.endsWith(".lock"))).toBe(false);
+});
+
+it("consumes a result published after its follower read before reporting a missing owner", async () => {
+  const coordinationDir = mkdtempSync(join(tmpdir(), "gadgets-build-dead-owner-recheck-"));
+  tempDirs.push(coordinationDir);
+  process.env[BUILD_COORDINATION_DIR_ENV] = coordinationDir;
+  const output = join(coordinationDir, "unexpected-build.txt");
+
+  await runCustomBuildOnce({
+    command: command(SUCCESSFUL_BUILD, output),
+    cwd: coordinationDir,
+  }, {
+    afterInitialResultRead({ lockPath }) {
+      // Force this invocation down the follower path without scheduling another process.
+      mkdirSync(lockPath);
+    },
+    beforeOwnerLivenessCheck({ lockPath, resultPath }) {
+      // The elected builder publishes and removes its lock at the exact boundary between the
+      // follower's empty result read and its owner check.
+      writeFileSync(resultPath, JSON.stringify({ status: "success" }));
+      rmSync(lockPath, { recursive: true });
+    },
+  });
+
+  expect(existsSync(output)).toBe(false);
 });
 
 it("times out a hung process tree and publishes one deterministic failure to every peer", async () => {

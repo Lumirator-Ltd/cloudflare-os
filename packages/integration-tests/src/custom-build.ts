@@ -39,6 +39,18 @@ type BuildResult =
   | { status: "success" }
   | { status: "failure"; message: string };
 
+type BuildCoordinationPaths = Readonly<{
+  lockPath: string;
+  ownerPath: string;
+  resultPath: string;
+}>;
+
+/** Injectable coordination boundaries used by deterministic race tests. */
+export type BuildCoordinationHooks = {
+  afterInitialResultRead?: (paths: BuildCoordinationPaths) => void | Promise<void>;
+  beforeOwnerLivenessCheck?: (paths: BuildCoordinationPaths) => void | Promise<void>;
+};
+
 type ChildOutcome =
   | { type: "error"; error: Error }
   | { type: "close"; code: number | null; signal: NodeJS.Signals | null };
@@ -92,6 +104,13 @@ function readResult(path: string): BuildResult | undefined {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
     throw error;
   }
+}
+
+function consumeResult(path: string): boolean {
+  const result = readResult(path);
+  if (result?.status === "success") return true;
+  if (result?.status === "failure") throw new Error(result.message);
+  return false;
 }
 
 function writeJsonAtomic(path: string, value: unknown): void {
@@ -150,20 +169,21 @@ function builderIsAlive(ownerPath: string, lockPath: string): boolean | undefine
 }
 
 async function waitForBuild(
-    resultPath: string,
-    ownerPath: string,
-    lockPath: string,
+    paths: BuildCoordinationPaths,
     description: string,
     timeoutMs: number,
+    hooks?: BuildCoordinationHooks,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs + BUILD_TERMINATION_GRACE_MS
     + FOLLOWER_PUBLICATION_GRACE_MS;
   while (Date.now() < deadline) {
-    const result = readResult(resultPath);
-    if (result?.status === "success") return;
-    if (result?.status === "failure") throw new Error(result.message);
+    if (consumeResult(paths.resultPath)) return;
 
-    if (builderIsAlive(ownerPath, lockPath) === false) {
+    await hooks?.beforeOwnerLivenessCheck?.(paths);
+    if (builderIsAlive(paths.ownerPath, paths.lockPath) === false) {
+      // Result publication and lock removal are separate operations. The owner may have completed
+      // between this follower's result read and liveness check.
+      if (consumeResult(paths.resultPath)) return;
       throw new Error(`Custom build process exited before reporting completion: ${description}`);
     }
     await new Promise(complete => setTimeout(complete, BUILD_WAIT_INTERVAL_MS));
@@ -251,6 +271,7 @@ async function executeChild(
 async function coordinateBuild(
     build: CustomBuild,
     execute: (cwd: string, env: NodeJS.ProcessEnv, timeoutMs: number) => Promise<void>,
+    hooks?: BuildCoordinationHooks,
 ): Promise<void> {
   const command = build.command;
   if (!command) return;
@@ -268,41 +289,48 @@ async function coordinateBuild(
   const lockPath = resolve(coordinationDir, `${identity}.lock`);
   const ownerPath = resolve(lockPath, "owner.json");
   const resultPath = resolve(coordinationDir, `${identity}.result.json`);
+  const paths = { lockPath, ownerPath, resultPath };
   const description = `${command} in ${cwd}`;
 
-  const priorResult = readResult(resultPath);
-  if (priorResult?.status === "success") return;
-  if (priorResult?.status === "failure") throw new Error(priorResult.message);
+  if (consumeResult(resultPath)) return;
+  await hooks?.afterInitialResultRead?.(paths);
 
   // mkdir is the cross-process election: exactly one worker can create this identity's lock.
   try {
     mkdirSync(lockPath);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    await waitForBuild(resultPath, ownerPath, lockPath, description, timeoutMs);
+    await waitForBuild(paths, description, timeoutMs, hooks);
     return;
   }
 
   try {
-    writeJsonAtomic(ownerPath, { pid: process.pid });
-    await execute(cwd, env, timeoutMs);
-    // Atomic result publication is the fence: peers cannot proceed while output is still changing.
-    writeResult(resultPath, { status: "success" });
-  } catch (error) {
-    const message = failureMessage(error, description);
+    // A previous builder may publish and release its lock after this contender's initial read but
+    // before election. Recheck after election so this new lock cannot authorize a duplicate build.
+    if (consumeResult(resultPath)) return;
+
     try {
-      writeResult(resultPath, { status: "failure", message });
-    } catch {
-      // The original failure is more actionable. Peers observe lock removal and fail boundedly when
-      // the filesystem also prevents publishing the shared result.
+      writeJsonAtomic(ownerPath, { pid: process.pid });
+      await execute(cwd, env, timeoutMs);
+      // Atomic result publication is the fence: peers cannot proceed while output is still changing.
+      writeResult(resultPath, { status: "success" });
+    } catch (error) {
+      const message = failureMessage(error, description);
+      try {
+        writeResult(resultPath, { status: "failure", message });
+      } catch {
+        // The original failure is more actionable. Peers observe lock removal and fail boundedly when
+        // the filesystem also prevents publishing the shared result.
+      }
+      throw new Error(message, { cause: error });
     }
-    throw new Error(message, { cause: error });
   } finally {
     rmSync(lockPath, { recursive: true, force: true });
   }
 }
 
-export function runCustomBuildOnce(build: CustomBuild): Promise<void> {
+export function runCustomBuildOnce(
+    build: CustomBuild, hooks?: BuildCoordinationHooks): Promise<void> {
   const command = build.command;
   if (!command) return Promise.resolve();
   return coordinateBuild(build, async (cwd, env, timeoutMs) => {
@@ -315,7 +343,7 @@ export function runCustomBuildOnce(build: CustomBuild): Promise<void> {
       windowsHide: true,
     });
     await executeChild(child, command, timeoutMs);
-  });
+  }, hooks);
 }
 
 export function runFileBuildOnce(file: string, args: string[], cwd: string): Promise<void> {
