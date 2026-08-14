@@ -59,6 +59,10 @@ function clerkSubjectKey(subject: string): string {
   return JSON.stringify(["clerk", subject]);
 }
 
+function accessSubjectKey(issuer: string, audience: string, subject: string): string {
+  return JSON.stringify(["access", issuer, audience, subject]);
+}
+
 function randomInternalUserId(): string {
   const bytes = new Uint8Array(32);
   crypto.getRandomValues(bytes);
@@ -101,62 +105,26 @@ export class IdentityRegistry extends DurableObject<Cloudflare.Env> {
     verifiedEmail: string,
     signupsEnabled: boolean,
   ): Promise<IdentityResolution> {
-    const email = canonicalizeVerifiedEmail(verifiedEmail);
-    const subjectKey = clerkSubjectKey(subject);
-    const result = this.storage.transaction((): { record: IdentityRecord; changed: boolean } => {
-      const subjectIdentity = this.storage.identities.bySubject.get(subjectKey);
-      if (subjectIdentity) {
-        if (subjectIdentity.status !== "active") throw new Error(COLLISION_LOCKED);
-        if (subjectIdentity.canonicalVerifiedEmail === email) {
-          return { record: subjectIdentity, changed: false };
-        }
+    return await this.#resolveSubjectIdentity(
+      clerkSubjectKey(subject), verifiedEmail, signupsEnabled,
+    );
+  }
 
-        const emailIdentity = this.storage.identities.byEmail.get(email);
-        if (emailIdentity && emailIdentity.internalUserId !== subjectIdentity.internalUserId) {
-          const locked: IdentityRecord = {
-            ...subjectIdentity,
-            canonicalVerifiedEmail: null,
-            identityVersion: subjectIdentity.identityVersion + 1,
-            status: "collisionLocked",
-          };
-          this.storage.identities.put(locked);
-          return { record: locked, changed: true };
-        }
-
-        const moved: IdentityRecord = {
-          ...subjectIdentity,
-          canonicalVerifiedEmail: email,
-          identityVersion: subjectIdentity.identityVersion + 1,
-        };
-        this.storage.identities.put(moved);
-        return { record: moved, changed: true };
-      }
-
-      const emailIdentity = this.storage.identities.byEmail.get(email);
-      if (emailIdentity) {
-        if (emailIdentity.status !== "active") throw new Error(COLLISION_LOCKED);
-        const bound: IdentityRecord = {
-          ...emailIdentity,
-          subjectKeys: [...emailIdentity.subjectKeys, subjectKey],
-        };
-        this.storage.identities.put(bound);
-        return { record: bound, changed: false };
-      }
-
-      if (!signupsEnabled) throw new Error(SIGNUPS_DISABLED);
-      const created: IdentityRecord = {
-        internalUserId: randomInternalUserId(),
-        canonicalVerifiedEmail: email,
-        identityVersion: 1,
-        status: "active",
-        subjectKeys: [subjectKey],
-      };
-      this.storage.identities.put(created);
-      return { record: created, changed: false };
-    });
-
-    if (result.changed) this.#invalidateIdentitySessions(result.record.internalUserId);
-    return await this.#initialize(result.record);
+  /**
+   * Resolves a verified Access subject scoped to its trusted issuer and audience.
+   *
+   * A subject not yet present follows the registry's existing verified-email convergence policy.
+   */
+  async resolveAccessIdentity(
+    issuer: string,
+    audience: string,
+    subject: string,
+    verifiedEmail: string,
+    signupsEnabled: boolean,
+  ): Promise<IdentityResolution> {
+    return await this.#resolveSubjectIdentity(
+      accessSubjectKey(issuer, audience, subject), verifiedEmail, signupsEnabled,
+    );
   }
 
   /** Registers an ephemeral abort callback after validating the identity's exact active version. */
@@ -243,6 +211,67 @@ export class IdentityRegistry extends DurableObject<Cloudflare.Env> {
       identityVersion: record.identityVersion,
       status: record.status,
     };
+  }
+
+  async #resolveSubjectIdentity(
+      subjectKey: string,
+      verifiedEmail: string,
+      signupsEnabled: boolean): Promise<IdentityResolution> {
+    const email = canonicalizeVerifiedEmail(verifiedEmail);
+    const result = this.storage.transaction((): { record: IdentityRecord; changed: boolean } => {
+      const subjectIdentity = this.storage.identities.bySubject.get(subjectKey);
+      if (subjectIdentity) {
+        if (subjectIdentity.status !== "active") throw new Error(COLLISION_LOCKED);
+        if (subjectIdentity.canonicalVerifiedEmail === email) {
+          return { record: subjectIdentity, changed: false };
+        }
+
+        const emailIdentity = this.storage.identities.byEmail.get(email);
+        if (emailIdentity && emailIdentity.internalUserId !== subjectIdentity.internalUserId) {
+          const locked: IdentityRecord = {
+            ...subjectIdentity,
+            canonicalVerifiedEmail: null,
+            identityVersion: subjectIdentity.identityVersion + 1,
+            status: "collisionLocked",
+          };
+          this.storage.identities.put(locked);
+          return { record: locked, changed: true };
+        }
+
+        const moved: IdentityRecord = {
+          ...subjectIdentity,
+          canonicalVerifiedEmail: email,
+          identityVersion: subjectIdentity.identityVersion + 1,
+        };
+        this.storage.identities.put(moved);
+        return { record: moved, changed: true };
+      }
+
+      const emailIdentity = this.storage.identities.byEmail.get(email);
+      if (emailIdentity) {
+        if (emailIdentity.status !== "active") throw new Error(COLLISION_LOCKED);
+        const bound: IdentityRecord = {
+          ...emailIdentity,
+          subjectKeys: [...emailIdentity.subjectKeys, subjectKey],
+        };
+        this.storage.identities.put(bound);
+        return { record: bound, changed: false };
+      }
+
+      if (!signupsEnabled) throw new Error(SIGNUPS_DISABLED);
+      const created: IdentityRecord = {
+        internalUserId: randomInternalUserId(),
+        canonicalVerifiedEmail: email,
+        identityVersion: 1,
+        status: "active",
+        subjectKeys: [subjectKey],
+      };
+      this.storage.identities.put(created);
+      return { record: created, changed: false };
+    });
+
+    if (result.changed) this.#invalidateIdentitySessions(result.record.internalUserId);
+    return await this.#initialize(result.record);
   }
 
   #invalidateIdentitySessions(internalUserId: string): void {

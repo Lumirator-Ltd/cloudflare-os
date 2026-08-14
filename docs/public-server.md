@@ -19,8 +19,13 @@ connect the account's capabilities. There's no single switch — the pieces turn
 
 For Gatekeeper, Clerk, and Cloudflare Access authentication, a **verified email is a convergence
 claim, not the durable account key**: the deployment-local Identity Registry maps it to an opaque
-stable internal ID. The legacy built-in password path remains locally username-keyed until it is
-disabled or removed; neither usernames nor opaque IDs should be interpreted as provider identities.
+stable internal ID. Access additionally keys its stable subject by the verified issuer and configured
+audience, so two Access deployments cannot collide by subject alone. A verified Access email change
+moves that subject's email mapping and version; a conflicting move locks the identity rather than
+merging accounts. Each Access API WebSocket and all capabilities minted from it expire at the JWT's
+absolute `exp`; extending authority requires reconnecting with a fresh Access assertion. The legacy
+built-in password path remains locally username-keyed until it is disabled or removed; neither
+usernames nor opaque IDs should be interpreted as provider identities.
 
 For local development, set the required variables in a root `.dev.vars` file (gitignored,
 `KEY=VALUE` per line); `pnpm run dev-server` loads it automatically. A minimal example:

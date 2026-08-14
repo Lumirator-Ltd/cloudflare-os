@@ -58,6 +58,84 @@ describe("IdentityRegistry", () => {
     expect(access).toEqual(gatekeeper);
   });
 
+  it("moves an Access subject email on the same identity and persists the subject index", async () => {
+    const issuer = `https://${crypto.randomUUID()}.cloudflareaccess.test`;
+    const audience = `audience-${crypto.randomUUID()}`;
+    const subject = `access-subject-${crypto.randomUUID()}`;
+    const oldEmail = unique("access-restart-old");
+    const newEmail = unique("access-restart-new");
+    const first = await registry().resolveAccessIdentity(
+      issuer, audience, subject, oldEmail, true,
+    );
+    const moved = await registry().resolveAccessIdentity(
+      issuer, audience, subject, newEmail, false,
+    );
+
+    expect(moved).toEqual({
+      ...first,
+      canonicalVerifiedEmail: newEmail,
+      identityVersion: first.identityVersion + 1,
+    });
+    await expectRegistryRejection(
+      instance => instance.resolveEmailIdentity(oldEmail, false),
+      "New sign-ups are currently disabled on this deployment.",
+    );
+
+    await abortAllDurableObjects();
+
+    await expect(registry().resolveAccessIdentity(
+      issuer, audience, subject, newEmail, false,
+    )).resolves.toEqual(moved);
+  });
+
+  it("scopes the same Access subject to its configured issuer and audience", async () => {
+    const subject = `shared-access-subject-${crypto.randomUUID()}`;
+    const first = await registry().resolveAccessIdentity(
+      "https://first.cloudflareaccess.test", "first-audience", subject, unique("first-access"), true,
+    );
+    const differentIssuer = await registry().resolveAccessIdentity(
+      "https://second.cloudflareaccess.test", "first-audience", subject,
+      unique("second-access"), true,
+    );
+    const differentAudience = await registry().resolveAccessIdentity(
+      "https://first.cloudflareaccess.test", "second-audience", subject,
+      unique("third-access"), true,
+    );
+
+    expect(new Set([
+      first.internalUserId,
+      differentIssuer.internalUserId,
+      differentAudience.internalUserId,
+    ])).toHaveLength(3);
+  });
+
+  it("collision-locks an Access subject moved onto another identity's verified email", async () => {
+    const issuer = "https://collision.cloudflareaccess.test";
+    const audience = `collision-audience-${crypto.randomUUID()}`;
+    const subject = `collision-access-subject-${crypto.randomUUID()}`;
+    const oldEmail = unique("access-collision-old");
+    const occupiedEmail = unique("access-collision-occupied");
+    const affected = await registry().resolveAccessIdentity(
+      issuer, audience, subject, oldEmail, true,
+    );
+    const other = await registry().resolveEmailIdentity(occupiedEmail, true);
+
+    await expectRegistryRejection(
+      instance => instance.resolveAccessIdentity(
+        issuer, audience, subject, occupiedEmail, false,
+      ),
+      "Identity collision requires deployment operator assistance.",
+    );
+
+    expect(await registry().getIdentity(affected.internalUserId)).toEqual({
+      internalUserId: affected.internalUserId,
+      canonicalVerifiedEmail: null,
+      identityVersion: affected.identityVersion + 1,
+      status: "collisionLocked",
+    });
+    expect(await registry().resolveEmailIdentity(occupiedEmail, false)).toEqual(other);
+  });
+
   it("persists Clerk subject and email indexes across Durable Object restarts", async () => {
     const subject = `clerk-restart-${crypto.randomUUID()}`;
     const clerkEmail = unique("restart-clerk");

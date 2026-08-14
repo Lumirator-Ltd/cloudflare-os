@@ -69,7 +69,10 @@ function clerkToken(subject: string, expiresInSeconds = 120): string {
   return token;
 }
 
-function accessToken(email: string, expiresInSeconds = 120): string {
+function accessToken(
+    email: string,
+    expiresInSeconds = 120,
+    subject = `access-${crypto.randomUUID()}`): string {
   sensitiveValues.add(email);
   const now = Math.floor(Date.now() / 1_000);
   const token = signJwt(
@@ -77,7 +80,7 @@ function accessToken(email: string, expiresInSeconds = 120): string {
     {
       iss: ACCESS_ISSUER,
       aud: ACCESS_AUDIENCE,
-      sub: `access-${crypto.randomUUID()}`,
+      sub: subject,
       email,
       iat: now - 10,
       nbf: now - 15,
@@ -518,6 +521,44 @@ describe.sequential("verified authentication convergence", () => {
     using unknownAccessPublic = accessBatch(accessToken(uniqueEmail("unknown-access")));
     await expect(unknownAccessPublic.authenticateFromCfAccess().whoami())
       .rejects.toThrow(/sign-ups are currently disabled/i);
+  });
+
+  it("keeps one Access identity and current admin authority across a verified email change",
+      async () => {
+    const scenario = await setupScenario("access-email-move");
+    const accessSubject = `access-stable-${crypto.randomUUID()}`;
+    await configureWorkshop([scenario.adminEmail, cleanupFixture!.email], true);
+    await waitFor("Cloudflare Access mode to reload for the email move", async () => {
+      const response = await harness.server.fetch("/api", {
+        headers: { Origin: harness.url.origin },
+      });
+      return response.status === 403 ? true : null;
+    });
+
+    const firstToken = accessToken(scenario.adminEmail, 120, accessSubject);
+    using firstPublic = accessBatch(firstToken);
+    await firstPublic.authenticateFromCfAccess().setOwnDisplayName("Stable Access identity");
+    using firstProfilePublic = accessBatch(firstToken);
+    await expect(firstProfilePublic.authenticateFromCfAccess().whoami())
+      .resolves.toMatchObject({ id: scenario.internalUserId });
+
+    const movedEmail = uniqueEmail("access-email-moved");
+    await configureWorkshop([movedEmail, cleanupFixture!.email], true);
+    await waitFor("the changed Access admin allowlist to reload", async () => {
+      const response = await harness.server.fetch("/api", {
+        headers: { Origin: harness.url.origin },
+      });
+      return response.status === 403 ? true : null;
+    });
+
+    const movedToken = accessToken(movedEmail, 120, accessSubject);
+    using movedPublic = accessBatch(movedToken);
+    await expect(movedPublic.authenticateFromCfAccess().whoami()).resolves.toMatchObject({
+      id: scenario.internalUserId,
+      name: "Stable Access identity",
+    });
+    using movedAdminPublic = accessBatch(movedToken);
+    await expect(movedAdminPublic.authenticateFromCfAccess().amIAdmin()).resolves.toBe(true);
   });
 
   it("retains Access JWT and same-origin rejection behavior", async () => {

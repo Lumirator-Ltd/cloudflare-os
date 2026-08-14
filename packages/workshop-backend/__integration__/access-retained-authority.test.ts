@@ -12,7 +12,9 @@ const ACCESS_KEY_ID = "retained-authority-key";
 let privateKey: CryptoKey;
 let publicJwk: JsonWebKey;
 
-async function accessToken(email: string): Promise<string> {
+async function accessToken(
+    email: string,
+    overrides: Record<string, unknown> = {}): Promise<string> {
   const now = Math.floor(Date.now() / 1_000);
   return new SignJWT({
     iss: ACCESS_ISSUER,
@@ -22,6 +24,7 @@ async function accessToken(email: string): Promise<string> {
     iat: now - 10,
     nbf: now - 15,
     exp: now + 120,
+    ...overrides,
   }).setProtectedHeader({ alg: "RS256", kid: ACCESS_KEY_ID, typ: "JWT" }).sign(privateKey);
 }
 
@@ -61,6 +64,39 @@ afterEach(async () => {
 });
 
 describe("retained Cloudflare Access authority", () => {
+  it.each([
+    ["missing subject", { sub: undefined }],
+    ["blank subject", { sub: "  " }],
+    ["missing email", { email: undefined }],
+    ["blank email", { email: "\t" }],
+    ["missing expiry", { exp: undefined }],
+    ["invalid expiry", { exp: "later" }],
+    ["expired assertion", { exp: Math.floor(Date.now() / 1_000) - 1 }],
+  ])("rejects an Access WebSocket handshake with %s", async (_name, overrides) => {
+    const mutableEnv = env as Cloudflare.Env;
+    mutableEnv.CF_ACCESS_AUD = ACCESS_AUDIENCE;
+    mutableEnv.CF_ACCESS_ISS = ACCESS_ISSUER;
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async input => {
+      const request = new Request(input);
+      if (request.url === `${ACCESS_ISSUER}/cdn-cgi/access/certs`) {
+        return Response.json({ keys: [publicJwk] });
+      }
+      throw new Error(`Unexpected network request: ${request.url}`);
+    });
+
+    const response = await exports.default.fetch(new Request("https://workshop.invalid/api", {
+      headers: {
+        Upgrade: "websocket",
+        Origin: "https://workshop.invalid",
+        "cf-access-jwt-assertion": await accessToken("person@example.com", overrides),
+      },
+    }));
+
+    expect(response.status).toBe(403);
+    expect(response.webSocket).toBeNull();
+  });
+
   it("eagerly breaks an existing WebSocket capability graph after an identity version move",
       async () => {
     const email = `access-admin-${crypto.randomUUID()}@example.com`;

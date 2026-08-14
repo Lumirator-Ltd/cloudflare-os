@@ -32,7 +32,11 @@ import { ExternalMessageGateway } from "./external-message-gateway";
 import { RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { recordAnalytics } from "./analytics";
 import { handleClientErrorRequest } from "./client-errors.js";
-import { verifiedCfAccessEmail, verifyCfAccessJwt } from "./access.js";
+import {
+  verifiedCfAccessIdentity,
+  verifyCfAccessJwt,
+  type VerifiedCfAccessIdentity,
+} from "./access.js";
 import { resolveUiFeatureFlags } from "./feature-flags";
 import { serveSiteLogo, SITE_LOGO_PATH } from "./site-logo.js";
 import { createWorkshopLogger } from "./observability";
@@ -86,6 +90,8 @@ type Env = Cloudflare.Env & {
 const ADMINS_CONFIG_ERROR =
   "ADMINS must be configured as an array of verified email strings.";
 const COLLISION_LOCKED = "Identity collision requires deployment operator assistance.";
+const ACCESS_SESSION_EXPIRED = "Cloudflare Access session expired.";
+const MAX_TIMEOUT_MILLISECONDS = 0x7fffffff;
 
 function canonicalAdminEmails(value: unknown): string[] {
   if (typeof value === "string") {
@@ -694,15 +700,18 @@ export class PublicApiImpl extends RpcTarget implements PublicApi {
   #clerkSession: "authenticating" | { dispose(): Promise<void> } | undefined;
   #identitySessions = new Map<string, { internalUserId: string; subscriberId: string }>();
   #authorityWatchdogs = new Map<string, { dispose(): void }>();
+  #accessDeadline: ReturnType<typeof setTimeout> | undefined;
+  #accessExpired = false;
 
   constructor(private ctx: ExecutionContext, private env: Env,
       private abortSession: (reason: Error) => void,
       private abortSignal: AbortSignal,
       private verifyClerk: (token: string) => ReturnType<typeof verifyClerkIdentity>,
-      private accessEmail?: string) {
+      private accessIdentity?: VerifiedCfAccessIdentity) {
     super();
     this.users = this.ctx.exports.UserDurableObject;
     this.abortSignal.addEventListener("abort", () => this.#dispose(), { once: true });
+    if (this.accessIdentity) this.#armAccessDeadline();
   }
 
   [Symbol.dispose](): void {
@@ -710,10 +719,52 @@ export class PublicApiImpl extends RpcTarget implements PublicApi {
   }
 
   #dispose(): void {
+    if (this.#accessDeadline !== undefined) clearTimeout(this.#accessDeadline);
+    this.#accessDeadline = undefined;
     this.#disposeClerkSession();
     this.#disposeIdentitySessions();
     for (const watchdog of this.#authorityWatchdogs.values()) watchdog.dispose();
     this.#authorityWatchdogs.clear();
+  }
+
+  #armAccessDeadline(): void {
+    const run = () => {
+      this.#accessDeadline = undefined;
+      if (this.abortSignal.aborted || this.#accessExpired || !this.accessIdentity) return;
+      const remaining = this.accessIdentity.expiresAt.getTime() - Date.now();
+      if (remaining <= 0) {
+        this.#expireAccessSession();
+      } else {
+        this.#accessDeadline = setTimeout(run, Math.min(remaining, MAX_TIMEOUT_MILLISECONDS));
+      }
+    };
+
+    const remaining = this.accessIdentity!.expiresAt.getTime() - Date.now();
+    if (!Number.isFinite(remaining) || remaining <= 0) {
+      this.#expireAccessSession();
+    } else if (!this.abortSignal.aborted) {
+      this.#accessDeadline = setTimeout(run, Math.min(remaining, MAX_TIMEOUT_MILLISECONDS));
+    }
+  }
+
+  #expireAccessSession(): void {
+    if (this.#accessExpired) return;
+    this.#accessExpired = true;
+    if (this.#accessDeadline !== undefined) clearTimeout(this.#accessDeadline);
+    this.#accessDeadline = undefined;
+    this.abortSession(new Error(ACCESS_SESSION_EXPIRED));
+  }
+
+  #requireCurrentAccessIdentity(): VerifiedCfAccessIdentity {
+    if (!this.accessIdentity) {
+      throw createAuthError(AUTH_ERROR_CODES.notAuthenticatedWithAccess);
+    }
+    if (this.#accessExpired || this.accessIdentity.expiresAt.getTime() <= Date.now()) {
+      this.#expireAccessSession();
+      throw new Error(ACCESS_SESSION_EXPIRED);
+    }
+    if (this.abortSignal.aborted) throw new Error("This API socket is closed.");
+    return this.accessIdentity;
   }
 
   #disposeClerkSession(): void {
@@ -933,17 +984,24 @@ export class PublicApiImpl extends RpcTarget implements PublicApi {
   }
 
   async authenticateFromCfAccess(): Promise<AuthenticatedApi> {
-    if (!this.accessEmail) {
-      throw createAuthError(AUTH_ERROR_CODES.notAuthenticatedWithAccess);
-    }
+    const accessIdentity = this.#requireCurrentAccessIdentity();
 
-    // Access has already verified this email claim and same-origin request. Apply deployment signup
-    // policy at this trust boundary before resolving the stable registry identity.
+    // The handshake verified every value in this context. Apply deployment signup policy at this
+    // trust boundary before resolving the provider-scoped stable subject and current verified email.
     const signupsEnabled = (await readAdminConfig(this.env)).signupsEnabled;
+    this.#requireCurrentAccessIdentity();
     const registry = this.ctx.exports.IdentityRegistry.getByName("");
     const accountCreated =
-      (await registry.findInternalUserIdByVerifiedEmail(this.accessEmail)) === null;
-    const resolved = await registry.resolveEmailIdentity(this.accessEmail, signupsEnabled);
+      (await registry.findInternalUserIdByVerifiedEmail(accessIdentity.email)) === null;
+    this.#requireCurrentAccessIdentity();
+    const resolved = await registry.resolveAccessIdentity(
+      accessIdentity.issuer,
+      accessIdentity.audience,
+      accessIdentity.subject,
+      accessIdentity.email,
+      signupsEnabled,
+    );
+    this.#requireCurrentAccessIdentity();
     const userId = this.users.idFromName(resolved.internalUserId);
     if (accountCreated) {
       recordAnalytics(this.ctx, this.env, {
@@ -1090,7 +1148,7 @@ export default {
             }));
       }
 
-      let accessEmail: string | undefined;
+      let accessIdentity: VerifiedCfAccessIdentity | undefined;
 
       if (env.CF_ACCESS_AUD) {
         if (req.headers.get("Origin") !== url.origin) {
@@ -1100,12 +1158,12 @@ export default {
         const payload = await verifyCfAccessJwt(req, env);
         if (!payload) return new Response("Invalid CF access JWT.", { status: 403 });
 
-        const email = verifiedCfAccessEmail(payload);
-        if (!email) {
-          return new Response("Access JWT didn't specify email address.", { status: 403 });
+        const verifiedIdentity = verifiedCfAccessIdentity(payload, env);
+        if (!verifiedIdentity) {
+          return new Response("Access JWT lacks required identity claims.", { status: 403 });
         }
 
-        accessEmail = email;
+        accessIdentity = verifiedIdentity;
       }
 
       // HACK: Implement `abortSession` callback by closing the websocket.
@@ -1119,7 +1177,7 @@ export default {
 
       return await newWorkersRpcResponse(req,
           new PublicApiImpl(
-            ctx, env, abortSession, abortController.signal, verifyClerk, accessEmail),
+            ctx, env, abortSession, abortController.signal, verifyClerk, accessIdentity),
           { abortSignal: abortController.signal });
     }
 

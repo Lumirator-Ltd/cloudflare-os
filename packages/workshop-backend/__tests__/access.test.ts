@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { accessRateLimitKey, verifyCfAccessJwt } from "../src/access.js";
+import {
+  accessRateLimitKey,
+  verifiedCfAccessIdentity,
+  verifyCfAccessJwt,
+} from "../src/access.js";
 
 const joseMocks = vi.hoisted(() => ({
   createRemoteJWKSet: vi.fn(() => vi.fn()),
@@ -62,6 +66,48 @@ describe("verifyCfAccessJwt", () => {
     await expect(verifyCfAccessJwt(request, accessEnv, verifier)).resolves.toEqual({
       sub: "user-1", email: "person@example.com",
     });
+  });
+});
+
+describe("verifiedCfAccessIdentity", () => {
+  const now = Date.UTC(2026, 0, 1);
+  const validClaims = {
+    sub: "access-user-1",
+    email: "Person@Example.com",
+    exp: Math.floor(now / 1_000) + 60,
+  };
+
+  it("preserves only a complete verified Access identity context", () => {
+    expect(verifiedCfAccessIdentity(validClaims, accessEnv, now)).toEqual({
+      subject: validClaims.sub,
+      email: validClaims.email,
+      expiresAt: new Date(validClaims.exp * 1_000),
+      issuer: accessEnv.CF_ACCESS_ISS,
+      audience: accessEnv.CF_ACCESS_AUD,
+    });
+  });
+
+  it.each([
+    ["missing subject", { ...validClaims, sub: undefined }],
+    ["blank subject", { ...validClaims, sub: "  " }],
+    ["missing email", { ...validClaims, email: undefined }],
+    ["blank email", { ...validClaims, email: "\t" }],
+    ["missing expiry", { ...validClaims, exp: undefined }],
+    ["non-numeric expiry", { ...validClaims, exp: "later" }],
+    ["fractional expiry", { ...validClaims, exp: validClaims.exp + 0.5 }],
+    ["infinite expiry", { ...validClaims, exp: Number.POSITIVE_INFINITY }],
+    ["expired assertion", { ...validClaims, exp: Math.floor(now / 1_000) }],
+  ])("rejects a verified payload with %s", (_name, claims) => {
+    expect(verifiedCfAccessIdentity(claims, accessEnv, now)).toBeNull();
+  });
+
+  it("rejects identity context without configured issuer and audience", () => {
+    expect(verifiedCfAccessIdentity(validClaims, {
+      CF_ACCESS_ISS: accessEnv.CF_ACCESS_ISS,
+    }, now)).toBeNull();
+    expect(verifiedCfAccessIdentity(validClaims, {
+      CF_ACCESS_AUD: accessEnv.CF_ACCESS_AUD,
+    }, now)).toBeNull();
   });
 });
 

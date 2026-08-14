@@ -23,6 +23,10 @@ email as durable identity. Each Gatekeeper must return only an email the provide
 (Google `email_verified`, a GitHub primary+verified email, or the Cloudflare account email);
 otherwise it returns null and cannot be used to sign in. Session records capture the registry's
 exact canonical email and identity version so a moved or collision-locked identity fails closed.
+Cloudflare Access also retains the verified subject scoped by configured issuer and audience; email
+changes follow that subject without leaving the old address as an alias. Its WebSocket capability
+graph has one non-refreshable absolute deadline at the assertion's verified `exp`, so the browser
+must reconnect with a fresh assertion after expiry.
 
 ## Incremental scopes
 
