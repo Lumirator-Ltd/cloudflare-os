@@ -155,6 +155,82 @@ describe("IdentityRegistry", () => {
       .resolves.toEqual({ ...owner, created: false });
   });
 
+  it("moves a Gatekeeper subject email, tombstones history, and lets that subject move back",
+      async () => {
+    const vendorId = `gatekeeper-${crypto.randomUUID()}`;
+    const subject = `provider-subject-${crypto.randomUUID()}`;
+    const oldEmail = unique("gatekeeper-old");
+    const newEmail = unique("gatekeeper-new");
+    const initial = await registry().resolveGatekeeperIdentity(vendorId, subject, oldEmail, true);
+    const moved = await registry().resolveGatekeeperIdentity(vendorId, subject, newEmail, false);
+
+    expect(moved).toEqual({
+      ...initial,
+      canonicalVerifiedEmail: newEmail,
+      identityVersion: initial.identityVersion + 1,
+      created: false,
+    });
+    await expectRegistryRejection(
+      instance => instance.resolveGatekeeperIdentity(
+        vendorId, `recycled-${crypto.randomUUID()}`, oldEmail, true),
+      "Identity ownership requires explicit linking or deployment operator resolution.",
+    );
+
+    const returned = await registry().resolveGatekeeperIdentity(
+      vendorId, subject, oldEmail, false,
+    );
+    expect(returned).toEqual({
+      ...initial,
+      identityVersion: moved.identityVersion + 1,
+      created: false,
+    });
+  });
+
+  it("scopes identical Gatekeeper subjects by vendor ID", async () => {
+    const subject = `shared-gatekeeper-subject-${crypto.randomUUID()}`;
+    const first = await registry().resolveGatekeeperIdentity(
+      "first-vendor", subject, unique("first-gatekeeper"), true,
+    );
+    const second = await registry().resolveGatekeeperIdentity(
+      "second-vendor", subject, unique("second-gatekeeper"), true,
+    );
+
+    expect(second.internalUserId).not.toBe(first.internalUserId);
+  });
+
+  it("denies unseen Gatekeeper subjects claiming Clerk or Access current and historical emails",
+      async () => {
+    const clerkSubject = `clerk-gatekeeper-claim-${crypto.randomUUID()}`;
+    const clerkHistoricalEmail = unique("clerk-gatekeeper-history");
+    const clerkCurrentEmail = unique("clerk-gatekeeper-current");
+    await registry().resolveClerkIdentity(clerkSubject, clerkHistoricalEmail, true);
+    await registry().resolveClerkIdentity(clerkSubject, clerkCurrentEmail, false);
+
+    const accessHistoricalEmail = unique("access-gatekeeper-history");
+    const accessCurrentEmail = unique("access-gatekeeper-current");
+    const accessSubject = `access-gatekeeper-claim-${crypto.randomUUID()}`;
+    await registry().resolveAccessIdentity(
+      "https://gatekeeper-claim.cloudflareaccess.test", "gatekeeper-claim-audience",
+      accessSubject, accessHistoricalEmail, true,
+    );
+    await registry().resolveAccessIdentity(
+      "https://gatekeeper-claim.cloudflareaccess.test", "gatekeeper-claim-audience",
+      accessSubject, accessCurrentEmail, false,
+    );
+
+    const linkRequired =
+      "Identity ownership requires explicit linking or deployment operator resolution.";
+    for (const email of [
+      clerkHistoricalEmail, clerkCurrentEmail, accessHistoricalEmail, accessCurrentEmail,
+    ]) {
+      await expectRegistryRejection(
+        instance => instance.resolveGatekeeperIdentity(
+          "test-vendor", `unseen-${crypto.randomUUID()}`, email, true),
+        linkRequired,
+      );
+    }
+  });
+
   it("moves an Access subject email on the same identity and persists the subject index", async () => {
     const issuer = `https://${crypto.randomUUID()}.cloudflareaccess.test`;
     const audience = `audience-${crypto.randomUUID()}`;

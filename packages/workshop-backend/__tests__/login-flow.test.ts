@@ -58,6 +58,10 @@ function callback(
 
 function gatekeeperAccount(revoke = vi.fn().mockResolvedValue(undefined)) {
   return {
+    getAuthenticationIdentity: vi.fn().mockResolvedValue({
+      subject: "stable-provider-subject",
+      verifiedEmail: identity.canonicalVerifiedEmail,
+    }),
     getAuthenticatedEmail: vi.fn().mockResolvedValue(identity.canonicalVerifiedEmail),
     describe: vi.fn().mockResolvedValue({
       displayName: "Cloudflare account",
@@ -75,7 +79,7 @@ describe("Gatekeeper login completion", () => {
       fail: vi.fn().mockResolvedValue(undefined),
     };
     const registry = {
-      resolveEmailIdentity: vi.fn().mockResolvedValue(identity),
+      resolveGatekeeperIdentity: vi.fn().mockResolvedValue(identity),
       getIdentity: vi.fn().mockResolvedValue(current),
     };
     const user = {
@@ -91,7 +95,13 @@ describe("Gatekeeper login completion", () => {
       account as unknown as Fetcher<GatekeeperUser>,
     );
 
-    expect(user.createGatekeeperSession).toHaveBeenCalledExactlyOnceWith(identity, "cloudflare");
+    expect(registry.resolveGatekeeperIdentity).toHaveBeenCalledExactlyOnceWith(
+      "cloudflare", "stable-provider-subject", identity.canonicalVerifiedEmail, true,
+    );
+    expect(user.createGatekeeperSession).toHaveBeenCalledExactlyOnceWith(
+      identity, "cloudflare", "stable-provider-subject", undefined,
+    );
+    expect(account.getAuthenticatedEmail).not.toHaveBeenCalled();
     expect(user.putConnectedAccount).not.toHaveBeenCalled();
     expect(user.markCredentialsExpired).not.toHaveBeenCalled();
     expect(user.markCredentialsRestored).not.toHaveBeenCalled();
@@ -106,7 +116,7 @@ describe("Gatekeeper login completion", () => {
       fail: vi.fn().mockResolvedValue(undefined),
     };
     const registry = {
-      resolveEmailIdentity: vi.fn().mockResolvedValue({ ...identity, created: true }),
+      resolveGatekeeperIdentity: vi.fn().mockResolvedValue({ ...identity, created: true }),
       getIdentity: vi.fn().mockResolvedValue(activeIdentity(identity.identityVersion)),
     };
     const user = {
@@ -126,5 +136,75 @@ describe("Gatekeeper login completion", () => {
         properties: { source: "gatekeeper" },
       }),
     ]);
+  });
+
+  it("returns the bounded explicit-link requirement for a claimed email", async () => {
+    const pending = {
+      deliver: vi.fn().mockResolvedValue(undefined),
+      fail: vi.fn().mockResolvedValue(undefined),
+    };
+    const registry = {
+      resolveGatekeeperIdentity: vi.fn().mockRejectedValue(new Error(
+        "Identity ownership requires explicit linking or deployment operator resolution.",
+      )),
+      getIdentity: vi.fn(),
+    };
+    const user = {
+      createGatekeeperSession: vi.fn(),
+      revokeGatekeeperSession: vi.fn(),
+    };
+
+    await callback("cloudflare", registry, user, pending).complete(
+      gatekeeperAccount() as unknown as Fetcher<GatekeeperUser>,
+    );
+
+    expect(pending.deliver).not.toHaveBeenCalled();
+    expect(user.createGatekeeperSession).not.toHaveBeenCalled();
+    expect(pending.fail).toHaveBeenCalledExactlyOnceWith(
+      "Identity ownership requires explicit linking or deployment operator resolution.",
+    );
+  });
+
+  it.each([
+    ["missing method", {}],
+    ["method failure", {
+      getAuthenticationIdentity: vi.fn().mockRejectedValue(new Error("provider detail")),
+    }],
+    ["null identity", { getAuthenticationIdentity: vi.fn().mockResolvedValue(null) }],
+    ["blank subject", {
+      getAuthenticationIdentity: vi.fn().mockResolvedValue({
+        subject: "   ", verifiedEmail: identity.canonicalVerifiedEmail,
+      }),
+    }],
+    ["blank email", {
+      getAuthenticationIdentity: vi.fn().mockResolvedValue({
+        subject: "stable-provider-subject", verifiedEmail: "  ",
+      }),
+    }],
+  ])("fails closed for %s without falling back to legacy email", async (_label, methods) => {
+    const pending = {
+      deliver: vi.fn().mockResolvedValue(undefined),
+      fail: vi.fn().mockResolvedValue(undefined),
+    };
+    const registry = {
+      resolveGatekeeperIdentity: vi.fn(),
+      getIdentity: vi.fn(),
+    };
+    const user = {
+      createGatekeeperSession: vi.fn(),
+      revokeGatekeeperSession: vi.fn(),
+    };
+    const legacyEmail = vi.fn().mockResolvedValue(identity.canonicalVerifiedEmail);
+    const account = { ...methods, getAuthenticatedEmail: legacyEmail };
+
+    await callback("custom-auth", registry, user, pending).complete(
+      account as unknown as Fetcher<GatekeeperUser>,
+    );
+
+    expect(legacyEmail).not.toHaveBeenCalled();
+    expect(registry.resolveGatekeeperIdentity).not.toHaveBeenCalled();
+    expect(user.createGatekeeperSession).not.toHaveBeenCalled();
+    expect(pending.deliver).not.toHaveBeenCalled();
+    expect(pending.fail).toHaveBeenCalledExactlyOnceWith(expect.stringMatching(/sign-in failed/i));
   });
 });

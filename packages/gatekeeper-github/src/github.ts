@@ -9,6 +9,7 @@ import {
   type Gatekeeper,
   type GatekeeperConnectCallback,
   type GatekeeperConnectOptions,
+  type GatekeeperAuthenticationIdentity,
   type GatekeeperUser,
   type GatekeeperUserVerifier,
   type GatekeeperVendor as GatekeeperVendorIface,
@@ -1220,9 +1221,12 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
     });
   }
 
+  async getAuthenticationIdentity(): Promise<GatekeeperAuthenticationIdentity | null> {
+    return await this.#withApi(api => api.getAuthenticationIdentity());
+  }
+
   async getAuthenticatedEmail(): Promise<string | null> {
-    // GitHub's primary email is verified by GitHub, so it's safe as a sign-in identity.
-    return await this.#withApi(api => api.getPrimaryVerifiedEmail());
+    return (await this.getAuthenticationIdentity())?.verifiedEmail ?? null;
   }
 
   async getSupportedResources(): Promise<SupportedResource[]> {

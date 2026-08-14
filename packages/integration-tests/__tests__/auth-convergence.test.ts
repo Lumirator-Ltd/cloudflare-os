@@ -33,6 +33,7 @@ let clerkPublicKeyPem: string;
 let accessPrivateKey: KeyObject;
 let accessPublicJwk: Record<string, unknown>;
 const sensitiveValues = new Set<string>([CLERK_SECRET_KEY]);
+const gatekeeperSubjects = new Map<string, string>();
 let cleanupFixture: { email: string; token: string } | undefined;
 
 function uniqueEmail(prefix: string): string {
@@ -102,12 +103,22 @@ async function setClerkProfile(subject: string, email: string, status = "active"
   if (!response.ok) throw new Error(`failed to configure Clerk profile: ${await response.text()}`);
 }
 
-async function setGatekeeperLoginEmail(email: string): Promise<void> {
+function gatekeeperSubjectFor(email: string): string {
+  const key = email.trim().toLowerCase();
+  let subject = gatekeeperSubjects.get(key);
+  if (!subject) {
+    subject = `gatekeeper-subject-${crypto.randomUUID()}`;
+    gatekeeperSubjects.set(key, subject);
+  }
+  return subject;
+}
+
+async function setGatekeeperLoginIdentity(email: string, subject: string): Promise<void> {
   sensitiveValues.add(email);
   const response = await harness.fetchWorker(
     TEST_GATEKEEPER_WORKER,
     "http://gatekeeper-test.test/control/gatekeeper-login-email",
-    { method: "POST", body: JSON.stringify({ email }) },
+    { method: "POST", body: JSON.stringify({ subject, email }) },
   );
   if (!response.ok) {
     throw new Error(`failed to configure Gatekeeper login: ${await response.text()}`);
@@ -120,8 +131,10 @@ async function authenticateWithClerk(
   return await publicApi.authenticateWithClerk(clerkToken(subject));
 }
 
-async function loginWithGatekeeper(publicApi: RpcStub<PublicApi>, email: string): Promise<string> {
-  await setGatekeeperLoginEmail(email);
+async function loginWithGatekeeper(
+    publicApi: RpcStub<PublicApi>, email: string,
+    subject = gatekeeperSubjectFor(email)): Promise<string> {
+  await setGatekeeperLoginIdentity(email, subject);
   const login = await publicApi.startGatekeeperLogin(TEST_VENDOR_ID);
   using attempt = login.attempt;
   expect(login.url).toContain("/oauth/test-login");
@@ -163,7 +176,7 @@ async function configureWorkshop(admins: string[], access = false): Promise<void
 
 type Scenario = {
   adminEmail: string;
-  adminSubject: string;
+  gatekeeperSubject: string;
   adminToken: string;
   internalUserId: string;
 };
@@ -171,21 +184,20 @@ type Scenario = {
 async function setupScenario(prefix: string): Promise<Scenario> {
   const adminEmail = uniqueEmail(`${prefix}-admin`);
   const cleanupEmail = uniqueEmail(`${prefix}-cleanup`);
-  const adminSubject = `user_${prefix}_${crypto.randomUUID()}`;
+  const gatekeeperSubject = `gatekeeper-admin-${prefix}-${crypto.randomUUID()}`;
   await configureWorkshop([adminEmail, cleanupEmail]);
-
-  using clerkPublic = connect(harness.url);
-  const clerk = await authenticateWithClerk(clerkPublic, adminSubject, adminEmail.toUpperCase());
-  using clerkApi = clerk.api;
-  using _clerkSession = clerk.session;
-  const internalUserId = (await clerkApi.whoami()).id;
 
   using cleanupPublic = connect(harness.url);
   const cleanupToken = await loginWithGatekeeper(cleanupPublic, cleanupEmail);
   cleanupFixture = { email: cleanupEmail, token: cleanupToken };
 
   using gatekeeperPublic = connect(harness.url);
-  const adminToken = await loginWithGatekeeper(gatekeeperPublic, `  ${adminEmail.toUpperCase()}  `);
+  const adminToken = await loginWithGatekeeper(
+    gatekeeperPublic, `  ${adminEmail.toUpperCase()}  `, gatekeeperSubject,
+  );
+  using identityPublic = connect(harness.url);
+  using identityApi = await identityPublic.authenticate(adminToken);
+  const internalUserId = (await identityApi.whoami()).id;
   await waitFor("the fresh scenario admin config to reload", async () => {
     try {
       using adminPublic = connect(harness.url);
@@ -201,7 +213,7 @@ async function setupScenario(prefix: string): Promise<Scenario> {
     }
   });
 
-  return { adminEmail, adminSubject, adminToken, internalUserId };
+  return { adminEmail, gatekeeperSubject, adminToken, internalUserId };
 }
 
 beforeAll(async () => {
@@ -283,31 +295,54 @@ afterAll(async () => {
 });
 
 describe.sequential("verified authentication convergence", () => {
-  it("converges Clerk and a real Gatekeeper login while retaining local session semantics",
+  it("keeps the original Gatekeeper subject successful but requires explicit Clerk linking",
       async () => {
-    const scenario = await setupScenario("converge");
-    using clerkPublic = connect(harness.url);
-    const clerk = await authenticateWithClerk(
-      clerkPublic, scenario.adminSubject, scenario.adminEmail.toUpperCase());
-    using clerkApi = clerk.api;
-    using _clerkSession = clerk.session;
-    await clerkApi.setOwnDisplayName("Converged identity");
-
+    const scenario = await setupScenario("explicit-link");
     expect(scenario.internalUserId).toMatch(/^[0-9a-f]{64}$/);
     expect(scenario.internalUserId).not.toContain(scenario.adminEmail);
-    await expect(clerkApi.amIAdmin()).resolves.toBe(true);
 
     using firstLocalPublic = connect(harness.url);
     using firstLocalApi = await firstLocalPublic.authenticate(scenario.adminToken);
-    await expect(firstLocalApi.whoami()).resolves.toMatchObject({
-      id: scenario.internalUserId,
-      name: "Converged identity",
-    });
+    await expect(firstLocalApi.whoami()).resolves.toMatchObject({ id: scenario.internalUserId });
     await expect(firstLocalApi.amIAdmin()).resolves.toBe(true);
+    const firstAdmin = await firstLocalApi.getAdminApi();
+    expect(firstAdmin).not.toBeNull();
+    firstAdmin?.[Symbol.dispose]();
 
-    using secondLocalPublic = connect(harness.url);
-    using secondLocalApi = await secondLocalPublic.authenticate(scenario.adminToken);
-    await expect(secondLocalApi.whoami()).resolves.toMatchObject({ id: scenario.internalUserId });
+    using repeatGatekeeperPublic = connect(harness.url);
+    const repeatedToken = await loginWithGatekeeper(
+      repeatGatekeeperPublic, scenario.adminEmail, scenario.gatekeeperSubject,
+    );
+    using repeatedLocalPublic = connect(harness.url);
+    using repeatedLocalApi = await repeatedLocalPublic.authenticate(repeatedToken);
+    await expect(repeatedLocalApi.whoami())
+      .resolves.toMatchObject({ id: scenario.internalUserId });
+
+    const clerkSubject = `user_explicit_link_${crypto.randomUUID()}`;
+    await setClerkProfile(clerkSubject, scenario.adminEmail);
+    using clerkPublic = connect(harness.url);
+    await expect(clerkPublic.authenticateWithClerk(clerkToken(clerkSubject)))
+      .rejects.toThrow(/explicit linking|operator resolution/i);
+  });
+
+  it("denies a recycled current admin email to a different Gatekeeper subject without a token",
+      async () => {
+    const scenario = await setupScenario("recycled-admin");
+    await setGatekeeperLoginIdentity(
+      scenario.adminEmail, `recycled-admin-subject-${crypto.randomUUID()}`,
+    );
+    using recycledPublic = connect(harness.url);
+    const recycled = await recycledPublic.startGatekeeperLogin(TEST_VENDOR_ID);
+    using recycledAttempt = recycled.attempt;
+    await expect(recycledAttempt.wait())
+      .rejects.toThrow(/explicit linking|operator resolution/i);
+
+    using originalPublic = connect(harness.url);
+    using originalApi = await originalPublic.authenticate(scenario.adminToken);
+    await expect(originalApi.amIAdmin()).resolves.toBe(true);
+    const admin = await originalApi.getAdminApi();
+    expect(admin).not.toBeNull();
+    admin?.[Symbol.dispose]();
   });
 
   it("canonicalizes ADMINS and fails malformed configuration without exposing its contents",
@@ -352,11 +387,9 @@ describe.sequential("verified authentication convergence", () => {
     const appBroken = new Promise<void>(resolve => { resolveAppBroken = resolve; });
     appUi.onRpcBroken(() => resolveAppBroken());
 
-    await setClerkProfile(scenario.adminSubject, uniqueEmail("retained-admin-moved"));
+    const movedEmail = uniqueEmail("retained-admin-moved");
     using moverPublic = connect(harness.url);
-    const moved = await moverPublic.authenticateWithClerk(clerkToken(scenario.adminSubject));
-    moved.api[Symbol.dispose]();
-    moved.session[Symbol.dispose]();
+    await loginWithGatekeeper(moverPublic, movedEmail, scenario.gatekeeperSubject);
 
     await expect(adminCapability.getSettings()).rejects.toThrow();
     await expect(retainedApi.getAdminApi()).rejects.toThrow();
@@ -370,30 +403,45 @@ describe.sequential("verified authentication convergence", () => {
   });
 
   it("does not transfer stale allowlisted admin email authority to a new Clerk subject", async () => {
-    const scenario = await setupScenario("clerk-stale-admin");
-    const movedEmail = uniqueEmail("clerk-stale-moved");
-    await setClerkProfile(scenario.adminSubject, movedEmail);
+    const adminEmail = uniqueEmail("clerk-stale-admin");
+    const cleanupEmail = uniqueEmail("clerk-stale-cleanup");
+    const adminSubject = `user_clerk_stale_${crypto.randomUUID()}`;
+    await configureWorkshop([adminEmail, cleanupEmail]);
+    using cleanupPublic = connect(harness.url);
+    cleanupFixture = {
+      email: cleanupEmail,
+      token: await loginWithGatekeeper(cleanupPublic, cleanupEmail),
+    };
 
+    using initialPublic = connect(harness.url);
+    const initial = await authenticateWithClerk(initialPublic, adminSubject, adminEmail);
+    using initialApi = initial.api;
+    using _initialSession = initial.session;
+    const internalUserId = (await initialApi.whoami()).id;
+    await expect(initialApi.amIAdmin()).resolves.toBe(true);
+
+    const movedEmail = uniqueEmail("clerk-stale-moved");
+    await setClerkProfile(adminSubject, movedEmail);
     using movedPublic = connect(harness.url);
-    const moved = await movedPublic.authenticateWithClerk(clerkToken(scenario.adminSubject));
+    const moved = await movedPublic.authenticateWithClerk(clerkToken(adminSubject));
     using movedApi = moved.api;
     using _movedSession = moved.session;
-    await expect(movedApi.whoami()).resolves.toMatchObject({ id: scenario.internalUserId });
+    await expect(movedApi.whoami()).resolves.toMatchObject({ id: internalUserId });
     await expect(movedApi.amIAdmin()).resolves.toBe(false);
     await expect(movedApi.getAdminApi()).resolves.toBeNull();
 
     const reassignedSubject = `user_reassigned_${crypto.randomUUID()}`;
-    await setClerkProfile(reassignedSubject, scenario.adminEmail);
+    await setClerkProfile(reassignedSubject, adminEmail);
     using reassignedPublic = connect(harness.url);
     await expect(reassignedPublic.authenticateWithClerk(clerkToken(reassignedSubject)))
       .rejects.toThrow(/explicit linking|operator resolution/i);
 
-    await setClerkProfile(scenario.adminSubject, scenario.adminEmail);
+    await setClerkProfile(adminSubject, adminEmail);
     using returnedPublic = connect(harness.url);
-    const returned = await returnedPublic.authenticateWithClerk(clerkToken(scenario.adminSubject));
+    const returned = await returnedPublic.authenticateWithClerk(clerkToken(adminSubject));
     using returnedApi = returned.api;
     using _returnedSession = returned.session;
-    await expect(returnedApi.whoami()).resolves.toMatchObject({ id: scenario.internalUserId });
+    await expect(returnedApi.whoami()).resolves.toMatchObject({ id: internalUserId });
     await expect(returnedApi.amIAdmin()).resolves.toBe(true);
     const regainedAdmin = await returnedApi.getAdminApi();
     expect(regainedAdmin).not.toBeNull();
@@ -403,6 +451,16 @@ describe.sequential("verified authentication convergence", () => {
   it("denies unknown Clerk and Gatekeeper identities when signups close but permits existing ones",
       async () => {
     const scenario = await setupScenario("signup-policy");
+    const existingClerkEmail = uniqueEmail("existing-clerk");
+    const existingClerkSubject = `user_existing_${crypto.randomUUID()}`;
+    using initialClerkPublic = connect(harness.url);
+    const initialClerk = await authenticateWithClerk(
+      initialClerkPublic, existingClerkSubject, existingClerkEmail,
+    );
+    const existingClerkId = (await initialClerk.api.whoami()).id;
+    initialClerk.api[Symbol.dispose]();
+    initialClerk.session[Symbol.dispose]();
+
     using adminPublic = connect(harness.url);
     using adminApi = await adminPublic.authenticate(scenario.adminToken);
     const admin = await adminApi.getAdminApi();
@@ -418,18 +476,20 @@ describe.sequential("verified authentication convergence", () => {
 
     using existingClerkPublic = connect(harness.url);
     const existingClerk = await authenticateWithClerk(
-      existingClerkPublic, scenario.adminSubject, scenario.adminEmail);
+      existingClerkPublic, existingClerkSubject, existingClerkEmail);
     using existingClerkApi = existingClerk.api;
     using _existingClerkSession = existingClerk.session;
     await expect(existingClerkApi.whoami())
-      .resolves.toMatchObject({ id: scenario.internalUserId });
+      .resolves.toMatchObject({ id: existingClerkId });
 
     using unknownGatekeeperPublic = connect(harness.url);
     await expect(loginWithGatekeeper(unknownGatekeeperPublic, uniqueEmail("unknown-gatekeeper")))
       .rejects.toThrow(/sign-ups are currently disabled/i);
 
     using existingGatekeeperPublic = connect(harness.url);
-    const existingToken = await loginWithGatekeeper(existingGatekeeperPublic, scenario.adminEmail);
+    const existingToken = await loginWithGatekeeper(
+      existingGatekeeperPublic, scenario.adminEmail, scenario.gatekeeperSubject,
+    );
     using existingLocalPublic = connect(harness.url);
     using existingLocalApi = await existingLocalPublic.authenticate(existingToken);
     await expect(existingLocalApi.whoami())
@@ -463,29 +523,27 @@ describe.sequential("verified authentication convergence", () => {
     await setupScenario("collision-admin");
     const firstEmail = uniqueEmail("collision-first");
     const occupiedEmail = uniqueEmail("collision-occupied");
-    const subject = `user_collision_${crypto.randomUUID()}`;
-
-    using firstClerkPublic = connect(harness.url);
-    const firstClerk = await authenticateWithClerk(firstClerkPublic, subject, firstEmail);
-    using firstClerkApi = firstClerk.api;
-    using _firstClerkSession = firstClerk.session;
-    const firstId = (await firstClerkApi.whoami()).id;
+    const firstSubject = `gatekeeper-collision-${crypto.randomUUID()}`;
 
     using firstGatekeeperPublic = connect(harness.url);
-    const firstToken = await loginWithGatekeeper(firstGatekeeperPublic, firstEmail);
+    const firstToken = await loginWithGatekeeper(
+      firstGatekeeperPublic, firstEmail, firstSubject,
+    );
     using retainedPublic = connect(harness.url);
     using retainedApi = await retainedPublic.authenticate(firstToken);
+    const firstId = (await retainedApi.whoami()).id;
 
     using occupiedGatekeeperPublic = connect(harness.url);
-    const occupiedToken = await loginWithGatekeeper(occupiedGatekeeperPublic, occupiedEmail);
+    const occupiedToken = await loginWithGatekeeper(
+      occupiedGatekeeperPublic, occupiedEmail, `occupied-${crypto.randomUUID()}`,
+    );
     using occupiedLocalPublic = connect(harness.url);
     using occupiedApi = await occupiedLocalPublic.authenticate(occupiedToken);
     expect((await occupiedApi.whoami()).id).not.toBe(firstId);
 
-    await setClerkProfile(subject, occupiedEmail);
     using collisionPublic = connect(harness.url);
-    await expect(collisionPublic.authenticateWithClerk(clerkToken(subject)))
-      .rejects.toThrow(/collision/i);
+    await expect(loginWithGatekeeper(collisionPublic, occupiedEmail, firstSubject))
+      .rejects.toThrow(/sign-in failed/i);
 
     await expect(retainedApi.whoami()).rejects.toThrow();
     using rejectedPublic = connect(harness.url);

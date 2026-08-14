@@ -79,11 +79,16 @@ type SessionRecordBase = {
   created: Date;
 };
 
-/** Exact registry authority persisted with a Gatekeeper-authenticated local session. */
+/** Maximum lifetime of a retained local Gatekeeper sign-in session. */
+export const GATEKEEPER_SESSION_MAX_AGE_MS = 60 * 60 * 1_000;
+
+/** Exact registry and provider authority persisted with a Gatekeeper-authenticated local session. */
 export type RegistrySessionAuthentication =
   Pick<IdentityResolution, "canonicalVerifiedEmail" | "identityVersion"> & {
     kind: "gatekeeper";
     provider: string;
+    subject: string;
+    expiresAt: Date;
   };
 
 type LoginSessionRecord = SessionRecordBase & Partial<RegistrySessionAuthentication>;
@@ -378,15 +383,22 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     if (!session) {
       throw createAuthError(AUTH_ERROR_CODES.invalidSessionToken);
     }
-    if (session.kind !== "gatekeeper" || session.provider === undefined ||
-        session.canonicalVerifiedEmail === undefined || session.identityVersion === undefined) {
-      return null;
+    if (session.kind !== "gatekeeper") return null;
+    if (typeof session.provider !== "string" || session.provider.length === 0 ||
+        typeof session.subject !== "string" || session.subject.trim().length === 0 ||
+        typeof session.canonicalVerifiedEmail !== "string" ||
+        typeof session.identityVersion !== "number" || !(session.expiresAt instanceof Date) ||
+        !Number.isFinite(session.expiresAt.getTime()) || session.expiresAt.getTime() <= Date.now()) {
+      this.storage.sessions.delete(tokenId);
+      throw createAuthError(AUTH_ERROR_CODES.invalidSessionToken);
     }
     return {
       kind: session.kind,
       provider: session.provider,
+      subject: session.subject,
       canonicalVerifiedEmail: session.canonicalVerifiedEmail,
       identityVersion: session.identityVersion,
+      expiresAt: session.expiresAt,
     };
   }
 
@@ -453,10 +465,14 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
    *
    * Identity resolution and signup policy remain at the backend callback boundary; this User DO
    * only verifies that the supplied resolution is the exact version and email already initialized.
+   * The absolute expiry is the earlier of a valid future provider expiry and the fixed one-hour
+   * local maximum; a missing, invalid, or stale provider expiry uses that local maximum.
    */
   async createGatekeeperSession(
     identity: Pick<IdentityResolution, "canonicalVerifiedEmail" | "identityVersion">,
     provider: string,
+    subject: string,
+    providerExpiresAt?: Date,
   ): Promise<string> {
     if (!this.storage.created.get() ||
         this.storage.identityInternalUserId.get() !== this.ctx.id.name ||
@@ -464,7 +480,20 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         this.storage.verifiedEmail.get() !== identity.canonicalVerifiedEmail) {
       throw new Error("Gatekeeper session identity is not initialized at this exact version.");
     }
-    return this.#newSessionToken({ kind: "gatekeeper", provider, ...identity });
+    if (typeof subject !== "string" || subject.trim().length === 0) {
+      throw new Error("Gatekeeper session requires a stable provider subject.");
+    }
+    const now = Date.now();
+    const localExpiresAt = now + GATEKEEPER_SESSION_MAX_AGE_MS;
+    const providerExpiry = providerExpiresAt?.getTime();
+    const expiresAt = new Date(
+      typeof providerExpiry === "number" && Number.isFinite(providerExpiry) && providerExpiry > now
+        ? Math.min(providerExpiry, localExpiresAt)
+        : localExpiresAt,
+    );
+    return this.#newSessionToken({
+      kind: "gatekeeper", provider, subject, expiresAt, ...identity,
+    });
   }
 
   /** Revokes one just-minted Gatekeeper session when registry authority changes during issuance. */

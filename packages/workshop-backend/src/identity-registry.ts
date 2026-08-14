@@ -78,6 +78,10 @@ function accessSubjectKey(issuer: string, audience: string, subject: string): st
   return JSON.stringify(["access", issuer, audience, subject]);
 }
 
+function gatekeeperSubjectKey(vendorId: string, subject: string): string {
+  return JSON.stringify(["gatekeeper", vendorId, subject]);
+}
+
 function randomInternalUserId(): string {
   const bytes = new Uint8Array(32);
   crypto.getRandomValues(bytes);
@@ -145,6 +149,23 @@ export class IdentityRegistry extends DurableObject<Cloudflare.Env> {
   ): Promise<IdentityResolution> {
     return await this.#resolveSubjectIdentity(
       accessSubjectKey(issuer, audience, subject), verifiedEmail, signupsEnabled,
+    );
+  }
+
+  /**
+   * Resolves a verified Gatekeeper subject scoped to its vendor and current verified email.
+   *
+   * An unseen subject fails closed when the email is current or historical authority of any
+   * identity. Existing subjects retain their internal user ID across email changes.
+   */
+  async resolveGatekeeperIdentity(
+    vendorId: string,
+    subject: string,
+    verifiedEmail: string,
+    signupsEnabled: boolean,
+  ): Promise<IdentityResolution> {
+    return await this.#resolveSubjectIdentity(
+      gatekeeperSubjectKey(vendorId, subject), verifiedEmail, signupsEnabled,
     );
   }
 

@@ -34,6 +34,14 @@ export type AvatarImage = {
   url: string;
 }
 
+/** A stable, provider-verified identity returned by an authentication Gatekeeper. */
+export type GatekeeperAuthenticationIdentity = {
+  /** Provider-stable opaque subject; it must not be an email, display name, or renameable login. */
+  readonly subject: string;
+  /** Email address whose ownership the provider has verified for this subject. */
+  readonly verifiedEmail: string;
+};
+
 // Describes a connected GatekeeperVendor, for display purposes.
 export type VendorDescription = {
   // Human-readable name of the service, e.g. "Google", "GitHub", etc.
@@ -58,9 +66,13 @@ export type VendorDescription = {
   // Build agents that triage email, draft and edit documents, or run analytics queries on your data."
   description?: string;
 
-  // True if this vendor can authenticate a user for sign-in: i.e. its connect flow yields a
-  // provider-verified email (via GatekeeperUser.getAuthenticatedEmail()). The Workshop may offer
-  // such a vendor as a login method, subject to its own auth allowlist. Defaults to false.
+  /**
+   * Whether this vendor can authenticate a user for sign-in.
+   *
+   * A vendor that sets this must implement `GatekeeperUser.getAuthenticationIdentity()` and return
+   * both a provider-stable opaque subject and a provider-verified email. The Workshop may offer the
+   * vendor as a login method, subject to its own auth allowlist. Defaults to false.
+   */
   providesAuth?: boolean;
 
   // If set, this vendor can mint a connected account with no OAuth flow (see
@@ -405,9 +417,10 @@ export interface GatekeeperVendor extends WorkerEntrypoint {
   // `options.scopes` selects how much access to request (default "full"):
   //   - "full": the gatekeeper's full capability scopes (repos, docs, etc.). The resulting
   //     connection is persisted as a usable connected account.
-  //   - "auth": only the minimal scopes needed to verify the user's email for sign-in. The grant is
-  //     transient — after `complete()` lets the caller read getAuthenticatedEmail(), the gatekeeper
-  //     discards it. Vendors without `providesAuth` ignore this and always use their full scopes.
+  //   - "auth": only the minimal scopes needed to verify the user's stable authentication identity
+  //     for sign-in. The grant is transient — after `complete()` lets the caller read
+  //     getAuthenticationIdentity(), the gatekeeper discards it. Vendors without `providesAuth`
+  //     ignore this and always use their full scopes.
   //
   // `options.resourceUrlPatterns`, if given, limits the connection to the authorization needed for
   // those grantable resource types. If omitted, authorization for all of the vendor's resource
@@ -532,12 +545,22 @@ export interface GatekeeperUser extends WorkerEntrypoint {
   // prevent replay attacks.
   reconnect(): Promise<{url: string}>;
 
-  // For vendors that advertise `providesAuth`, returns a provider-verified email identity claim.
-  // The email MUST be verified by the provider (e.g. Google `email_verified`, a GitHub
-  // primary+verified email, or a Cloudflare account email). The Workshop uses this claim only to
-  // resolve an opaque deployment-local stable identity through its Identity Registry; an
-  // unverified address would allow account takeover. Returns null when the account has no verified
-  // email or the vendor does not support auth.
+  /**
+   * Returns the stable, provider-verified identity used for Workshop sign-in.
+   *
+   * Vendors advertising `providesAuth` must implement this method. Sign-in fails closed when the
+   * method is absent, throws, returns null, or returns a blank field. Non-authentication vendors do
+   * not need to implement it.
+   */
+  getAuthenticationIdentity?(): Promise<GatekeeperAuthenticationIdentity | null>;
+
+  /**
+   * Returns a provider-verified email when retained integrations still need the legacy claim.
+   *
+   * @deprecated Workshop sign-in uses `getAuthenticationIdentity()` exclusively because an email
+   * address is not a stable provider identity. This method remains for backward compatibility and
+   * must never be used as a sign-in fallback.
+   */
   getAuthenticatedEmail(): Promise<string | null>;
 
   // Get a `GatekeeperUserVerifier` representing this user.

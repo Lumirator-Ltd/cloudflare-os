@@ -1,4 +1,4 @@
-import { env, runInDurableObject } from "cloudflare:test";
+import { abortAllDurableObjects, env, runInDurableObject } from "cloudflare:test";
 import { exports, RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { newWebSocketRpcSession, RpcStub as CapnWebRpcStub, RpcTarget } from "capnweb";
 import type {
@@ -11,7 +11,10 @@ import type {
 import type { SupportedResource } from "@gadgets/workshop-shared/gatekeeper";
 import type { ChatGatewayRpcTarget } from "@gadgets/workshop-shared/external-message-gateway";
 import { describe, expect, it, vi } from "vitest";
-import type { UserDurableObject } from "../src/user.js";
+import {
+  GATEKEEPER_SESSION_MAX_AGE_MS,
+  type UserDurableObject,
+} from "../src/user.js";
 
 function uniqueEmail(prefix: string): string {
   return `${prefix}-${crypto.randomUUID()}@example.com`;
@@ -52,6 +55,22 @@ async function connect(): Promise<CapnWebRpcStub<PublicApi>> {
   return newWebSocketRpcSession<PublicApi>(response.webSocket);
 }
 
+async function sessionTokenId(token: string): Promise<string> {
+  const bytes = Uint8Array.fromBase64(token);
+  const hash = await crypto.subtle.digest("SHA-256", bytes);
+  return new Uint8Array(hash).toHex();
+}
+
+async function storedSession(user: DurableObjectStub<UserDurableObject>, token: string) {
+  const tokenId = await sessionTokenId(token);
+  return await runInDurableObject(user, (instance: UserDurableObject) => {
+    const mutable = instance as unknown as {
+      storage: { sessions: { get(id: string): Record<string, unknown> | undefined } };
+    };
+    return mutable.storage.sessions.get(tokenId);
+  });
+}
+
 async function registryAuthenticationError(
     publicApi: CapnWebRpcStub<PublicApi>, token: string): Promise<unknown> {
   try {
@@ -75,7 +94,7 @@ async function authenticatedRegistryUser(prefix: string): Promise<{
   const token = await user.createGatekeeperSession({
     canonicalVerifiedEmail: identity.canonicalVerifiedEmail,
     identityVersion: identity.identityVersion,
-  }, "test");
+  }, "test", `test-subject-${prefix}`);
   const publicApi = await connect();
   const api = await publicApi.authenticate(`${identity.internalUserId}:${token}`);
   return {
@@ -132,7 +151,7 @@ describe("stable human application identities", () => {
     const token = await user.createGatekeeperSession({
       canonicalVerifiedEmail: identity.canonicalVerifiedEmail,
       identityVersion: identity.identityVersion,
-    }, "test");
+    }, "test", subject);
 
     {
       using publicApi = await connect();
@@ -147,6 +166,98 @@ describe("stable human application identities", () => {
     expect(await registryAuthenticationError(
       stalePublicApi, `${identity.internalUserId}:${token}`,
     )).toEqual(expect.objectContaining({ message: expect.stringMatching(/identity authority/i) }));
+  });
+
+  it("bounds Gatekeeper tokens to one hour or an earlier valid provider expiry", async () => {
+    const { identity, user } = await registryUser("bounded-token");
+    const startedAt = Date.now();
+    const providerExpiry = new Date(startedAt + 10 * 60_000);
+    const earlier = await user.createGatekeeperSession({
+      canonicalVerifiedEmail: identity.canonicalVerifiedEmail,
+      identityVersion: identity.identityVersion,
+    }, "test", "stable-subject", providerExpiry);
+    const fallback = await user.createGatekeeperSession({
+      canonicalVerifiedEmail: identity.canonicalVerifiedEmail,
+      identityVersion: identity.identityVersion,
+    }, "test", "stable-subject");
+    const staleProvider = await user.createGatekeeperSession({
+      canonicalVerifiedEmail: identity.canonicalVerifiedEmail,
+      identityVersion: identity.identityVersion,
+    }, "test", "stable-subject", new Date(startedAt - 1));
+
+    expect((await storedSession(user, earlier))?.expiresAt).toEqual(providerExpiry);
+    for (const token of [fallback, staleProvider]) {
+      const expiresAt = (await storedSession(user, token))?.expiresAt;
+      expect(expiresAt).toBeInstanceOf(Date);
+      expect((expiresAt as Date).getTime()).toBeGreaterThanOrEqual(
+        startedAt + GATEKEEPER_SESSION_MAX_AGE_MS,
+      );
+      expect((expiresAt as Date).getTime()).toBeLessThanOrEqual(
+        Date.now() + GATEKEEPER_SESSION_MAX_AGE_MS,
+      );
+    }
+  });
+
+  it("rejects and deletes expired or subjectless unbounded Gatekeeper records", async () => {
+    const { identity, user } = await registryUser("closed-token-record");
+    const expired = await user.createGatekeeperSession({
+      canonicalVerifiedEmail: identity.canonicalVerifiedEmail,
+      identityVersion: identity.identityVersion,
+    }, "test", "stable-subject", new Date(Date.now() + 60_000));
+    const expiredTokenId = await sessionTokenId(expired);
+    const legacyBytes = crypto.getRandomValues(new Uint8Array(32));
+    const legacy = legacyBytes.toBase64();
+    const legacyTokenId = await sessionTokenId(legacy);
+
+    await runInDurableObject(user, (instance: UserDurableObject) => {
+      const mutable = instance as unknown as {
+        storage: { sessions: { put(value: Record<string, unknown>): void } };
+      };
+      mutable.storage.sessions.put({
+        tokenId: expiredTokenId,
+        created: new Date(),
+        kind: "gatekeeper",
+        provider: "test",
+        subject: "stable-subject",
+        canonicalVerifiedEmail: identity.canonicalVerifiedEmail,
+        identityVersion: identity.identityVersion,
+        expiresAt: new Date(Date.now() - 1),
+      });
+      mutable.storage.sessions.put({
+        tokenId: legacyTokenId,
+        created: new Date(),
+        kind: "gatekeeper",
+        provider: "test",
+        canonicalVerifiedEmail: identity.canonicalVerifiedEmail,
+        identityVersion: identity.identityVersion,
+      });
+    });
+
+    await runInDurableObject(user, async (instance: UserDurableObject) => {
+      await expect(instance.authenticate(expired)).rejects.toThrow(/invalid session token/i);
+      await expect(instance.authenticate(legacy)).rejects.toThrow(/invalid session token/i);
+    });
+    expect(await storedSession(user, expired)).toBeUndefined();
+    expect(await storedSession(user, legacy)).toBeUndefined();
+  });
+
+  it("preserves the Gatekeeper token absolute expiry across a User DO restart", async () => {
+    const { identity, user } = await registryUser("restart-token-expiry");
+    const providerExpiry = new Date(Date.now() + 10 * 60_000);
+    const token = await user.createGatekeeperSession({
+      canonicalVerifiedEmail: identity.canonicalVerifiedEmail,
+      identityVersion: identity.identityVersion,
+    }, "test", "restart-subject", providerExpiry);
+
+    await abortAllDurableObjects();
+    const restartedUser = exports.UserDurableObject.getByName(identity.internalUserId);
+
+    await expect(restartedUser.authenticate(token)).resolves.toMatchObject({
+      kind: "gatekeeper",
+      provider: "test",
+      subject: "restart-subject",
+      expiresAt: providerExpiry,
+    });
   });
 
   it("rejects an old unversioned registry token instead of assigning current authority", async () => {
@@ -172,7 +283,7 @@ describe("stable human application identities", () => {
     const token = await user.createGatekeeperSession({
       canonicalVerifiedEmail: identity.canonicalVerifiedEmail,
       identityVersion: identity.identityVersion,
-    }, "test");
+    }, "test", subject);
     const registry = exports.IdentityRegistry.getByName("");
     expect(await registry.getIdentity(identity.internalUserId)).toMatchObject({
       canonicalVerifiedEmail: identity.canonicalVerifiedEmail,

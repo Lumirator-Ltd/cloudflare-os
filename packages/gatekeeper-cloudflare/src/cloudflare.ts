@@ -2,7 +2,8 @@ import { WorkerEntrypoint, DurableObject } from "cloudflare:workers";
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import {
   GatekeeperVendor as GatekeeperVendorIface, Gatekeeper, GatekeeperUserVerifier, VendorDescription,
-  GatekeeperConnectCallback, GatekeeperConnectOptions, AccountDescription,
+  GatekeeperAuthenticationIdentity, GatekeeperConnectCallback, GatekeeperConnectOptions,
+  AccountDescription,
   SupportedResource, ResourceConfiguratorFrame, stripTrailingSlashes,
 } from "@gadgets/workshop-shared/gatekeeper";
 import { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
@@ -350,11 +351,15 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
     };
   }
 
-  async getAuthenticatedEmail(): Promise<string | null> {
+  async getAuthenticationIdentity(): Promise<GatekeeperAuthenticationIdentity | null> {
     const token = await this.#account().getAccessToken();
     if (!token) return null;
     const identity = await fetchIdentity(token);
-    return identity?.email ?? null;
+    return identity ? { subject: identity.id, verifiedEmail: identity.email } : null;
+  }
+
+  async getAuthenticatedEmail(): Promise<string | null> {
+    return (await this.getAuthenticationIdentity())?.verifiedEmail ?? null;
   }
 
   async ensureResources(_resourceUrlPatterns: string[]): Promise<{url?: string}> {

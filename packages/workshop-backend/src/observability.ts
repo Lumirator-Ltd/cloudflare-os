@@ -20,7 +20,8 @@ export type WorkshopObservabilityFields = {
   modelId: string;
   observerId: string;
   operation: string;
-  outcome: "ok" | "error" | "usage_limit" | "callbacks_stalled" | "no_email" | "signups_disabled";
+  outcome: "ok" | "error" | "usage_limit" | "callbacks_stalled" | "no_email" |
+    "signups_disabled" | "explicit_link_required";
   path: string;
   resourceTitle: string;
   sequence: number;

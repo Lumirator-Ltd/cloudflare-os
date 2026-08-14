@@ -11,7 +11,8 @@
 //   2. The browser opens `url` (the gatekeeper's self-closing OAuth popup) and calls
 //      `attempt.wait()`, which blocks on the PendingLogin DO.
 //   3. When the gatekeeper finishes, it calls LoginConnectCallbackImpl.complete(user). We read the
-//      verified email, resolve its stable internal identity, mint a local Workshop session, and
+//      stable provider subject and verified email, resolve its internal identity, mint a bounded
+//      local Workshop session, and
 //      deliver the token to the PendingLogin DO, which resolves the awaiting RPC.
 //
 // Sign-in only requests minimal scopes and the gatekeeper grant is transient (it self-destructs
@@ -33,6 +34,8 @@ import {
 const logger = createWorkshopLogger("workshop.auth");
 
 const SIGNUPS_DISABLED = "New sign-ups are currently disabled on this deployment.";
+const EXPLICIT_LINK_REQUIRED =
+  "Identity ownership requires explicit linking or deployment operator resolution.";
 
 type PendingResult = { token: string } | { error: string };
 
@@ -83,6 +86,7 @@ export class PendingLogin extends DurableObject<Cloudflare.Env> {
 }
 
 type LoginCallbackProps = { pendingId: string; vendorId: string };
+type AuthenticationAccountStub = Required<Pick<GatekeeperUser, "getAuthenticationIdentity">>;
 
 export class LoginConnectCallbackImpl
     extends WorkerEntrypoint<Cloudflare.Env, LoginCallbackProps>
@@ -92,37 +96,52 @@ export class LoginConnectCallbackImpl
     return this.ctx.exports.PendingLogin.get(id);
   }
 
-  async complete(account: Fetcher<GatekeeperUser>, _expiresAt?: Date): Promise<void> {
+  async complete(account: Fetcher<GatekeeperUser>, expiresAt?: Date): Promise<void> {
     const loginLogger = logger.with({
       operation: "gatekeeper.login",
       vendorId: this.ctx.props.vendorId,
     });
     const pending = this.#pending();
     // `account` is a call parameter, so Cap'n Web disposes it automatically when this method
-    // returns — no explicit disposal needed. We read the verified email to resolve/create the user.
-    // The email's local-part seeds the initial display name, like the Cloudflare Access flow.
+    // returns — no explicit disposal needed. Sign-in exclusively reads the provider's stable
+    // subject plus verified email; the legacy email-only method is never an authentication fallback.
     try {
-      const email = await account.getAuthenticatedEmail();
-      if (!email) {
-        loginLogger.info("gatekeeper login finished", {
-          event: "gatekeeper.login.finished", outcome: "no_email",
-        });
-        await pending.fail("This account has no verified email, so it can't be used to sign in.");
-        return;
+      // RPC stubs cannot report optional-method presence. The providesAuth declaration says the
+      // method exists; viewing that derived interface as required lets invocation itself fail closed
+      // for a custom vendor that violates the declaration.
+      const providerIdentity = await (account as unknown as AuthenticationAccountStub)
+        .getAuthenticationIdentity();
+      if (!providerIdentity || typeof providerIdentity.subject !== "string" ||
+          providerIdentity.subject.trim().length === 0 ||
+          typeof providerIdentity.verifiedEmail !== "string" ||
+          providerIdentity.verifiedEmail.trim().length === 0) {
+        throw new Error("Authentication Gatekeeper returned an invalid identity.");
       }
-      // Signup policy is read at the Workshop trust boundary before the verified provider email is
-      // resolved. The registry canonicalizes the email and initializes the stable User DO.
+      // Signup policy is read at the Workshop trust boundary before the verified provider identity
+      // is resolved. The registry canonicalizes the email and initializes the stable User DO.
       const signupsEnabled = (await readAdminConfig(this.env)).signupsEnabled;
       const registry = this.ctx.exports.IdentityRegistry.getByName("");
       let identity: IdentityResolution;
       try {
-        identity = await registry.resolveEmailIdentity(email, signupsEnabled);
+        identity = await registry.resolveGatekeeperIdentity(
+          this.ctx.props.vendorId,
+          providerIdentity.subject,
+          providerIdentity.verifiedEmail,
+          signupsEnabled,
+        );
       } catch (error) {
         if (error instanceof Error && error.message === SIGNUPS_DISABLED) {
           loginLogger.info("gatekeeper login finished", {
             event: "gatekeeper.login.finished", outcome: "signups_disabled",
           });
           await pending.fail(SIGNUPS_DISABLED);
+          return;
+        }
+        if (error instanceof Error && error.message === EXPLICIT_LINK_REQUIRED) {
+          loginLogger.info("gatekeeper login finished", {
+            event: "gatekeeper.login.finished", outcome: "explicit_link_required",
+          });
+          await pending.fail(EXPLICIT_LINK_REQUIRED);
           return;
         }
         throw error;
@@ -139,7 +158,9 @@ export class LoginConnectCallbackImpl
       // email resolution but before the local token is ready. Re-read exact durable authority and
       // revoke the just-created token rather than delivering stale authority.
       const secret = await mintCurrentIdentitySessionToken({
-        mint: () => userStub.createGatekeeperSession(identity, this.ctx.props.vendorId),
+        mint: () => userStub.createGatekeeperSession(
+          identity, this.ctx.props.vendorId, providerIdentity.subject, expiresAt,
+        ),
         revoke: token => userStub.revokeGatekeeperSession(token),
         assertCurrent,
       });

@@ -1,7 +1,8 @@
 # Sign-in via authentication gatekeepers
 
 Sign-in is provided by **authentication gatekeepers** — gatekeepers that advertise `providesAuth`
-and can return a provider-verified email. Each such gatekeeper uses a single OAuth app for both
+and can return a provider-stable subject plus provider-verified email. Each such gatekeeper uses a
+single OAuth app for both
 sign-in and (when the user later connects it) its capabilities, so there's only one OAuth app per
 provider — no separate "login" vs. "gatekeeper" apps.
 
@@ -25,10 +26,18 @@ operator resolution flow exists. The owning subject may move back to one of its 
 Session records capture the registry's exact canonical email and identity version so a moved or
 collision-locked identity fails closed.
 
-Authentication Gatekeepers remain email-only pending LUM-73. They can resolve an identity only
-while their verified email is that identity's current email; a historical email tombstone is never
-resurrected. This legacy path does not yet provide Gatekeepers with stable provider-subject ownership
-or a complete explicit-link flow.
+Authentication Gatekeepers resolve a provider-stable opaque subject scoped by vendor ID together
+with its current provider-verified email. Email moves preserve the internal identity, tombstone the
+old email, increment the identity version, and invalidate retained sessions. An unseen Gatekeeper
+subject cannot claim a current or historical email owned by any Gatekeeper, Clerk, or Access identity.
+It fails closed regardless of signup policy. A proof-based user linking UI and operator resolution
+workflow remain future LUM-73 work; sign-in never invents an email-only merge while those flows are
+absent.
+
+Retained local Gatekeeper sessions have an absolute expiry at the earlier of the provider's valid
+future credential expiry and a fixed one-hour local maximum. Missing or stale provider expiry uses
+the one-hour maximum. Expired and legacy subjectless/unbounded records are rejected and removed, and
+the complete capability graph is aborted at the retained session deadline.
 
 Cloudflare Access WebSocket capability graphs have both one non-refreshable absolute deadline at the
 assertion's verified `exp` and exact registry-authority invalidation. The browser must reconnect with
@@ -54,8 +63,10 @@ what persists a usable connected account. `GatekeeperVendor.connectAccount` take
 2. The client opens `url` in a pop-up (the gatekeeper's self-closing OAuth window) and calls
    `attempt.wait()`, which blocks on the `PendingLogin` DO.
 3. When the gatekeeper finishes, it calls `complete(user)`. The callback reads
-   `user.getAuthenticatedEmail()`, resolves/creates the registry-backed stable identity, initializes
-   its `UserDurableObject`, and mints an exact-version session. It delivers the
+   `user.getAuthenticationIdentity()`, resolves the vendor-scoped stable subject and verified email,
+   initializes its `UserDurableObject`, and mints an exact-version, bounded session. A missing,
+   throwing, null, or blank stable identity fails sign-in without falling back to the deprecated
+   email-only method. It delivers the
    `"<opaque-internal-id>:<secret>"` token to the `PendingLogin` DO, which resolves the awaiting RPC.
 4. The client stores the token and authenticates as usual.
 

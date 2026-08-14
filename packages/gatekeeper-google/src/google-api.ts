@@ -2,7 +2,10 @@
 //
 // This file was largely vibe-coded based on an interface spec.
 
-import { AccountDescription } from "@gadgets/workshop-shared/gatekeeper";
+import {
+  AccountDescription,
+  GatekeeperAuthenticationIdentity,
+} from "@gadgets/workshop-shared/gatekeeper";
 import { GmailThreadInfo, EmailAddress } from "./types";
 import { createMimeMessage } from "mimetext/browser";
 import PostalMime, { addressParser } from "postal-mime";
@@ -154,8 +157,15 @@ export async function getAccessToken(
   };
 }
 
-export async function getGoogleAccountDescription(accessToken: string)
-    : Promise<AccountDescription> {
+type GoogleUserInfo = {
+  sub?: unknown;
+  email?: unknown;
+  email_verified?: unknown;
+  name?: unknown;
+  picture?: unknown;
+};
+
+async function fetchGoogleUserInfo(accessToken: string): Promise<GoogleUserInfo> {
   const response = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
     method: 'GET',
     headers: {
@@ -169,36 +179,33 @@ export async function getGoogleAccountDescription(accessToken: string)
     throw new Error(`Failed to fetch user info: ${response.status} ${response.statusText}`);
   }
 
-  let data: any = await response.json();
+  const data: unknown = await response.json();
+  return typeof data === "object" && data !== null ? data as GoogleUserInfo : {};
+}
 
-  // Mapping the response to our specific interface
+export async function getGoogleAccountDescription(accessToken: string)
+    : Promise<AccountDescription> {
+  const data = await fetchGoogleUserInfo(accessToken);
   return {
-    displayName: data.name,
-    uniqueName: data.email,
-    avatar: {url: data.picture},
+    displayName: typeof data.name === "string" ? data.name : undefined,
+    uniqueName: typeof data.email === "string" ? data.email : undefined,
+    avatar: { url: typeof data.picture === "string" ? data.picture : "" },
   };
 }
 
-// Fetch the account's email for use as a sign-in identity, but only if Google reports it as
-// verified (`email_verified`). Returns null otherwise, so the Workshop never keys an account by an
-// unverified address.
+/** Returns Google's stable subject and verified email from one validated userinfo response. */
+export async function getGoogleAuthenticationIdentity(
+    accessToken: string): Promise<GatekeeperAuthenticationIdentity | null> {
+  const data = await fetchGoogleUserInfo(accessToken);
+  if (typeof data.sub !== "string" || data.sub.trim().length === 0 ||
+      typeof data.email !== "string" || data.email.trim().length === 0 ||
+      data.email_verified !== true) return null;
+  return { subject: data.sub, verifiedEmail: data.email };
+}
+
+/** @deprecated Use `getGoogleAuthenticationIdentity()` for sign-in. */
 export async function getGoogleVerifiedEmail(accessToken: string): Promise<string | null> {
-  const response = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
-    method: 'GET',
-    headers: {
-      'Authorization': `Bearer ${accessToken}`,
-      'Accept': 'application/json',
-    },
-  });
-
-  if (!response.ok) {
-    response.body?.cancel();
-    throw new Error(`Failed to fetch user info: ${response.status} ${response.statusText}`);
-  }
-
-  let data: any = await response.json();
-  if (!data.email || data.email_verified !== true) return null;
-  return data.email;
+  return (await getGoogleAuthenticationIdentity(accessToken))?.verifiedEmail ?? null;
 }
 
 // `signal` lets the caller bound the round trip; UserAccount holds the credential mutex across this.

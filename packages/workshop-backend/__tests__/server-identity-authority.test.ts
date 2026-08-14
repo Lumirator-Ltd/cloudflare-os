@@ -30,7 +30,13 @@ describe("registry-backed Gatekeeper graph authority", () => {
     const userId = { name: internalUserId } as DurableObjectId;
     const user = {
       id: userId,
-      authenticate: vi.fn().mockResolvedValue({ kind: "gatekeeper", provider: "test", ...authority }),
+      authenticate: vi.fn().mockResolvedValue({
+        kind: "gatekeeper",
+        provider: "test",
+        subject: "stable-provider-subject",
+        expiresAt: new Date(Date.now() + 60 * 60_000),
+        ...authority,
+      }),
       revokeGatekeeperSession: vi.fn().mockResolvedValue(undefined),
       whoami: vi.fn(async () => {
         if (graphAborted) throw new Error("capability graph aborted");
@@ -77,7 +83,7 @@ describe("registry-backed Gatekeeper graph authority", () => {
       const timersBeforeAuthentication = vi.getTimerCount();
       const api = await publicApi.authenticate(`${internalUserId}:secret-token`);
       expect(invalidationSubscriber).toEqual(expect.any(Function));
-      expect(vi.getTimerCount()).toBe(timersBeforeAuthentication + 2);
+      expect(vi.getTimerCount()).toBe(timersBeforeAuthentication + 3);
 
       // Model a registry restart dropping its ephemeral callback without changing durable state.
       invalidationSubscriber = undefined;
@@ -103,6 +109,120 @@ describe("registry-backed Gatekeeper graph authority", () => {
         expect.objectContaining({ message: CURRENT_IDENTITY_AUTHORITY_REQUIRED }),
       );
       await expect(api.whoami()).rejects.toThrow("capability graph aborted");
+    } finally {
+      publicApi[Symbol.dispose]();
+      vi.useRealTimers();
+    }
+  });
+
+  it("aborts the retained capability graph at the local session absolute expiry", async () => {
+    vi.useFakeTimers();
+    const expiresAt = new Date(Date.now() + 1_000);
+    let graphAborted = false;
+    const userId = { name: internalUserId } as DurableObjectId;
+    const user = {
+      authenticate: vi.fn().mockResolvedValue({
+        kind: "gatekeeper", provider: "test", subject: "stable-provider-subject",
+        expiresAt, ...authority,
+      }),
+      revokeGatekeeperSession: vi.fn().mockResolvedValue(undefined),
+      whoami: vi.fn(async () => {
+        if (graphAborted) throw new Error("capability graph aborted");
+        return { type: "user" as const, id: internalUserId, name: "Member" };
+      }),
+    };
+    const registry = {
+      getIdentity: vi.fn().mockResolvedValue(currentIdentity()),
+      registerIdentitySession: vi.fn().mockResolvedValue(undefined),
+      unregisterIdentitySession: vi.fn().mockResolvedValue(undefined),
+    };
+    const abortController = new AbortController();
+    const abortSession = vi.fn((reason: Error) => {
+      graphAborted = true;
+      abortController.abort(reason);
+    });
+    const ctx = {
+      exports: {
+        UserDurableObject: {
+          idFromName: vi.fn(() => userId),
+          get: vi.fn(() => user),
+        },
+        IdentityRegistry: { getByName: vi.fn(() => registry) },
+        OverseerDurableObject: {},
+        AdminSettings: { getByName: vi.fn(() => ({})) },
+      },
+      waitUntil: vi.fn(),
+    } as unknown as ExecutionContext;
+    const publicApi = new PublicApiImpl(
+      ctx, { ADMINS: [] } as unknown as Cloudflare.Env, abortSession,
+      abortController.signal, vi.fn() as never,
+    );
+
+    try {
+      const api = await publicApi.authenticate(`${internalUserId}:secret-token`);
+      await expect(api.whoami()).resolves.toMatchObject({ id: internalUserId });
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(abortSession).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ message: expect.stringMatching(/gatekeeper session expired/i) }),
+      );
+      await expect(api.whoami()).rejects.toThrow("capability graph aborted");
+    } finally {
+      publicApi[Symbol.dispose]();
+      vi.useRealTimers();
+    }
+  });
+
+  it("returns no capability when authentication finishes after the local session expiry", async () => {
+    vi.useFakeTimers();
+    const expiresAt = new Date(Date.now() + 1_000);
+    const authentication = Promise.withResolvers<{
+      kind: "gatekeeper";
+      provider: string;
+      subject: string;
+      expiresAt: Date;
+      canonicalVerifiedEmail: string;
+      identityVersion: number;
+    }>();
+    const userId = { name: internalUserId } as DurableObjectId;
+    const user = {
+      authenticate: vi.fn(() => authentication.promise),
+      revokeGatekeeperSession: vi.fn().mockResolvedValue(undefined),
+    };
+    const registry = {
+      getIdentity: vi.fn().mockResolvedValue(currentIdentity()),
+      registerIdentitySession: vi.fn().mockResolvedValue(undefined),
+      unregisterIdentitySession: vi.fn().mockResolvedValue(undefined),
+    };
+    const abortController = new AbortController();
+    const abortSession = vi.fn((reason: Error) => abortController.abort(reason));
+    const ctx = {
+      exports: {
+        UserDurableObject: {
+          idFromName: vi.fn(() => userId),
+          get: vi.fn(() => user),
+        },
+        IdentityRegistry: { getByName: vi.fn(() => registry) },
+        OverseerDurableObject: {},
+        AdminSettings: { getByName: vi.fn(() => ({})) },
+      },
+      waitUntil: vi.fn(),
+    } as unknown as ExecutionContext;
+    const publicApi = new PublicApiImpl(
+      ctx, { ADMINS: [] } as unknown as Cloudflare.Env, abortSession,
+      abortController.signal, vi.fn() as never,
+    );
+
+    try {
+      const pending = publicApi.authenticate(`${internalUserId}:secret-token`);
+      await vi.advanceTimersByTimeAsync(1_000);
+      authentication.resolve({
+        kind: "gatekeeper", provider: "test", subject: "stable-provider-subject",
+        expiresAt, ...authority,
+      });
+
+      await expect(pending).rejects.toThrow(/gatekeeper session expired/i);
+      expect(registry.registerIdentitySession).not.toHaveBeenCalled();
+      expect(abortSession).toHaveBeenCalledOnce();
     } finally {
       publicApi[Symbol.dispose]();
       vi.useRealTimers();

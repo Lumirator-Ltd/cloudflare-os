@@ -82,7 +82,10 @@ async function signUpVerified(
     const response = await harness.fetchWorker(
       TEST_GATEKEEPER_WORKER,
       "http://gatekeeper-test.test/control/gatekeeper-login-email",
-      { method: "POST", body: JSON.stringify({ email }) },
+      {
+        method: "POST",
+        body: JSON.stringify({ subject: `observer-subject-${crypto.randomUUID()}`, email }),
+      },
     );
     if (!response.ok) {
       throw new Error(`Failed to configure verified test identity: ${await response.text()}`);

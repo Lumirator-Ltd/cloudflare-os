@@ -41,6 +41,7 @@ import { resolveUiFeatureFlags } from "./feature-flags";
 import { serveSiteLogo, SITE_LOGO_PATH } from "./site-logo.js";
 import { createWorkshopLogger } from "./observability";
 import { wrapDoStubForTelemetry } from "./do-telemetry";
+import { armAbsoluteDeadline, type AbsoluteDeadline } from "./absolute-deadline.js";
 
 const logger = createWorkshopLogger("workshop.server");
 
@@ -91,6 +92,7 @@ const ADMINS_CONFIG_ERROR =
   "ADMINS must be configured as an array of verified email strings.";
 const COLLISION_LOCKED = "Identity collision requires deployment operator assistance.";
 const ACCESS_SESSION_EXPIRED = "Cloudflare Access session expired.";
+const GATEKEEPER_SESSION_EXPIRED = "Gatekeeper session expired.";
 const MAX_TIMEOUT_MILLISECONDS = 0x7fffffff;
 
 function canonicalAdminEmails(value: unknown): string[] {
@@ -702,6 +704,9 @@ export class PublicApiImpl extends RpcTarget implements PublicApi {
   #authorityWatchdogs = new Map<string, { dispose(): void }>();
   #accessDeadline: ReturnType<typeof setTimeout> | undefined;
   #accessExpired = false;
+  #gatekeeperDeadline: AbsoluteDeadline | undefined;
+  #gatekeeperExpiresAt: Date | undefined;
+  #gatekeeperExpired = false;
 
   constructor(private ctx: ExecutionContext, private env: Env,
       private abortSession: (reason: Error) => void,
@@ -721,6 +726,8 @@ export class PublicApiImpl extends RpcTarget implements PublicApi {
   #dispose(): void {
     if (this.#accessDeadline !== undefined) clearTimeout(this.#accessDeadline);
     this.#accessDeadline = undefined;
+    this.#gatekeeperDeadline?.dispose();
+    this.#gatekeeperDeadline = undefined;
     this.#disposeClerkSession();
     this.#disposeIdentitySessions();
     for (const watchdog of this.#authorityWatchdogs.values()) watchdog.dispose();
@@ -765,6 +772,19 @@ export class PublicApiImpl extends RpcTarget implements PublicApi {
     }
     if (this.abortSignal.aborted) throw new Error("This API socket is closed.");
     return this.accessIdentity;
+  }
+
+  #armGatekeeperDeadline(expiresAt: Date): void {
+    if (this.#gatekeeperExpiresAt && this.#gatekeeperExpiresAt.getTime() <= expiresAt.getTime()) {
+      return;
+    }
+    this.#gatekeeperDeadline?.dispose();
+    this.#gatekeeperExpiresAt = new Date(expiresAt.getTime());
+    this.#gatekeeperDeadline = armAbsoluteDeadline(expiresAt, () => {
+      if (this.#gatekeeperExpired || this.abortSignal.aborted) return;
+      this.#gatekeeperExpired = true;
+      this.abortSession(new Error(GATEKEEPER_SESSION_EXPIRED));
+    });
   }
 
   #disposeClerkSession(): void {
@@ -881,6 +901,15 @@ export class PublicApiImpl extends RpcTarget implements PublicApi {
     // A registry-backed local token carries the exact authority captured at issuance. Never upgrade
     // an old unversioned token to whatever registry version happens to be current; only legacy
     // password users (which have no registry identity) retain that compatibility until Task 7.
+    if (sessionAuthentication) {
+      if (sessionAuthentication.expiresAt.getTime() <= Date.now()) {
+        this.#gatekeeperExpired = true;
+        this.abortSession(new Error(GATEKEEPER_SESSION_EXPIRED));
+        return rejectStaleSession(new Error(GATEKEEPER_SESSION_EXPIRED));
+      }
+      this.#armGatekeeperDeadline(sessionAuthentication.expiresAt);
+    }
+
     const registry = this.ctx.exports.IdentityRegistry.getByName("");
     const identity = await registry.getIdentity(internalUserId);
     let authority: VerifiedAuthorityContext | undefined;
@@ -907,6 +936,14 @@ export class PublicApiImpl extends RpcTarget implements PublicApi {
     if (authority) {
       await this.#registerIdentitySession(internalUserId, authority);
       this.#startAuthorityWatchdog(internalUserId, authority);
+      if (this.#gatekeeperExpired || !this.#gatekeeperExpiresAt ||
+          this.#gatekeeperExpiresAt.getTime() <= Date.now() || this.abortSignal.aborted) {
+        if (!this.#gatekeeperExpired) {
+          this.#gatekeeperExpired = true;
+          this.abortSession(new Error(GATEKEEPER_SESSION_EXPIRED));
+        }
+        return rejectStaleSession(new Error(GATEKEEPER_SESSION_EXPIRED));
+      }
     }
 
     recordAnalytics(this.ctx, this.env, {

@@ -32,10 +32,11 @@ async function cfGet<T>(token: string, path: string): Promise<T | null> {
 }
 
 export interface CloudflareIdentity {
-  // Cloudflare user id (stable).
+  /** Cloudflare's stable user ID. */
   id: string;
-  // Account email — verified by Cloudflare, so safe to use as a sign-in identity.
+  /** Account email verified by Cloudflare. */
   email: string;
+  /** Human-readable account name. */
   displayName: string;
 }
 
@@ -46,8 +47,11 @@ export async function fetchIdentity(token: string): Promise<CloudflareIdentity |
   const r = await cfGet<{ id?: string; email?: string; first_name?: string; last_name?: string }>(
     token, "/user",
   );
-  if (!r || !r.id || !r.email) return null;
-  const name = [r.first_name, r.last_name].filter(Boolean).join(" ").trim();
+  if (!r || typeof r.id !== "string" || r.id.trim().length === 0 ||
+      typeof r.email !== "string" || r.email.trim().length === 0) return null;
+  const name = [r.first_name, r.last_name]
+    .filter((part): part is string => typeof part === "string" && part.length > 0)
+    .join(" ").trim();
   return {
     id: String(r.id),
     email: r.email,
