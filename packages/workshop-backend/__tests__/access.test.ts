@@ -18,7 +18,29 @@ const accessEnv = {
 };
 
 describe("verifyCfAccessJwt", () => {
+  it("passes the exact configured issuer and audience to JWT verification", async () => {
+    const request = new Request("https://workshop.example/api", {
+      headers: { "cf-access-jwt-assertion": "signed-token" },
+    });
+    const exactEnv = {
+      CF_ACCESS_ISS: "https://exact-team.cloudflareaccess.com",
+      CF_ACCESS_AUD: "exact-workshop-audience",
+    };
+
+    await verifyCfAccessJwt(request, exactEnv);
+
+    expect(joseMocks.jwtVerify).toHaveBeenCalledWith(
+      "signed-token",
+      expect.any(Function),
+      {
+        issuer: exactEnv.CF_ACCESS_ISS,
+        audience: exactEnv.CF_ACCESS_AUD,
+      },
+    );
+  });
+
   it("reuses the remote JWK set for requests with the same issuer", async () => {
+    joseMocks.createRemoteJWKSet.mockClear();
     const request = new Request("https://workshop.example/api", {
       headers: { "cf-access-jwt-assertion": "signed-token" },
     });
@@ -96,6 +118,7 @@ describe("verifiedCfAccessIdentity", () => {
     ["non-numeric expiry", { ...validClaims, exp: "later" }],
     ["fractional expiry", { ...validClaims, exp: validClaims.exp + 0.5 }],
     ["infinite expiry", { ...validClaims, exp: Number.POSITIVE_INFINITY }],
+    ["expiry outside the JavaScript Date range", { ...validClaims, exp: 8_640_000_000_001 }],
     ["expired assertion", { ...validClaims, exp: Math.floor(now / 1_000) }],
   ])("rejects a verified payload with %s", (_name, claims) => {
     expect(verifiedCfAccessIdentity(claims, accessEnv, now)).toBeNull();

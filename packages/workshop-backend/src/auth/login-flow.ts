@@ -23,6 +23,7 @@ import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { GatekeeperConnectCallback, GatekeeperUser } from "@gadgets/workshop-shared/gatekeeper";
 import { createWorkshopLogger } from "../observability";
 import { readAdminConfig } from "../admin-config.js";
+import { recordAnalytics } from "../analytics.js";
 import type { IdentityResolution } from "../identity-registry.js";
 import {
   assertCurrentIdentityAuthority,
@@ -145,6 +146,13 @@ export class LoginConnectCallbackImpl
       // Session tokens remain "<doName>:<secret>"; the opaque record also retains this exact
       // registry version/email so a post-check delivery race cannot upgrade it on reconnect.
       await pending.deliver(`${identity.internalUserId}:${secret}`);
+      if (identity.created) {
+        recordAnalytics(this.ctx, this.env, {
+          event_name: "account_created",
+          user_id: identity.internalUserId,
+          source: "gatekeeper",
+        });
+      }
       loginLogger.info("gatekeeper login finished", {
         event: "gatekeeper.login.finished", outcome: "ok",
       });

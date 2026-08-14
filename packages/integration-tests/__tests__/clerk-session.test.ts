@@ -21,6 +21,8 @@ const SECRET_KEY = "sk_test_task5_fixture";
 const KEY_ID = "task5-integration-key";
 const PRIMARY_SUBJECT = "user_task5_primary";
 const OLD_EMAIL = "clerk-admin-old@example.com";
+const MOVE_EMAIL = "clerk-admin-move@example.com";
+const GRAPH_EMAIL = "clerk-admin-graph@example.com";
 const NEW_EMAIL = "clerk-admin-new@example.com";
 const RESOURCE_PATTERN = "https://gadgets-test.example/things/*";
 const RESOURCE_URL = "https://gadgets-test.example/things/session-capability";
@@ -141,7 +143,7 @@ beforeAll(async () => {
         CLERK_JWT_KEY: publicKeyPem,
         PUBLIC_BASE_URL: AUTHORIZED_PARTY,
         DEV: true,
-        ADMINS: [OLD_EMAIL],
+        ADMINS: [OLD_EMAIL, MOVE_EMAIL, GRAPH_EMAIL],
       };
     },
   });
@@ -252,7 +254,7 @@ describe.sequential("Clerk WebSocket sessions", () => {
   it("rejects an initiating refresh whose current Clerk email changes and kills its graph",
       async () => {
     const subject = "user_task5_email_move";
-    await setClerkProfile(subject, OLD_EMAIL);
+    await setClerkProfile(subject, MOVE_EMAIL);
     using publicApi = connect(harness.url);
     const initial = await signToken({ subject, expiresInSeconds: 30 });
     const auth = await authenticate(publicApi, initial.token);
@@ -291,7 +293,7 @@ describe.sequential("Clerk WebSocket sessions", () => {
       async () => {
     using publicApi = connect(harness.url);
     const graphSubject = "user_task5_graph";
-    await setClerkProfile(graphSubject, OLD_EMAIL);
+    await setClerkProfile(graphSubject, GRAPH_EMAIL);
     const accepted = await signToken({ subject: graphSubject, expiresInSeconds: 15 });
     const auth = await authenticate(publicApi, accepted.token);
     using api = auth.api;

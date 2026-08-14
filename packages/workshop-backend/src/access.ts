@@ -68,11 +68,12 @@ export function verifiedCfAccessIdentity(
   }
 
   const expiresAtMilliseconds = expiresAtSeconds * 1_000;
-  if (!Number.isFinite(expiresAtMilliseconds) || expiresAtMilliseconds <= now) return null;
+  const expiresAt = new Date(expiresAtMilliseconds);
+  if (!Number.isFinite(expiresAt.getTime()) || expiresAtMilliseconds <= now) return null;
   return {
     subject: payload.sub,
     email: payload.email,
-    expiresAt: new Date(expiresAtMilliseconds),
+    expiresAt,
     issuer: env.CF_ACCESS_ISS,
     audience: env.CF_ACCESS_AUD,
   };

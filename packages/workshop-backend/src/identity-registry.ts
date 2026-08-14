@@ -14,6 +14,8 @@ export type IdentityResolution = {
   canonicalVerifiedEmail: string;
   identityVersion: number;
   status: "active";
+  /** Whether this resolution durably created the internal identity. */
+  created: boolean;
 };
 
 /** Current registry state for an internal Workshop identity. */
@@ -28,6 +30,11 @@ type IdentityRecord = IdentityState & {
   subjectKeys: string[];
 };
 
+type EmailClaimRecord = {
+  canonicalVerifiedEmail: string;
+  internalUserId: string;
+};
+
 type IdentitySessionInvalidator = () => Promise<void>;
 
 function makeIdentityRegistryStorage(storage: DurableObjectStorage) {
@@ -40,6 +47,12 @@ function makeIdentityRegistryStorage(storage: DurableObjectStorage) {
           bySubject: (record: IdentityRecord) => record.subjectKeys,
         },
       }),
+      emailClaims: collection<EmailClaimRecord>()({
+        primaryKey: "canonicalVerifiedEmail",
+      }),
+    },
+    singletons: {
+      emailClaimsBackfilled: false,
     },
   });
 }
@@ -48,6 +61,8 @@ type IdentityRegistryStorage = ReturnType<typeof makeIdentityRegistryStorage>;
 
 const SIGNUPS_DISABLED = "New sign-ups are currently disabled on this deployment.";
 const COLLISION_LOCKED = "Identity collision requires deployment operator assistance.";
+const EXPLICIT_LINK_REQUIRED =
+  "Identity ownership requires explicit linking or deployment operator resolution.";
 const SETUP_FAILED = "Identity setup failed.";
 
 /** Canonicalizes a server-verified email using only trim and lowercase operations. */
@@ -69,7 +84,7 @@ function randomInternalUserId(): string {
   return bytes.toHex();
 }
 
-function activeResolution(record: IdentityRecord): IdentityResolution {
+function activeResolution(record: IdentityRecord, created: boolean): IdentityResolution {
   if (record.status !== "active" || record.canonicalVerifiedEmail === null) {
     throw new Error(COLLISION_LOCKED);
   }
@@ -78,6 +93,7 @@ function activeResolution(record: IdentityRecord): IdentityResolution {
     canonicalVerifiedEmail: record.canonicalVerifiedEmail,
     identityVersion: record.identityVersion,
     status: record.status,
+    created,
   };
 }
 
@@ -97,6 +113,11 @@ export class IdentityRegistry extends DurableObject<Cloudflare.Env> {
     super(ctx, env);
     this.storage = makeIdentityRegistryStorage(ctx.storage);
     this.users = ctx.exports.UserDurableObject;
+    this.storage.transaction(() => {
+      if (this.storage.emailClaimsBackfilled.get()) return;
+      this.#backfillCurrentEmailClaims();
+      this.storage.emailClaimsBackfilled.put(true);
+    });
   }
 
   /** Resolves a verified Clerk subject and primary email to an initialized active identity. */
@@ -113,7 +134,7 @@ export class IdentityRegistry extends DurableObject<Cloudflare.Env> {
   /**
    * Resolves a verified Access subject scoped to its trusted issuer and audience.
    *
-   * A subject not yet present follows the registry's existing verified-email convergence policy.
+   * An unseen subject fails closed if its email is claimed by any existing identity.
    */
   async resolveAccessIdentity(
     issuer: string,
@@ -162,19 +183,20 @@ export class IdentityRegistry extends DurableObject<Cloudflare.Env> {
     subscriber[Symbol.dispose]();
   }
 
-  /** Resolves a Gatekeeper or Access verified email to an initialized active identity. */
+  /** Resolves a legacy email-only Gatekeeper identity at its current, non-historical email. */
   async resolveEmailIdentity(
     verifiedEmail: string,
     signupsEnabled: boolean,
   ): Promise<IdentityResolution> {
     const email = canonicalizeVerifiedEmail(verifiedEmail);
-    const record = this.storage.transaction(() => {
+    const result = this.storage.transaction((): { record: IdentityRecord; created: boolean } => {
       const existing = this.storage.identities.byEmail.get(email);
       if (existing) {
         if (existing.status !== "active") throw new Error(COLLISION_LOCKED);
-        return existing;
+        return { record: existing, created: false };
       }
 
+      if (this.storage.emailClaims.get(email)) throw new Error(EXPLICIT_LINK_REQUIRED);
       if (!signupsEnabled) throw new Error(SIGNUPS_DISABLED);
       const created: IdentityRecord = {
         internalUserId: randomInternalUserId(),
@@ -184,10 +206,11 @@ export class IdentityRegistry extends DurableObject<Cloudflare.Env> {
         subjectKeys: [],
       };
       this.storage.identities.put(created);
-      return created;
+      this.#claimEmail(email, created.internalUserId);
+      return { record: created, created: true };
     });
 
-    return await this.#initialize(record);
+    return await this.#initialize(result.record, result.created);
   }
 
   /**
@@ -218,16 +241,18 @@ export class IdentityRegistry extends DurableObject<Cloudflare.Env> {
       verifiedEmail: string,
       signupsEnabled: boolean): Promise<IdentityResolution> {
     const email = canonicalizeVerifiedEmail(verifiedEmail);
-    const result = this.storage.transaction((): { record: IdentityRecord; changed: boolean } => {
+    const result = this.storage.transaction((): {
+      record: IdentityRecord; changed: boolean; created: boolean;
+    } => {
       const subjectIdentity = this.storage.identities.bySubject.get(subjectKey);
       if (subjectIdentity) {
         if (subjectIdentity.status !== "active") throw new Error(COLLISION_LOCKED);
         if (subjectIdentity.canonicalVerifiedEmail === email) {
-          return { record: subjectIdentity, changed: false };
+          return { record: subjectIdentity, changed: false, created: false };
         }
 
-        const emailIdentity = this.storage.identities.byEmail.get(email);
-        if (emailIdentity && emailIdentity.internalUserId !== subjectIdentity.internalUserId) {
+        const claim = this.storage.emailClaims.get(email);
+        if (claim && claim.internalUserId !== subjectIdentity.internalUserId) {
           const locked: IdentityRecord = {
             ...subjectIdentity,
             canonicalVerifiedEmail: null,
@@ -235,29 +260,20 @@ export class IdentityRegistry extends DurableObject<Cloudflare.Env> {
             status: "collisionLocked",
           };
           this.storage.identities.put(locked);
-          return { record: locked, changed: true };
+          return { record: locked, changed: true, created: false };
         }
 
+        this.#claimEmail(email, subjectIdentity.internalUserId);
         const moved: IdentityRecord = {
           ...subjectIdentity,
           canonicalVerifiedEmail: email,
           identityVersion: subjectIdentity.identityVersion + 1,
         };
         this.storage.identities.put(moved);
-        return { record: moved, changed: true };
+        return { record: moved, changed: true, created: false };
       }
 
-      const emailIdentity = this.storage.identities.byEmail.get(email);
-      if (emailIdentity) {
-        if (emailIdentity.status !== "active") throw new Error(COLLISION_LOCKED);
-        const bound: IdentityRecord = {
-          ...emailIdentity,
-          subjectKeys: [...emailIdentity.subjectKeys, subjectKey],
-        };
-        this.storage.identities.put(bound);
-        return { record: bound, changed: false };
-      }
-
+      if (this.storage.emailClaims.get(email)) throw new Error(EXPLICIT_LINK_REQUIRED);
       if (!signupsEnabled) throw new Error(SIGNUPS_DISABLED);
       const created: IdentityRecord = {
         internalUserId: randomInternalUserId(),
@@ -267,11 +283,30 @@ export class IdentityRegistry extends DurableObject<Cloudflare.Env> {
         subjectKeys: [subjectKey],
       };
       this.storage.identities.put(created);
-      return { record: created, changed: false };
+      this.#claimEmail(email, created.internalUserId);
+      return { record: created, changed: false, created: true };
     });
 
     if (result.changed) this.#invalidateIdentitySessions(result.record.internalUserId);
-    return await this.#initialize(result.record);
+    return await this.#initialize(result.record, result.created);
+  }
+
+  #claimEmail(canonicalVerifiedEmail: string, internalUserId: string): void {
+    const existing = this.storage.emailClaims.get(canonicalVerifiedEmail);
+    if (existing) {
+      if (existing.internalUserId !== internalUserId) throw new Error(COLLISION_LOCKED);
+      return;
+    }
+    this.storage.emailClaims.put({ canonicalVerifiedEmail, internalUserId });
+  }
+
+  #backfillCurrentEmailClaims(): void {
+    const identities = [...this.storage.identities.list()];
+    for (const identity of identities) {
+      if (identity.canonicalVerifiedEmail !== null) {
+        this.#claimEmail(identity.canonicalVerifiedEmail, identity.internalUserId);
+      }
+    }
   }
 
   #invalidateIdentitySessions(internalUserId: string): void {
@@ -309,8 +344,8 @@ export class IdentityRegistry extends DurableObject<Cloudflare.Env> {
     subscriber[Symbol.dispose]();
   }
 
-  async #initialize(record: IdentityRecord): Promise<IdentityResolution> {
-    const resolution = activeResolution(record);
+  async #initialize(record: IdentityRecord, created: boolean): Promise<IdentityResolution> {
+    const resolution = activeResolution(record, created);
     const id = this.users.idFromName(resolution.internalUserId);
     try {
       await this.users.get(id).initializeIdentity(
@@ -329,6 +364,6 @@ export class IdentityRegistry extends DurableObject<Cloudflare.Env> {
         current.identityVersion !== resolution.identityVersion) {
       throw new Error(COLLISION_LOCKED);
     }
-    return activeResolution(current);
+    return activeResolution(current, created);
   }
 }

@@ -369,6 +369,37 @@ describe.sequential("verified authentication convergence", () => {
     await expect(rejectedPublic.authenticate(scenario.adminToken)).rejects.toThrow();
   });
 
+  it("does not transfer stale allowlisted admin email authority to a new Clerk subject", async () => {
+    const scenario = await setupScenario("clerk-stale-admin");
+    const movedEmail = uniqueEmail("clerk-stale-moved");
+    await setClerkProfile(scenario.adminSubject, movedEmail);
+
+    using movedPublic = connect(harness.url);
+    const moved = await movedPublic.authenticateWithClerk(clerkToken(scenario.adminSubject));
+    using movedApi = moved.api;
+    using _movedSession = moved.session;
+    await expect(movedApi.whoami()).resolves.toMatchObject({ id: scenario.internalUserId });
+    await expect(movedApi.amIAdmin()).resolves.toBe(false);
+    await expect(movedApi.getAdminApi()).resolves.toBeNull();
+
+    const reassignedSubject = `user_reassigned_${crypto.randomUUID()}`;
+    await setClerkProfile(reassignedSubject, scenario.adminEmail);
+    using reassignedPublic = connect(harness.url);
+    await expect(reassignedPublic.authenticateWithClerk(clerkToken(reassignedSubject)))
+      .rejects.toThrow(/explicit linking|operator resolution/i);
+
+    await setClerkProfile(scenario.adminSubject, scenario.adminEmail);
+    using returnedPublic = connect(harness.url);
+    const returned = await returnedPublic.authenticateWithClerk(clerkToken(scenario.adminSubject));
+    using returnedApi = returned.api;
+    using _returnedSession = returned.session;
+    await expect(returnedApi.whoami()).resolves.toMatchObject({ id: scenario.internalUserId });
+    await expect(returnedApi.amIAdmin()).resolves.toBe(true);
+    const regainedAdmin = await returnedApi.getAdminApi();
+    expect(regainedAdmin).not.toBeNull();
+    regainedAdmin?.[Symbol.dispose]();
+  });
+
   it("denies unknown Clerk and Gatekeeper identities when signups close but permits existing ones",
       async () => {
     const scenario = await setupScenario("signup-policy");
@@ -475,24 +506,21 @@ describe.sequential("verified authentication convergence", () => {
     await expect(api.whoami()).resolves.toMatchObject({ id: scenario.internalUserId });
   });
 
-  it("converges Access without Clerk keys and enforces disabled signup and admin authority",
+  it("runs Access without Clerk keys and enforces subject ownership, signup, and admin policy",
       async () => {
     const scenario = await setupScenario("access");
+    const accessAdminEmail = uniqueEmail("access-admin");
+    const accessAdminSubject = `access-admin-${crypto.randomUUID()}`;
     const nonAdminEmail = uniqueEmail("access-non-admin");
-    using nonAdminLoginPublic = connect(harness.url);
-    const nonAdminToken = await loginWithGatekeeper(nonAdminLoginPublic, nonAdminEmail);
-    using nonAdminPublic = connect(harness.url);
-    using nonAdminApi = await nonAdminPublic.authenticate(nonAdminToken);
-    const nonAdminInternalUserId = (await nonAdminApi.whoami()).id;
+    const nonAdminSubject = `access-non-admin-${crypto.randomUUID()}`;
 
-    using adminPublic = connect(harness.url);
-    using adminApi = await adminPublic.authenticate(scenario.adminToken);
-    const admin = await adminApi.getAdminApi();
-    if (!admin) throw new Error("scenario identity did not receive AdminApi");
-    using adminCapability = admin as RpcStub<AdminApi>;
-    await adminCapability.setSignupsEnabled(false);
-
-    await configureWorkshop([scenario.adminEmail, cleanupFixture!.email], true);
+    await configureWorkshop([accessAdminEmail, cleanupFixture!.email], true);
+    await harness.updateWorkshop(config => {
+      delete config.vars!.CLERK_PUBLISHABLE_KEY;
+      delete config.vars!.CLERK_SECRET_KEY;
+      delete config.vars!.CLERK_JWT_KEY;
+      delete config.vars!.PUBLIC_BASE_URL;
+    });
     await waitFor("Cloudflare Access mode to reload", async () => {
       const response = await harness.server.fetch("/api", {
         headers: { Origin: harness.url.origin },
@@ -500,34 +528,70 @@ describe.sequential("verified authentication convergence", () => {
       return response.status === 403 ? true : null;
     });
 
-    using accessPublic = accessBatch(accessToken(`  ${scenario.adminEmail.toUpperCase()}  `));
-    const profile = await accessPublic.authenticateFromCfAccess().whoami();
-    expect(profile).toMatchObject({ id: scenario.internalUserId });
+    using firstAdminPublic = accessBatch(accessToken(
+      accessAdminEmail, 120, accessAdminSubject,
+    ));
+    await expect(firstAdminPublic.authenticateFromCfAccess().amIAdmin()).resolves.toBe(true);
+    using firstAdminProfilePublic = accessBatch(accessToken(
+      accessAdminEmail, 120, accessAdminSubject,
+    ));
+    const adminInternalUserId =
+      (await firstAdminProfilePublic.authenticateFromCfAccess().whoami()).id;
 
-    using accessAdminPublic = accessBatch(accessToken(scenario.adminEmail));
-    await expect(accessAdminPublic.authenticateFromCfAccess().amIAdmin()).resolves.toBe(true);
-    using accessSettingsPublic = accessBatch(accessToken(scenario.adminEmail));
-    using accessSettings = (accessSettingsPublic.authenticateFromCfAccess().getAdminApi() as unknown as RpcStub<AdminApi>);
-    await expect(accessSettings.getSettings())
+    using firstNonAdminPublic = accessBatch(accessToken(
+      nonAdminEmail, 120, nonAdminSubject,
+    ));
+    const nonAdminInternalUserId =
+      (await firstNonAdminPublic.authenticateFromCfAccess().whoami()).id;
+
+    using accessSettingsPublic = accessBatch(accessToken(
+      accessAdminEmail, 120, accessAdminSubject,
+    ));
+    using adminCapability = (accessSettingsPublic.authenticateFromCfAccess()
+      .getAdminApi() as unknown as RpcStub<AdminApi>);
+    await adminCapability.setSignupsEnabled(false);
+    using accessSettingsCheckPublic = accessBatch(accessToken(
+      accessAdminEmail, 120, accessAdminSubject,
+    ));
+    using accessSettingsCheck = (accessSettingsCheckPublic.authenticateFromCfAccess()
+      .getAdminApi() as unknown as RpcStub<AdminApi>);
+    await expect(accessSettingsCheck.getSettings())
       .resolves.toMatchObject({ signupsEnabled: false });
 
-    using accessNonAdminPublic = accessBatch(accessToken(nonAdminEmail));
+    using existingAdminPublic = accessBatch(accessToken(
+      `  ${accessAdminEmail.toUpperCase()}  `, 120, accessAdminSubject,
+    ));
+    await expect(existingAdminPublic.authenticateFromCfAccess().whoami())
+      .resolves.toMatchObject({ id: adminInternalUserId });
+
+    using accessNonAdminPublic = accessBatch(accessToken(
+      nonAdminEmail, 120, nonAdminSubject,
+    ));
     await expect(accessNonAdminPublic.authenticateFromCfAccess().whoami())
       .resolves.toMatchObject({ id: nonAdminInternalUserId });
-    using nonAdminCapabilityPublic = accessBatch(accessToken(nonAdminEmail));
+    using nonAdminCapabilityPublic = accessBatch(accessToken(
+      nonAdminEmail, 120, nonAdminSubject,
+    ));
     await expect(nonAdminCapabilityPublic.authenticateFromCfAccess().getAdminApi())
       .resolves.toBeNull();
+
+    using claimedClerkEmailPublic = accessBatch(accessToken(
+      scenario.adminEmail, 120, `access-cross-provider-${crypto.randomUUID()}`,
+    ));
+    await expect(claimedClerkEmailPublic.authenticateFromCfAccess().whoami())
+      .rejects.toThrow(/explicit linking|operator resolution/i);
 
     using unknownAccessPublic = accessBatch(accessToken(uniqueEmail("unknown-access")));
     await expect(unknownAccessPublic.authenticateFromCfAccess().whoami())
       .rejects.toThrow(/sign-ups are currently disabled/i);
   });
 
-  it("keeps one Access identity and current admin authority across a verified email change",
+  it("does not transfer stale allowlisted admin email authority to a new Access subject",
       async () => {
-    const scenario = await setupScenario("access-email-move");
+    await setupScenario("access-email-move");
+    const adminEmail = uniqueEmail("access-stale-admin");
     const accessSubject = `access-stable-${crypto.randomUUID()}`;
-    await configureWorkshop([scenario.adminEmail, cleanupFixture!.email], true);
+    await configureWorkshop([adminEmail, cleanupFixture!.email], true);
     await waitFor("Cloudflare Access mode to reload for the email move", async () => {
       const response = await harness.server.fetch("/api", {
         headers: { Origin: harness.url.origin },
@@ -535,30 +599,41 @@ describe.sequential("verified authentication convergence", () => {
       return response.status === 403 ? true : null;
     });
 
-    const firstToken = accessToken(scenario.adminEmail, 120, accessSubject);
+    const firstToken = accessToken(adminEmail, 120, accessSubject);
     using firstPublic = accessBatch(firstToken);
     await firstPublic.authenticateFromCfAccess().setOwnDisplayName("Stable Access identity");
+    using firstAdminPublic = accessBatch(firstToken);
+    await expect(firstAdminPublic.authenticateFromCfAccess().amIAdmin()).resolves.toBe(true);
     using firstProfilePublic = accessBatch(firstToken);
-    await expect(firstProfilePublic.authenticateFromCfAccess().whoami())
-      .resolves.toMatchObject({ id: scenario.internalUserId });
+    const internalUserId = (await firstProfilePublic.authenticateFromCfAccess().whoami()).id;
 
     const movedEmail = uniqueEmail("access-email-moved");
-    await configureWorkshop([movedEmail, cleanupFixture!.email], true);
-    await waitFor("the changed Access admin allowlist to reload", async () => {
-      const response = await harness.server.fetch("/api", {
-        headers: { Origin: harness.url.origin },
-      });
-      return response.status === 403 ? true : null;
-    });
-
     const movedToken = accessToken(movedEmail, 120, accessSubject);
     using movedPublic = accessBatch(movedToken);
     await expect(movedPublic.authenticateFromCfAccess().whoami()).resolves.toMatchObject({
-      id: scenario.internalUserId,
+      id: internalUserId,
       name: "Stable Access identity",
     });
     using movedAdminPublic = accessBatch(movedToken);
-    await expect(movedAdminPublic.authenticateFromCfAccess().amIAdmin()).resolves.toBe(true);
+    await expect(movedAdminPublic.authenticateFromCfAccess().amIAdmin()).resolves.toBe(false);
+    using movedCapabilityPublic = accessBatch(movedToken);
+    await expect(movedCapabilityPublic.authenticateFromCfAccess().getAdminApi()).resolves.toBeNull();
+
+    using reassignedPublic = accessBatch(accessToken(
+      adminEmail, 120, `access-reassigned-${crypto.randomUUID()}`,
+    ));
+    await expect(reassignedPublic.authenticateFromCfAccess().getAdminApi())
+      .rejects.toThrow(/explicit linking|operator resolution/i);
+
+    using returnedPublic = accessBatch(accessToken(adminEmail, 120, accessSubject));
+    await expect(returnedPublic.authenticateFromCfAccess().whoami())
+      .resolves.toMatchObject({ id: internalUserId });
+    using returnedAdminPublic = accessBatch(accessToken(adminEmail, 120, accessSubject));
+    await expect(returnedAdminPublic.authenticateFromCfAccess().amIAdmin()).resolves.toBe(true);
+    using returnedCapabilityPublic = accessBatch(accessToken(adminEmail, 120, accessSubject));
+    const regainedAdmin = await returnedCapabilityPublic.authenticateFromCfAccess().getAdminApi();
+    expect(regainedAdmin).not.toBeNull();
+    regainedAdmin?.[Symbol.dispose]();
   });
 
   it("retains Access JWT and same-origin rejection behavior", async () => {

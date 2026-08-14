@@ -92,7 +92,7 @@ export type ProductAnalyticsInput =
   | {
       event_name: "account_created";
       user_id: string;
-      source: "password" | "cf_access";
+      source: "password" | "cf_access" | "clerk" | "gatekeeper";
     }
   | {
       event_name: "user_authenticated";

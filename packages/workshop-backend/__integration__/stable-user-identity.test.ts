@@ -28,6 +28,19 @@ async function registryUser(prefix: string) {
   };
 }
 
+async function subjectRegistryUser(prefix: string) {
+  const email = uniqueEmail(prefix);
+  const subject = `subject-${crypto.randomUUID()}`;
+  const identity = await exports.IdentityRegistry.getByName("")
+    .resolveClerkIdentity(subject, email, true);
+  return {
+    email,
+    subject,
+    identity,
+    user: exports.UserDurableObject.getByName(identity.internalUserId),
+  };
+}
+
 async function connect(): Promise<CapnWebRpcStub<PublicApi>> {
   const response = await exports.default.fetch(new Request("https://workshop.invalid/api", {
     headers: { Upgrade: "websocket" },
@@ -115,7 +128,7 @@ function blueprintMetadata(author: AiChatAuthorInfo) {
 describe("stable human application identities", () => {
   it("reuses a Gatekeeper token only while its exact registry identity version remains current",
       async () => {
-    const { identity, user } = await registryUser("version-bound-token");
+    const { identity, subject, user } = await subjectRegistryUser("version-bound-token");
     const token = await user.createGatekeeperSession({
       canonicalVerifiedEmail: identity.canonicalVerifiedEmail,
       identityVersion: identity.identityVersion,
@@ -128,8 +141,6 @@ describe("stable human application identities", () => {
     }
 
     const registry = exports.IdentityRegistry.getByName("");
-    const subject = `subject-${crypto.randomUUID()}`;
-    await registry.resolveClerkIdentity(subject, identity.canonicalVerifiedEmail, false);
     await registry.resolveClerkIdentity(subject, uniqueEmail("version-bound-moved"), false);
 
     using stalePublicApi = await connect();
@@ -157,7 +168,7 @@ describe("stable human application identities", () => {
   });
 
   it("rejects a token whose version moves after its issuance check but before delivery", async () => {
-    const { identity, user } = await registryUser("post-check-delivery");
+    const { identity, subject, user } = await subjectRegistryUser("post-check-delivery");
     const token = await user.createGatekeeperSession({
       canonicalVerifiedEmail: identity.canonicalVerifiedEmail,
       identityVersion: identity.identityVersion,
@@ -174,8 +185,6 @@ describe("stable human application identities", () => {
       await releaseDelivery.promise;
       return `${identity.internalUserId}:${token}`;
     })();
-    const subject = `subject-${crypto.randomUUID()}`;
-    await registry.resolveClerkIdentity(subject, identity.canonicalVerifiedEmail, false);
     await registry.resolveClerkIdentity(subject, uniqueEmail("post-check-moved"), false);
     releaseDelivery.resolve();
 

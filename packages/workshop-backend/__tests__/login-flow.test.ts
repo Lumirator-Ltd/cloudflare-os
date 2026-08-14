@@ -7,6 +7,8 @@ const identity = {
   internalUserId: "stable-user-id",
   canonicalVerifiedEmail: "person@example.com",
   identityVersion: 1,
+  status: "active" as const,
+  created: false,
 };
 
 function activeIdentity(identityVersion: number): IdentityState {
@@ -32,6 +34,7 @@ function callbackContext(vendorId: string, registry: object, user: object, pendi
         get: vi.fn().mockReturnValue(user),
       },
     },
+    waitUntil: vi.fn(),
   };
 }
 
@@ -40,9 +43,13 @@ function callback(
   registry: object,
   user: object,
   pending: object,
+  productAnalytics?: object,
 ): LoginConnectCallbackImpl {
   const ctx = callbackContext(vendorId, registry, user, pending);
-  const env = { BLUEPRINTS: { get: vi.fn().mockResolvedValue(null) } };
+  const env = {
+    BLUEPRINTS: { get: vi.fn().mockResolvedValue(null) },
+    PRODUCT_ANALYTICS: productAnalytics,
+  };
   return new LoginConnectCallbackImpl(
     ctx as unknown as ExecutionContext<{ pendingId: string; vendorId: string }>,
     env as unknown as Cloudflare.Env,
@@ -91,5 +98,33 @@ describe("Gatekeeper login completion", () => {
     expect(registry.getIdentity).toHaveBeenCalledExactlyOnceWith(identity.internalUserId);
     expect(pending.deliver).toHaveBeenCalledExactlyOnceWith("stable-user-id:secret-token");
     expect(pending.fail).not.toHaveBeenCalled();
+  });
+
+  it("records account creation only when the registry reports a new Gatekeeper identity", async () => {
+    const pending = {
+      deliver: vi.fn().mockResolvedValue(undefined),
+      fail: vi.fn().mockResolvedValue(undefined),
+    };
+    const registry = {
+      resolveEmailIdentity: vi.fn().mockResolvedValue({ ...identity, created: true }),
+      getIdentity: vi.fn().mockResolvedValue(activeIdentity(identity.identityVersion)),
+    };
+    const user = {
+      createGatekeeperSession: vi.fn().mockResolvedValue("secret-token"),
+      revokeGatekeeperSession: vi.fn().mockResolvedValue(undefined),
+    };
+    const analytics = { send: vi.fn().mockResolvedValue(undefined) };
+
+    await callback("cloudflare", registry, user, pending, analytics).complete(
+      gatekeeperAccount() as unknown as Fetcher<GatekeeperUser>,
+    );
+
+    expect(analytics.send).toHaveBeenCalledWith([
+      expect.objectContaining({
+        event_name: "account_created",
+        user_id: identity.internalUserId,
+        properties: { source: "gatekeeper" },
+      }),
+    ]);
   });
 });

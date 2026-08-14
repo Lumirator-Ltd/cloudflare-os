@@ -16,17 +16,23 @@ only (ignored unless the allowlist is non-empty, to avoid locking everyone out).
 ## Identity: stable internal ID resolved from verified authority
 
 A provider-verified email is an identity claim, not a durable account key. The deployment-local
-`IdentityRegistry` canonicalizes that claim and resolves it to a random opaque internal user ID;
-`UserDurableObject` is addressed by `idFromName(internalUserId)`. Gatekeeper, Clerk, and Cloudflare
-Access sign-in can therefore converge on the same deployment-local account without persisting an
-email as durable identity. Each Gatekeeper must return only an email the provider has verified
-(Google `email_verified`, a GitHub primary+verified email, or the Cloudflare account email);
-otherwise it returns null and cannot be used to sign in. Session records capture the registry's
-exact canonical email and identity version so a moved or collision-locked identity fails closed.
-Cloudflare Access also retains the verified subject scoped by configured issuer and audience; email
-changes follow that subject without leaving the old address as an alias. Its WebSocket capability
-graph has one non-refreshable absolute deadline at the assertion's verified `exp`, so the browser
-must reconnect with a fresh assertion after expiry.
+`IdentityRegistry` resolves Clerk subjects and Cloudflare Access subjects (scoped by configured
+issuer and audience) to random opaque internal user IDs; `UserDurableObject` is addressed by
+`idFromName(internalUserId)`. Every canonical email ever presented by a stable subject remains a
+durable claim of that internal identity. A new stable subject cannot take over or silently merge
+with a current or historical claim: authentication fails until an explicit linking or deployment
+operator resolution flow exists. The owning subject may move back to one of its historical emails.
+Session records capture the registry's exact canonical email and identity version so a moved or
+collision-locked identity fails closed.
+
+Authentication Gatekeepers remain email-only pending LUM-73. They can resolve an identity only
+while their verified email is that identity's current email; a historical email tombstone is never
+resurrected. This legacy path does not yet provide Gatekeepers with stable provider-subject ownership
+or a complete explicit-link flow.
+
+Cloudflare Access WebSocket capability graphs have both one non-refreshable absolute deadline at the
+assertion's verified `exp` and exact registry-authority invalidation. The browser must reconnect with
+a fresh assertion after expiry.
 
 ## Incremental scopes
 

@@ -3,6 +3,13 @@ import type { VerifiedCfAccessIdentity } from "../src/access.js";
 import type { IdentityState } from "../src/identity-registry.js";
 import { PublicApiImpl } from "../src/server.js";
 
+vi.mock("../src/clerk-session.js", () => ({
+  createClerkSession: vi.fn(async () => ({
+    control: {},
+    dispose: vi.fn().mockResolvedValue(undefined),
+  })),
+}));
+
 const INTERNAL_USER_ID = "stable-access-user";
 const ACCESS_ISSUER = "https://team.cloudflareaccess.test";
 const ACCESS_AUDIENCE = "workshop-audience";
@@ -31,8 +38,14 @@ function setup(expiresAt: number, email = "member@example.com") {
     canonicalVerifiedEmail: email.trim().toLowerCase(),
     identityVersion: 2,
     status: "active" as const,
+    created: false,
   };
-  const currentIdentity: IdentityState = resolution;
+  const currentIdentity: IdentityState = {
+    internalUserId: resolution.internalUserId,
+    canonicalVerifiedEmail: resolution.canonicalVerifiedEmail,
+    identityVersion: resolution.identityVersion,
+    status: resolution.status,
+  };
   const user = {
     whoami: vi.fn(async () => {
       if (graphAborted) throw new Error("capability graph aborted");
@@ -42,6 +55,7 @@ function setup(expiresAt: number, email = "member@example.com") {
   const registry = {
     findInternalUserIdByVerifiedEmail: vi.fn(async () => INTERNAL_USER_ID),
     resolveAccessIdentity: vi.fn(async () => resolution),
+    resolveClerkIdentity: vi.fn(async () => resolution),
     registerIdentitySession: vi.fn(async () => undefined),
     unregisterIdentitySession: vi.fn(async () => undefined),
     getIdentity: vi.fn(async () => currentIdentity),
@@ -62,15 +76,16 @@ function setup(expiresAt: number, email = "member@example.com") {
     ADMINS: [email.trim().toLowerCase()],
     BLUEPRINTS: { get: vi.fn(async () => null) },
   } as unknown as Cloudflare.Env;
+  const verifyClerk = vi.fn();
   const publicApi = new PublicApiImpl(
     ctx,
     env,
     abortSession,
     abortController.signal,
-    vi.fn() as never,
+    verifyClerk as never,
     accessIdentity(expiresAt, email),
   );
-  return { abortController, abortSession, publicApi, registry };
+  return { abortController, abortSession, env, publicApi, registry, verifyClerk };
 }
 
 afterEach(() => {
@@ -78,8 +93,7 @@ afterEach(() => {
 });
 
 describe("Cloudflare Access RPC session deadline", () => {
-  it("aborts the whole graph exactly at the verified Access expiry without arming another deadline",
-      async () => {
+  it("aborts the whole graph at Access expiry alongside one authority watchdog", async () => {
     const now = Date.UTC(2026, 0, 1);
     vi.useFakeTimers();
     vi.setSystemTime(now);
@@ -94,7 +108,8 @@ describe("Cloudflare Access RPC session deadline", () => {
       "member@example.com",
       true,
     );
-    expect(vi.getTimerCount()).toBe(deadlineTimerCount);
+    expect(registry.findInternalUserIdByVerifiedEmail).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(deadlineTimerCount + 2);
 
     await vi.advanceTimersByTimeAsync(1_999);
     await expect(api.whoami()).resolves.toMatchObject({ id: INTERNAL_USER_ID });
@@ -103,6 +118,25 @@ describe("Cloudflare Access RPC session deadline", () => {
     await vi.advanceTimersByTimeAsync(1);
     expect(abortSession).toHaveBeenCalledOnce();
     await expect(api.whoami()).rejects.toThrow("capability graph aborted");
+  });
+
+  it("does not report account creation for an existing Access subject email move", async () => {
+    const now = Date.UTC(2026, 0, 1);
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { env, publicApi } = setup(now + 60_000, "member+moved@example.com");
+    const analytics = { send: vi.fn().mockResolvedValue(undefined) };
+    env.PRODUCT_ANALYTICS = analytics as never;
+
+    await publicApi.authenticateFromCfAccess();
+
+    const events = analytics.send.mock.calls.flatMap(([records]) => records);
+    expect(events).toEqual([
+      expect.objectContaining({
+        event_name: "user_authenticated",
+        user_id: INTERNAL_USER_ID,
+      }),
+    ]);
   });
 
   it("safely re-arms an Access deadline beyond the maximum JavaScript timeout", async () => {
@@ -146,6 +180,56 @@ describe("Cloudflare Access RPC session deadline", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it("rechecks expiry after delayed registry registration and returns no capability", async () => {
+    const now = Date.UTC(2026, 0, 1);
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { abortSession, publicApi, registry } = setup(now + 1_000);
+    const registration = Promise.withResolvers<void>();
+    registry.registerIdentitySession.mockImplementation(async () => registration.promise);
+
+    const authentication = publicApi.authenticateFromCfAccess();
+    await vi.waitFor(() => expect(registry.registerIdentitySession).toHaveBeenCalledOnce());
+    await vi.advanceTimersByTimeAsync(1_000);
+    registration.resolve();
+
+    await expect(authentication).rejects.toThrow(/expired|closed/i);
+    expect(abortSession).toHaveBeenCalledOnce();
+    expect(registry.unregisterIdentitySession).toHaveBeenCalledOnce();
+  });
+
+  it("starts one exact-authority watchdog for repeated Access authentication", async () => {
+    const now = Date.UTC(2026, 0, 1);
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { publicApi } = setup(now + 120_000);
+
+    await publicApi.authenticateFromCfAccess();
+    const firstGraphTimerCount = vi.getTimerCount();
+    await publicApi.authenticateFromCfAccess();
+
+    expect(vi.getTimerCount()).toBe(firstGraphTimerCount);
+  });
+
+  it("aborts retained Access authority when the registry version changes after callback loss",
+      async () => {
+    const now = Date.UTC(2026, 0, 1);
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { abortSession, publicApi, registry } = setup(now + 120_000);
+    await publicApi.authenticateFromCfAccess();
+    registry.getIdentity.mockResolvedValue({
+      internalUserId: INTERNAL_USER_ID,
+      canonicalVerifiedEmail: "member+moved@example.com",
+      identityVersion: 3,
+      status: "active",
+    });
+
+    await vi.advanceTimersByTimeAsync(15_000);
+
+    expect(abortSession).toHaveBeenCalledOnce();
+  });
+
   it("uses the moved canonical Access email for the deployment admin allowlist", async () => {
     const now = Date.UTC(2026, 0, 1);
     vi.useFakeTimers();
@@ -155,5 +239,36 @@ describe("Cloudflare Access RPC session deadline", () => {
 
     const api = await publicApi.authenticateFromCfAccess();
     await expect(api.amIAdmin()).resolves.toBe(true);
+  });
+
+  it("records Clerk account creation only from the registry created result", async () => {
+    const now = Date.UTC(2026, 0, 1);
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { env, publicApi, registry, verifyClerk } = setup(now + 60_000);
+    const analytics = { send: vi.fn().mockResolvedValue(undefined) };
+    env.PRODUCT_ANALYTICS = analytics as never;
+    registry.resolveClerkIdentity.mockResolvedValue({
+      internalUserId: INTERNAL_USER_ID,
+      canonicalVerifiedEmail: "member@example.com",
+      identityVersion: 2,
+      status: "active",
+      created: true,
+    });
+    verifyClerk.mockResolvedValue({
+      subject: "user_clerk",
+      email: "member@example.com",
+      expiresAt: new Date(now + 60_000),
+    });
+
+    await publicApi.authenticateWithClerk("signed-token");
+
+    expect(analytics.send).toHaveBeenCalledWith([
+      expect.objectContaining({
+        event_name: "account_created",
+        user_id: INTERNAL_USER_ID,
+        properties: { source: "clerk" },
+      }),
+    ]);
   });
 });

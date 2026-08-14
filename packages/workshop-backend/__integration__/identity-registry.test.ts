@@ -1,7 +1,7 @@
 import { abortAllDurableObjects, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vitest";
-import type { IdentityRegistry } from "../src/identity-registry.js";
+import type { IdentityRegistry, IdentityResolution } from "../src/identity-registry.js";
 import type { UserDurableObject } from "../src/user.js";
 
 function unique(value: string): string {
@@ -10,6 +10,10 @@ function unique(value: string): string {
 
 function registry() {
   return exports.IdentityRegistry.getByName("");
+}
+
+function stateOf({ created: _created, ...state }: IdentityResolution) {
+  return state;
 }
 
 async function expectRegistryRejection(
@@ -31,31 +35,124 @@ describe("IdentityRegistry", () => {
       canonicalVerifiedEmail: email,
       identityVersion: 1,
       status: "active",
+      created: true,
     });
     expect(result.internalUserId).not.toContain(email);
-    expect(await registry().resolveEmailIdentity(email, false)).toEqual(result);
+    expect(await registry().resolveEmailIdentity(email, false)).toEqual({
+      ...result,
+      created: false,
+    });
   });
 
-  it("looks up Clerk subjects first and converges new subjects by verified email", async () => {
-    const email = unique("converge");
-    const emailIdentity = await registry().resolveEmailIdentity(`  ${email.toUpperCase()}  `, true);
-    const clerkIdentity = await registry().resolveClerkIdentity("clerk-converge", email, false);
+  it("rejects unseen stable subjects at a claimed current email without mutating identity state",
+      async () => {
+    const email = unique("claimed-current");
+    const owner = await registry().resolveClerkIdentity("clerk-current-owner", email, true);
+    const before = await registry().getIdentity(owner.internalUserId);
+    const beforeSubjectKeys = await runInDurableObject(
+      registry(),
+      (instance: IdentityRegistry) => {
+        const mutable = instance as unknown as {
+          storage: { identities: { get(id: string): { subjectKeys: string[] } | undefined } };
+        };
+        return mutable.storage.identities.get(owner.internalUserId)?.subjectKeys;
+      },
+    );
 
-    expect(clerkIdentity).toEqual(emailIdentity);
+    const linkRequired =
+      "Identity ownership requires explicit linking or deployment operator resolution.";
+    await expectRegistryRejection(
+      instance => instance.resolveClerkIdentity("clerk-unseen", email, true), linkRequired);
+    await expectRegistryRejection(
+      instance => instance.resolveAccessIdentity(
+        "https://first.cloudflareaccess.test", "audience", "access-unseen", email, true),
+      linkRequired,
+    );
+    await expectRegistryRejection(
+      instance => instance.resolveAccessIdentity(
+        "https://other.cloudflareaccess.test", "other-audience", "access-unseen", email, false),
+      linkRequired,
+    );
 
-    const movedEmail = unique("moved-by-subject");
-    const moved = await registry().resolveClerkIdentity("clerk-converge", movedEmail, false);
-    expect(moved.internalUserId).toBe(emailIdentity.internalUserId);
-    expect(moved.canonicalVerifiedEmail).toBe(movedEmail);
-    expect(moved.identityVersion).toBe(2);
+    expect(await registry().getIdentity(owner.internalUserId)).toEqual(before);
+    await runInDurableObject(registry(), (instance: IdentityRegistry) => {
+      const mutable = instance as unknown as {
+        storage: { identities: { get(id: string): { subjectKeys: string[] } | undefined } };
+      };
+      expect(mutable.storage.identities.get(owner.internalUserId)?.subjectKeys)
+        .toEqual(beforeSubjectKeys);
+    });
+    await expect(registry().resolveClerkIdentity("clerk-current-owner", email, false))
+      .resolves.toEqual({ ...owner, created: false });
   });
 
-  it("resolves Gatekeeper and Access identities by canonical verified email only", async () => {
+  it("retains email history across moves and restart, and allows only the owning subject to return",
+      async () => {
+    const subject = `clerk-history-${crypto.randomUUID()}`;
+    const oldEmail = unique("history-old");
+    const newEmail = unique("history-new");
+    const initial = await registry().resolveClerkIdentity(subject, oldEmail, true);
+    const moved = await registry().resolveClerkIdentity(subject, newEmail, false);
+
+    expect(moved).toEqual({
+      ...initial,
+      canonicalVerifiedEmail: newEmail,
+      identityVersion: initial.identityVersion + 1,
+      created: false,
+    });
+    const linkRequired =
+      "Identity ownership requires explicit linking or deployment operator resolution.";
+    await expectRegistryRejection(
+      instance => instance.resolveEmailIdentity(oldEmail, true), linkRequired);
+    await expectRegistryRejection(
+      instance => instance.resolveAccessIdentity(
+        "https://history.cloudflareaccess.test", "history-audience", "new-subject", oldEmail, true),
+      linkRequired,
+    );
+
+    await abortAllDurableObjects();
+
+    const returned = await registry().resolveClerkIdentity(subject, oldEmail, false);
+    expect(returned).toEqual({
+      ...initial,
+      identityVersion: moved.identityVersion + 1,
+      created: false,
+    });
+  });
+
+  it("resolves legacy Gatekeeper identities only at their current canonical verified email",
+      async () => {
     const email = unique("email-only");
     const gatekeeper = await registry().resolveEmailIdentity(` ${email.toUpperCase()} `, true);
-    const access = await registry().resolveEmailIdentity(email, false);
+    const current = await registry().resolveEmailIdentity(email, false);
 
-    expect(access).toEqual(gatekeeper);
+    expect(current).toEqual({ ...gatekeeper, created: false });
+  });
+
+  it("backfills claims for persisted pre-claim identities before resolving a new subject",
+      async () => {
+    const email = unique("legacy-fixture");
+    const owner = await registry().resolveClerkIdentity("legacy-fixture-owner", email, true);
+
+    await runInDurableObject(registry(), (instance: IdentityRegistry) => {
+      const mutable = instance as unknown as {
+        storage: {
+          emailClaims: { delete(email: string): boolean };
+          emailClaimsBackfilled: { put(value: boolean): void };
+        };
+      };
+      expect(mutable.storage.emailClaims.delete(email)).toBe(true);
+      mutable.storage.emailClaimsBackfilled.put(false);
+    });
+    await abortAllDurableObjects();
+
+    await expectRegistryRejection(
+      instance => instance.resolveAccessIdentity(
+        "https://migration.cloudflareaccess.test", "migration-audience", "unseen", email, true),
+      "Identity ownership requires explicit linking or deployment operator resolution.",
+    );
+    await expect(registry().resolveClerkIdentity("legacy-fixture-owner", email, false))
+      .resolves.toEqual({ ...owner, created: false });
   });
 
   it("moves an Access subject email on the same identity and persists the subject index", async () => {
@@ -75,17 +172,18 @@ describe("IdentityRegistry", () => {
       ...first,
       canonicalVerifiedEmail: newEmail,
       identityVersion: first.identityVersion + 1,
+      created: false,
     });
     await expectRegistryRejection(
       instance => instance.resolveEmailIdentity(oldEmail, false),
-      "New sign-ups are currently disabled on this deployment.",
+      "Identity ownership requires explicit linking or deployment operator resolution.",
     );
 
     await abortAllDurableObjects();
 
     await expect(registry().resolveAccessIdentity(
       issuer, audience, subject, newEmail, false,
-    )).resolves.toEqual(moved);
+    )).resolves.toEqual({ ...moved, created: false });
   });
 
   it("scopes the same Access subject to its configured issuer and audience", async () => {
@@ -133,7 +231,8 @@ describe("IdentityRegistry", () => {
       identityVersion: affected.identityVersion + 1,
       status: "collisionLocked",
     });
-    expect(await registry().resolveEmailIdentity(occupiedEmail, false)).toEqual(other);
+    expect(await registry().resolveEmailIdentity(occupiedEmail, false))
+      .toEqual({ ...other, created: false });
   });
 
   it("persists Clerk subject and email indexes across Durable Object restarts", async () => {
@@ -147,8 +246,8 @@ describe("IdentityRegistry", () => {
     const emailOnlyState = await registry().getIdentity(emailOnlyIdentity.internalUserId);
 
     expect(clerkIdentity.internalUserId).not.toBe(emailOnlyIdentity.internalUserId);
-    expect(clerkState).toEqual(clerkIdentity);
-    expect(emailOnlyState).toEqual(emailOnlyIdentity);
+    expect(clerkState).toEqual(stateOf(clerkIdentity));
+    expect(emailOnlyState).toEqual(stateOf(emailOnlyIdentity));
 
     await abortAllDurableObjects();
 
@@ -158,11 +257,12 @@ describe("IdentityRegistry", () => {
       ...clerkIdentity,
       canonicalVerifiedEmail: movedClerkEmail,
       identityVersion: clerkIdentity.identityVersion + 1,
+      created: false,
     });
     expect(await registry().resolveEmailIdentity(emailOnlyEmail, false))
-      .toEqual(emailOnlyIdentity);
+      .toEqual({ ...emailOnlyIdentity, created: false });
     expect(await registry().getIdentity(clerkIdentity.internalUserId))
-      .toEqual(movedClerkIdentity);
+      .toEqual(stateOf(movedClerkIdentity));
     expect(await registry().getIdentity(emailOnlyIdentity.internalUserId)).toEqual(emailOnlyState);
   });
 
@@ -174,7 +274,8 @@ describe("IdentityRegistry", () => {
       instance => instance.resolveEmailIdentity(unique("unknown"), false),
       "New sign-ups are currently disabled on this deployment.",
     );
-    await expect(registry().resolveEmailIdentity(existingEmail, false)).resolves.toEqual(existing);
+    await expect(registry().resolveEmailIdentity(existingEmail, false))
+      .resolves.toEqual({ ...existing, created: false });
   });
 
   it("converges concurrent first resolutions on one internal user ID", async () => {
@@ -298,9 +399,10 @@ describe("IdentityRegistry", () => {
 
     await expectRegistryRejection(
       instance => instance.resolveEmailIdentity(oldEmail, false),
-      "New sign-ups are currently disabled on this deployment.",
+      "Identity ownership requires explicit linking or deployment operator resolution.",
     );
-    expect(await registry().resolveEmailIdentity(occupiedEmail, false)).toEqual(other);
+    expect(await registry().resolveEmailIdentity(occupiedEmail, false))
+      .toEqual({ ...other, created: false });
   });
 
   it("applies newer User identity contact versions without replacing a customized name", async () => {
@@ -511,10 +613,11 @@ describe("IdentityRegistry", () => {
       ...first,
       canonicalVerifiedEmail: newEmail,
       identityVersion: first.identityVersion + 1,
+      created: false,
     });
     await expectRegistryRejection(
       instance => instance.resolveEmailIdentity(oldEmail, false),
-      "New sign-ups are currently disabled on this deployment.",
+      "Identity ownership requires explicit linking or deployment operator resolution.",
     );
   });
 
@@ -541,8 +644,9 @@ describe("IdentityRegistry", () => {
     );
     await expectRegistryRejection(
       instance => instance.resolveEmailIdentity(oldEmail, false),
-      "New sign-ups are currently disabled on this deployment.",
+      "Identity ownership requires explicit linking or deployment operator resolution.",
     );
-    expect(await registry().resolveEmailIdentity(occupiedEmail, false)).toEqual(other);
+    expect(await registry().resolveEmailIdentity(occupiedEmail, false))
+      .toEqual({ ...other, created: false });
   });
 });

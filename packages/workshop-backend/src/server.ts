@@ -968,6 +968,13 @@ export class PublicApiImpl extends RpcTarget implements PublicApi {
       this.#clerkSession = clerkSession;
 
       const userId = this.users.idFromName(resolved.internalUserId);
+      if (resolved.created) {
+        recordAnalytics(this.ctx, this.env, {
+          event_name: "account_created",
+          user_id: resolved.internalUserId,
+          source: "clerk",
+        });
+      }
       return {
         api: new AuthenticatedApiImpl(this.ctx, this.env, userId, this.abortSession, {
           canonicalVerifiedEmail: resolved.canonicalVerifiedEmail,
@@ -991,9 +998,6 @@ export class PublicApiImpl extends RpcTarget implements PublicApi {
     const signupsEnabled = (await readAdminConfig(this.env)).signupsEnabled;
     this.#requireCurrentAccessIdentity();
     const registry = this.ctx.exports.IdentityRegistry.getByName("");
-    const accountCreated =
-      (await registry.findInternalUserIdByVerifiedEmail(accessIdentity.email)) === null;
-    this.#requireCurrentAccessIdentity();
     const resolved = await registry.resolveAccessIdentity(
       accessIdentity.issuer,
       accessIdentity.audience,
@@ -1003,7 +1007,7 @@ export class PublicApiImpl extends RpcTarget implements PublicApi {
     );
     this.#requireCurrentAccessIdentity();
     const userId = this.users.idFromName(resolved.internalUserId);
-    if (accountCreated) {
+    if (resolved.created) {
       recordAnalytics(this.ctx, this.env, {
         event_name: "account_created",
         user_id: resolved.internalUserId,
@@ -1015,14 +1019,18 @@ export class PublicApiImpl extends RpcTarget implements PublicApi {
       identityVersion: resolved.identityVersion,
     };
     await this.#registerIdentitySession(resolved.internalUserId, authority);
+    this.#requireCurrentAccessIdentity();
+    this.#startAuthorityWatchdog(resolved.internalUserId, authority);
     recordAnalytics(this.ctx, this.env, {
       event_name: "user_authenticated",
       user_id: resolved.internalUserId,
       source: "cf_access",
     });
-    return new AuthenticatedApiImpl(
+    const api = new AuthenticatedApiImpl(
       this.ctx, this.env, userId, this.abortSession, authority,
       (id, currentAuthority) => this.#startAuthorityWatchdog(id, currentAuthority));
+    this.#requireCurrentAccessIdentity();
+    return api;
   }
 
   async login(username: string, passwordHash: Uint8Array): Promise<string | null> {
@@ -1200,13 +1208,17 @@ type ExtendedRpcSessionOptions = RpcSessionOptions & {
 async function newWorkersRpcResponse(
     request: Request, localMain: any, options?: ExtendedRpcSessionOptions) {
   if (request.method === "POST") {
-    let response = await newHttpBatchRpcResponse(request, localMain, options);
-    // Since we're exposing the same API over WebSocket, too, and WebSocket always allows
-    // cross-origin requests, the API necessarily must be safe for cross-origin use (e.g. because
-    // it uses in-band authorization, as recommended in the readme). So, we might as well allow
-    // batch requests to be made cross-origin as well.
-    response.headers.set("Access-Control-Allow-Origin", "*");
-    return response;
+    try {
+      let response = await newHttpBatchRpcResponse(request, localMain, options);
+      // Since we're exposing the same API over WebSocket, too, and WebSocket always allows
+      // cross-origin requests, the API necessarily must be safe for cross-origin use (e.g. because
+      // it uses in-band authorization, as recommended in the readme). So, we might as well allow
+      // batch requests to be made cross-origin as well.
+      response.headers.set("Access-Control-Allow-Origin", "*");
+      return response;
+    } finally {
+      localMain?.[Symbol.dispose]?.();
+    }
   } else if (request.headers.get("Upgrade")?.toLowerCase() === "websocket") {
     return newWorkersWebSocketRpcResponse(request, localMain, options);
   } else {
