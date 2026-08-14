@@ -55,6 +55,7 @@ const AVATAR = {
 // without having to learn any internal id.
 
 type VerifyOutcome = { allow: true } | { allow: false; reason: string };
+type ClerkProfile = { email: string; status: string };
 
 export class TestControl extends DurableObject<Cloudflare.Env> {
   setVerifyOutcome(label: string, outcome: VerifyOutcome): void {
@@ -74,6 +75,14 @@ export class TestControl extends DurableObject<Cloudflare.Env> {
   getAmbientVerificationCount(label: string): number {
     return this.ctx.storage.kv.get<number>(`ambient-verifications:${label}`) ?? 0;
   }
+
+  setClerkProfile(subject: string, profile: ClerkProfile): void {
+    this.ctx.storage.kv.put(`clerk-profile:${subject}`, profile);
+  }
+
+  getClerkProfile(subject: string): ClerkProfile | null {
+    return this.ctx.storage.kv.get<ClerkProfile>(`clerk-profile:${subject}`) ?? null;
+  }
 }
 
 // ctx.exports is typed via the Cloudflare.GlobalProps declaration in env.d.ts, so loopback bindings
@@ -83,35 +92,27 @@ function control(exports: Cloudflare.Exports): DurableObjectStub<TestControl> {
 }
 
 // ---------------------------------------------------------------------------
-// Trusted Clerk-verifier fixture.
-//
-// The Workshop binds this entrypoint only when an integration test explicitly patches its inline
-// config. It is not a Gatekeeper and is never present in production configuration.
+// Clerk profile service used only by the separate Task5 Workshop test entry.
 
-export class ClerkTestVerifier extends WorkerEntrypoint<Cloudflare.Env> {
-  async verify(token: string): Promise<{ subject: string; email: string; expiresAt: Date }> {
-    let value: unknown;
-    try {
-      const base64 = token.replaceAll("-", "+").replaceAll("_", "/")
-        .padEnd(Math.ceil(token.length / 4) * 4, "=");
-      value = JSON.parse(atob(base64));
-    } catch {
-      throw new Error("Clerk identity could not be verified.");
-    }
-    if (typeof value !== "object" || value === null) {
-      throw new Error("Clerk identity could not be verified.");
-    }
-    const claims = value as Record<string, unknown>;
-    if (typeof claims.subject !== "string" || !claims.subject.startsWith("user_") ||
-        typeof claims.email !== "string" || !claims.email.includes("@") ||
-        typeof claims.expiresAt !== "number" || !Number.isFinite(claims.expiresAt) ||
-        claims.expiresAt <= Date.now() || claims.active !== true) {
-      throw new Error("Clerk identity could not be verified.");
-    }
+export class ClerkTestProfiles extends WorkerEntrypoint<Cloudflare.Env> {
+  async getSession(sessionId: string): Promise<{ id: string; userId: string; status: string }> {
+    const subject = `user_${sessionId.slice("sess_".length)}`;
+    const profile = await control(this.ctx.exports).getClerkProfile(subject);
+    return { id: sessionId, userId: subject, status: profile?.status ?? "revoked" };
+  }
+
+  async getUser(subject: string): Promise<{
+    id: string;
+    primaryEmailAddress: { emailAddress: string; verification: { status: string } };
+  }> {
+    const profile = await control(this.ctx.exports).getClerkProfile(subject);
+    if (!profile) throw new Error("Clerk test profile is not configured.");
     return {
-      subject: claims.subject,
-      email: claims.email,
-      expiresAt: new Date(claims.expiresAt),
+      id: subject,
+      primaryEmailAddress: {
+        emailAddress: profile.email,
+        verification: { status: "verified" },
+      },
     };
   }
 }
@@ -404,6 +405,19 @@ export default {
       const { label } = body as Record<string, unknown>;
       if (!isNonEmptyString(label)) return badRequest("`label` must be a non-empty string");
       return Response.json({ count: await control(ctx.exports).getAmbientVerificationCount(label) });
+    }
+
+    if (url.pathname === "/control/clerk-profile" && req.method === "POST") {
+      const { subject, email, status } = body as Record<string, unknown>;
+      if (!isNonEmptyString(subject) || !subject.startsWith("user_")) {
+        return badRequest("`subject` must be a Clerk user id");
+      }
+      if (!isNonEmptyString(email) || !email.includes("@")) {
+        return badRequest("`email` must be a non-empty email");
+      }
+      if (!isNonEmptyString(status)) return badRequest("`status` must be non-empty");
+      await control(ctx.exports).setClerkProfile(subject, { email, status });
+      return new Response(null, { status: 204 });
     }
 
     // Make this Worker issue a subrequest, so a test can prove that Worker-originated fetches really

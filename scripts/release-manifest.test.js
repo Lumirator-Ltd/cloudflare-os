@@ -67,6 +67,20 @@ test("manifest generated from real configs matches the golden file", () => {
       "scripts/release-manifest.test.js");
 });
 
+test("production Clerk authentication has no test verifier or DEV bypass", () => {
+  const forbiddenBinding = ["TEST", "ONLY", "CLERK", "VERIFIER"].join("_");
+  const manifest = stableStringify(buildTestManifest());
+  const server = readFileSync(join(
+    ROOT, "packages", "workshop-backend", "src", "server.ts"), "utf8");
+
+  assert.ok(!manifest.includes(forbiddenBinding),
+      `production release manifest contains forbidden binding ${forbiddenBinding}`);
+  assert.ok(!server.includes(forbiddenBinding),
+      `production server contains forbidden binding ${forbiddenBinding}`);
+  assert.doesNotMatch(server, /env\.DEV\s*===\s*true[\s\S]{0,200}(verify|auth)/i,
+      "production server contains a DEV-gated authentication bypass");
+});
+
 test("every $-token in binding templates and vars uses known placeholder syntax", () => {
   const manifest = buildTestManifest();
   const check = (value, where) => {

@@ -1,4 +1,6 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { generateKeyPairSync, sign, type KeyObject } from "node:crypto";
+import { fileURLToPath } from "node:url";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { RpcStub, RpcTarget } from "capnweb";
 import type {
   AdminApi, AuthenticatedApi, ClerkAuthentication, ConnectedAccountsSubscriber, PublicApi,
@@ -14,29 +16,64 @@ import { NetworkInterceptor } from "../src/network-interceptor.js";
 const FRONTEND_API = "task5.clerk.accounts.dev";
 const PUBLISHABLE_KEY = `pk_test_${Buffer.from(`${FRONTEND_API}$`).toString("base64url")}`;
 const AUTHORIZED_PARTY = "https://workshop.test";
+const ISSUER = `https://${FRONTEND_API}`;
 const SECRET_KEY = "sk_test_task5_fixture";
+const KEY_ID = "task5-integration-key";
+const PRIMARY_SUBJECT = "user_task5_primary";
 const OLD_EMAIL = "clerk-admin-old@example.com";
 const NEW_EMAIL = "clerk-admin-new@example.com";
 const RESOURCE_PATTERN = "https://gadgets-test.example/things/*";
 const RESOURCE_URL = "https://gadgets-test.example/things/session-capability";
+const CLERK_TEST_SERVER = fileURLToPath(new URL(
+  "../../workshop-backend/.wrangler/validate/src/testing/clerk-test-server.ts",
+  import.meta.url,
+).href);
 
 let harness: Harness;
 let interceptor: NetworkInterceptor;
+let privateKey: KeyObject;
+let publicKeyPem: string;
+
+function sessionIdFor(subject: string): string {
+  return `sess_${subject.slice("user_".length)}`;
+}
+
+async function setClerkProfile(subject: string, email: string, status = "active"): Promise<void> {
+  const response = await harness.fetchWorker(
+    TEST_GATEKEEPER_WORKER,
+    "http://gatekeeper-test.test/control/clerk-profile",
+    { method: "POST", body: JSON.stringify({ subject, email, status }) },
+  );
+  if (!response.ok) throw new Error(`failed to configure Clerk profile: ${await response.text()}`);
+}
+
+function encodeJwtPart(value: unknown): string {
+  return Buffer.from(JSON.stringify(value)).toString("base64url");
+}
 
 async function signToken(options: {
   subject?: string;
-  email?: string;
   expiresInSeconds: number;
-  active?: boolean;
 }): Promise<{ token: string; expiresAt: Date }> {
-  const expiresAt = new Date(Date.now() + options.expiresInSeconds * 1_000);
-  const token = Buffer.from(JSON.stringify({
-    subject: options.subject ?? "user_task5_primary",
-    email: options.email ?? OLD_EMAIL,
-    expiresAt: expiresAt.getTime(),
-    active: options.active ?? true,
-  })).toString("base64url");
-  return { token, expiresAt };
+  const subject = options.subject ?? PRIMARY_SUBJECT;
+  const sessionId = sessionIdFor(subject);
+  const issuedAt = Math.floor(Date.now() / 1_000);
+  const expiresAt = new Date((issuedAt + options.expiresInSeconds) * 1_000);
+
+  const header = encodeJwtPart({ alg: "RS256", kid: KEY_ID, typ: "JWT" });
+  const payload = encodeJwtPart({
+    iss: ISSUER,
+    sub: subject,
+    sid: sessionId,
+    sts: "active",
+    azp: AUTHORIZED_PARTY,
+    iat: issuedAt - 10,
+    nbf: issuedAt - 15,
+    exp: Math.floor(expiresAt.getTime() / 1_000),
+  });
+  const unsigned = `${header}.${payload}`;
+  const signature = sign("RSA-SHA256", Buffer.from(unsigned), privateKey).toString("base64url");
+  return { token: `${unsigned}.${signature}`, expiresAt };
 }
 
 async function authenticate(
@@ -81,32 +118,44 @@ class RetainedSubscriber extends ObserverConfigRecorder implements ConnectedAcco
 type PingTarget = RpcTarget & { ping(): Promise<string> };
 
 beforeAll(async () => {
+  // The harness cannot intercept Clerk SDK runtime fetches (see task report), so this separate
+  // test-only server entry uses the actual Clerk verifier with a local public key and profile RPC.
+  const pair = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  privateKey = pair.privateKey;
+  publicKeyPem = pair.publicKey.export({ type: "spki", format: "pem" }).toString().trim();
   interceptor = new NetworkInterceptor();
   interceptor.install();
   harness = await startTestGatekeeperHarness({
     enableWorkerLoader: true,
     patchWorkshop(config) {
+      config.main = CLERK_TEST_SERVER;
       config.services!.push({
-        binding: "TEST_ONLY_CLERK_VERIFIER",
+        binding: "TEST_CLERK_PROFILES",
         service: TEST_GATEKEEPER_WORKER,
-        entrypoint: "ClerkTestVerifier",
+        entrypoint: "ClerkTestProfiles",
       });
       config.vars = {
         ...config.vars,
         CLERK_PUBLISHABLE_KEY: PUBLISHABLE_KEY,
         CLERK_SECRET_KEY: SECRET_KEY,
+        CLERK_JWT_KEY: publicKeyPem,
         PUBLIC_BASE_URL: AUTHORIZED_PARTY,
         DEV: true,
-        ADMINS: [OLD_EMAIL, NEW_EMAIL],
+        ADMINS: [OLD_EMAIL],
       };
     },
   });
+});
+
+beforeEach(async () => {
+  await setClerkProfile(PRIMARY_SUBJECT, OLD_EMAIL);
 });
 
 afterAll(async () => {
   const unmocked = interceptor.getUnmockedCalls();
   await harness?.server.close();
   interceptor.uninstall();
+  // The local-key test entry must make no Clerk, telemetry, or other outbound network calls.
   expect(unmocked).toEqual([]);
 });
 
@@ -141,17 +190,30 @@ describe.sequential("Clerk WebSocket sessions", () => {
     await expect(api.whoami()).rejects.toThrow();
   });
 
+  it("rejects duplicate Clerk authentication without changing the first lifecycle", async () => {
+    using publicApi = connect(harness.url);
+    const initial = await signToken({ expiresInSeconds: 3 });
+    const auth = await authenticate(publicApi, initial.token);
+    using api = auth.api;
+    using _session = auth.session;
+    const longer = await signToken({ expiresInSeconds: 30 });
+
+    await expect(authenticate(publicApi, initial.token)).rejects.toThrow(/already authenticated/i);
+    await expect(authenticate(publicApi, longer.token)).rejects.toThrow(/already authenticated/i);
+    await expect(api.whoami()).resolves.toMatchObject({ type: "user" });
+    await waitPast(initial.expiresAt);
+    await expect(api.whoami()).rejects.toThrow();
+  });
+
   it("invalid refresh aborts the whole socket immediately", async () => {
     using publicApi = connect(harness.url);
     const initial = await signToken({ expiresInSeconds: 30 });
     const auth = await authenticate(publicApi, initial.token);
     using api = auth.api;
     using session = auth.session;
-    const other = await signToken({
-      subject: "user_task5_other",
-      email: "other@example.com",
-      expiresInSeconds: 30,
-    });
+    const otherSubject = "user_task5_other";
+    await setClerkProfile(otherSubject, "other@example.com");
+    const other = await signToken({ subject: otherSubject, expiresInSeconds: 30 });
 
     await expect(session.refresh(other.token)).rejects.toThrow();
     await expect(api.whoami()).rejects.toThrow();
@@ -163,7 +225,8 @@ describe.sequential("Clerk WebSocket sessions", () => {
     const auth = await authenticate(publicApi, initial.token);
     using api = auth.api;
     using session = auth.session;
-    const inactive = await signToken({ expiresInSeconds: 30, active: false });
+    await setClerkProfile(PRIMARY_SUBJECT, OLD_EMAIL, "revoked");
+    const inactive = await signToken({ expiresInSeconds: 30 });
 
     await expect(session.refresh(inactive.token)).rejects.toThrow();
     await expect(api.whoami()).rejects.toThrow();
@@ -186,48 +249,50 @@ describe.sequential("Clerk WebSocket sessions", () => {
     await expect(secondApi.whoami()).rejects.toThrow();
   });
 
-  it("eagerly invalidates two stale identity sessions and preserves the current stable user", async () => {
+  it("rejects an initiating refresh whose current Clerk email changes and kills its graph",
+      async () => {
     const subject = "user_task5_email_move";
-    using firstPublic = connect(harness.url);
-    using secondPublic = connect(harness.url);
-    const firstToken = await signToken({ subject, email: OLD_EMAIL, expiresInSeconds: 30 });
-    const secondToken = await signToken({ subject, email: OLD_EMAIL, expiresInSeconds: 30 });
-    const first = await authenticate(firstPublic, firstToken.token);
-    const second = await authenticate(secondPublic, secondToken.token);
-    using firstApi = first.api;
-    using _firstSession = first.session;
-    using secondApi = second.api;
-    using _secondSession = second.session;
-    const originalProfile = await firstApi.whoami();
-    using admin = await firstApi.getAdminApi() as RpcStub<AdminApi>;
-    using overseer = await firstApi.newGadget();
+    await setClerkProfile(subject, OLD_EMAIL);
+    using publicApi = connect(harness.url);
+    const initial = await signToken({ subject, expiresInSeconds: 30 });
+    const auth = await authenticate(publicApi, initial.token);
+    using api = auth.api;
+    using session = auth.session;
+    const originalProfile = await api.whoami();
+    const adminResult = await api.getAdminApi();
+    if (!adminResult) throw new Error("old exact admin email did not receive AdminApi");
+    using admin = adminResult;
+    using overseer = await api.newGadget();
+    using gadget = await overseer.createGadget("Task 5 changed authority", undefined, "TASK5_AUTH");
     await expect(admin.getSettings()).resolves.toBeDefined();
     await expect(overseer.getMetadata()).resolves.toBeDefined();
+    await expect(gadget.getTitle()).resolves.toBeTypeOf("string");
 
-    // A fresh connection resolves the provider's moved primary email without suppressing either
-    // old subscriber, so both stale sockets are closed eagerly.
-    const movedToken = await signToken({ subject, email: NEW_EMAIL, expiresInSeconds: 30 });
-    using currentPublic = connect(harness.url);
-    const current = await authenticate(currentPublic, movedToken.token);
-    using currentApi = current.api;
-    using _currentSession = current.session;
-
-    await expect(firstApi.whoami()).rejects.toThrow();
-    await expect(secondApi.whoami()).rejects.toThrow();
+    // Email comes only from the current Backend API profile; the signed JWT carries no email claim.
+    await setClerkProfile(subject, NEW_EMAIL);
+    const replacement = await signToken({ subject, expiresInSeconds: 30 });
+    await expect(session.refresh(replacement.token)).rejects.toThrow();
+    await expect(api.whoami()).rejects.toThrow();
     await expect(admin.getSettings()).rejects.toThrow();
     await expect(overseer.getMetadata()).rejects.toThrow();
-    await expect(currentApi.whoami()).resolves.toMatchObject({ id: originalProfile.id });
-    await expect(currentApi.amIAdmin()).resolves.toBe(true);
+    await expect(gadget.getTitle()).rejects.toThrow();
+    await expect(publicApi.getServerConfig()).rejects.toThrow();
+
+    using reconnectedPublic = connect(harness.url);
+    const reconnected = await authenticate(reconnectedPublic, replacement.token);
+    using reconnectedApi = reconnected.api;
+    using _reconnectedSession = reconnected.session;
+    await expect(reconnectedApi.whoami()).resolves.toMatchObject({ id: originalProfile.id });
+    await expect(reconnectedApi.amIAdmin()).resolves.toBe(false);
+    await expect(reconnectedApi.getAdminApi()).resolves.toBeNull();
   });
 
   it("invalidates retained cross-worker, UI-child, subscription, and workspace descendants together",
       async () => {
     using publicApi = connect(harness.url);
-    const accepted = await signToken({
-      subject: "user_task5_graph",
-      email: NEW_EMAIL,
-      expiresInSeconds: 15,
-    });
+    const graphSubject = "user_task5_graph";
+    await setClerkProfile(graphSubject, OLD_EMAIL);
+    const accepted = await signToken({ subject: graphSubject, expiresInSeconds: 15 });
     const auth = await authenticate(publicApi, accepted.token);
     using api = auth.api;
     using _session = auth.session;
