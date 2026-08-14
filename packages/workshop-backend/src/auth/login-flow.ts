@@ -147,23 +147,26 @@ export class LoginConnectCallbackImpl
       // requested full (non-transient) scopes, so persist the grant as a connected account before
       // handing back the session. Other providers use minimal, transient sign-in grants (no persist).
       if (this.ctx.props.vendorId === CLOUDFLARE_VENDOR_ID) {
-        const accountId = await userStub.linkConnectedAccountFromLogin(
+        const link = await userStub.linkConnectedAccountFromLogin(
           account, this.ctx.props.vendorId, expiresAt);
         try {
           await assertCurrent();
         } catch (error) {
           try {
+            // This conditionally restores/deletes the exact local mutation before scheduling remote
+            // revocation, so pending failure never waits on the gatekeeper account.
+            await userStub.rollbackConnectedAccountLogin(link);
+          } catch {
+            // Login still fails closed if best-effort connected-account cleanup is unavailable.
+          }
+          try {
             await userStub.revokeGatekeeperSession(secret);
           } catch {
             // Never deliver stale authority even if best-effort token cleanup is unavailable.
           }
-          try {
-            await userStub.disconnectAccount(accountId);
-          } catch {
-            // Login still fails closed if best-effort connected-account cleanup is unavailable.
-          }
           throw error;
         }
+        await userStub.commitConnectedAccountLogin(link);
       }
       // Session tokens remain "<doName>:<secret>"; the opaque record also retains this exact
       // registry version/email so a post-check delivery race cannot upgrade it on reconnect.

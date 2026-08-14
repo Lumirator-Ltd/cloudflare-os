@@ -31,6 +31,18 @@ type ConnectedAccountRecord = {
   // (no OAuth flow), rather than the user connecting it. Such accounts are protected from manual
   // disconnect, since deleting one permanently destroys the user's data in that gatekeeper.
   autoProvisioned?: boolean;
+  // Present only while a login callback still has to validate its captured identity authority.
+  // Retaining the exact prior record makes nested/concurrent login refreshes reversible by CAS.
+  loginMutation?: {
+    id: string;
+    prior?: ConnectedAccountRecord;
+  };
+};
+
+/** Identifies the exact connected-account mutation performed by a Gatekeeper login. */
+export type ConnectedAccountLoginLink = {
+  accountId: number;
+  mutationId: string;
 };
 
 // Metadata about an auto-provisioned account that provides an agent singleton and/or a management UI.
@@ -1581,54 +1593,106 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   /**
-   * Persists a connected account established during sign-in and returns its removable account ID.
+   * Installs a connected account established during sign-in as a reversible local mutation.
    *
-   * Used for providers like Cloudflare where signing in also links the account for AI Gateway
-   * billing. The login callback retains the ID so stale identity authority can disconnect the grant
-   * before failing the pending login.
+   * The caller must commit after revalidating identity authority or roll back on stale authority.
+   * Both completion paths are conditional on the returned mutation ID, so they cannot overwrite a
+   * concurrent replacement at the same account ID.
    */
   async linkConnectedAccountFromLogin(
-      account: Fetcher<GatekeeperUser>, vendorId: string, expiresAt?: Date): Promise<number> {
-    let description = await account.describe();
-    let uniqueName = description.uniqueName;
+      account: Fetcher<GatekeeperUser>, vendorId: string, expiresAt?: Date)
+      : Promise<ConnectedAccountLoginLink> {
+    const description = await account.describe();
+    const mutationId = crypto.randomUUID();
 
-    // A repeated sign-in is a re-authorization, so the *fresh* grant is the one we want. If this
-    // identity is already connected for this vendor, refresh that record in place rather than letting
-    // putConnectedAccount's dedup discard the new grant: keeping the stale record would leave billing
-    // broken whenever the old token had expired or was rotated out by this very re-auth — the
-    // opposite of what signing in again should accomplish.
-    if (uniqueName) {
-      let existing = this.#findConnectedAccountByIdentity(vendorId, uniqueName);
-      if (existing) {
-        // Drop the now-stale grant (a separate gatekeeper-side object from the fresh one), then point
-        // the existing record — keeping its id, so UI references stay stable — at the fresh grant.
-        try {
-          await existing.account.revoke();
-        } catch (err) {
-          logger.error("failed to revoke stale grant; replacing anyway", {
-            event: "account.stale.grant.revoke.failed",
-            accountId: existing.id, vendorId, error: err,
+    return this.storage.transaction(() => {
+      // A repeated sign-in is a re-authorization, so install the fresh grant at the stable account
+      // ID. Keep the prior grant intact until authority is checked: commit revokes it, while rollback
+      // restores it. Nested login refreshes naturally retain the preceding operation marker.
+      const uniqueName = description.uniqueName;
+      if (uniqueName) {
+        const existing = this.#findConnectedAccountByIdentity(vendorId, uniqueName);
+        if (existing) {
+          this.storage.connectedAccounts.put({
+            ...existing,
+            account,
+            description,
+            credentialExpiresAt: expiresAt,
+            credentialsExpired: false,
+            loginMutation: { id: mutationId, prior: existing },
           });
+          return { accountId: existing.id, mutationId };
         }
-        existing.account = account;
-        existing.description = description;
-        existing.credentialExpiresAt = expiresAt;
-        existing.credentialsExpired = false;
-        this.storage.connectedAccounts.put(existing);
-        return existing.id;
       }
-    }
 
-    let id = this.storage.nextAccountId.get();
-    this.storage.nextAccountId.put(id + 1);
-    this.storage.connectedAccounts.put({
-      id,
-      account,
-      description,
-      vendorId,
-      credentialExpiresAt: expiresAt,
+      const accountId = this.storage.nextAccountId.get();
+      this.storage.nextAccountId.put(accountId + 1);
+      this.storage.connectedAccounts.put({
+        id: accountId,
+        account,
+        description,
+        vendorId,
+        credentialExpiresAt: expiresAt,
+        loginMutation: { id: mutationId },
+      });
+      return { accountId, mutationId };
     });
-    return id;
+  }
+
+  /** Commits an exact login link and revokes only the prior grant it displaced, best-effort. */
+  commitConnectedAccountLogin(link: ConnectedAccountLoginLink): void {
+    const displaced = this.storage.transaction(() => {
+      const current = this.storage.connectedAccounts.get(link.accountId);
+      if (current?.loginMutation?.id !== link.mutationId) return;
+
+      const previous = current.loginMutation.prior;
+      const committed = { ...current };
+      delete committed.loginMutation;
+      this.storage.connectedAccounts.put(committed);
+      return previous;
+    });
+
+    if (displaced) {
+      this.ctx.waitUntil(displaced.account.revoke().catch(error => {
+        logger.error("failed to revoke replaced login grant", {
+          event: "account.login.commit.revoke.failed",
+          accountId: link.accountId, vendorId: displaced.vendorId, error,
+        });
+      }));
+    }
+  }
+
+  /**
+   * Rolls back an exact login link locally before revoking only its newly supplied grant.
+   *
+   * A mismatched mutation ID means a newer write owns the account ID, so this method leaves that
+   * record and its capability untouched.
+   */
+  rollbackConnectedAccountLogin(link: ConnectedAccountLoginLink): void {
+    const removed = this.storage.transaction(() => {
+      const current = this.storage.connectedAccounts.get(link.accountId);
+      if (current?.loginMutation?.id !== link.mutationId) return;
+
+      const prior = current.loginMutation.prior;
+      if (prior) {
+        this.storage.connectedAccounts.put(prior);
+      } else {
+        this.storage.connectedAccounts.delete(link.accountId);
+        if (current.vendorId === CLOUDFLARE_VENDOR_ID) {
+          this.storage.cloudflareBilling.put(null);
+        }
+      }
+      return current;
+    });
+
+    if (removed) {
+      this.ctx.waitUntil(removed.account.revoke().catch(error => {
+        logger.error("failed to revoke rolled-back login grant", {
+          event: "account.login.rollback.revoke.failed",
+          accountId: link.accountId, vendorId: removed.vendorId, error,
+        });
+      }));
+    }
   }
 
   // Find an existing connected account for the given vendor + identity (uniqueName), excluding
