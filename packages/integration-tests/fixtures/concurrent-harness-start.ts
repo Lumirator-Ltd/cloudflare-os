@@ -1,7 +1,6 @@
 import { closeSync, existsSync, openSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { expect } from "vitest";
 import { BUILD_COORDINATION_DIR_ENV } from "../src/custom-build.js";
 import { startTestGatekeeperHarness } from "../src/harness.js";
 
@@ -40,10 +39,15 @@ export async function runConcurrentHarnessStartup(peer: "a" | "b"): Promise<void
   });
 
   try {
-    await expect(harness.server.fetch("/").then(response => response.json()))
-      .resolves.toEqual({ ready: true });
-    expect(readFileSync(join(dir, "builds.txt"), "utf8").trim().split("\n"))
-      .toEqual(["build"]);
+    const response = await harness.server.fetch("/").then(result => result.json());
+    if (JSON.stringify(response) !== JSON.stringify({ ready: true })) {
+      throw new Error(`Harness ${peer} returned an unexpected response: ${JSON.stringify(response)}`);
+    }
+    const builds = readFileSync(join(dir, "builds.txt"), "utf8").trim().split("\n");
+    if (builds.length !== 1 || builds[0] !== "build") {
+      throw new Error(`Expected one shared build, found ${builds.length}`);
+    }
+    closeSync(openSync(join(dir, `harness-started-${peer}`), "w"));
   } finally {
     await harness.server.close();
   }

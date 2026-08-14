@@ -1,7 +1,11 @@
-import { execFileSync, execSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { spawn, type ChildProcess } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
 import {
+  closeSync,
+  existsSync,
+  fsyncSync,
   mkdirSync,
+  openSync,
   readFileSync,
   renameSync,
   rmSync,
@@ -11,12 +15,17 @@ import { resolve } from "node:path";
 
 export const BUILD_COORDINATION_DIR_ENV = "GADGETS_INTEGRATION_BUILD_COORDINATION_DIR";
 
-const BUILD_WAIT_TIMEOUT_MS = 60_000;
+const BUILD_TIMEOUT_ENV = "GADGETS_INTEGRATION_BUILD_TIMEOUT_MS";
+const DEFAULT_BUILD_TIMEOUT_MS = 60_000;
+const BUILD_TERMINATION_GRACE_MS = 250;
+const FOLLOWER_PUBLICATION_GRACE_MS = 5_000;
 const BUILD_WAIT_INTERVAL_MS = 20;
-// These identify the harness coordinator or Vitest worker, not the build. Remove them from both the
-// identity and the child's environment so otherwise-identical workers execute the exact same build.
+// These identify or configure the harness coordinator or Vitest worker, not the build. Remove them
+// from both the identity and the child's environment so otherwise-identical workers execute the
+// exact same build.
 const BUILD_ENV_IGNORED_KEYS = new Set([
   BUILD_COORDINATION_DIR_ENV,
+  BUILD_TIMEOUT_ENV,
   "VITEST_POOL_ID",
   "VITEST_WORKER_ID",
 ]);
@@ -29,6 +38,10 @@ type CustomBuild = Record<string, unknown> & {
 type BuildResult =
   | { status: "success" }
   | { status: "failure"; message: string };
+
+type ChildOutcome =
+  | { type: "error"; error: Error }
+  | { type: "close"; code: number | null; signal: NodeJS.Signals | null };
 
 function sortedEntries<T>(value: Record<string, T>): [string, T][] {
   const entries = Object.entries(value) as [string, T][] & {
@@ -52,6 +65,16 @@ function buildEnvironment(): NodeJS.ProcessEnv {
     .filter(([key, value]) => value !== undefined && !BUILD_ENV_IGNORED_KEYS.has(key)));
 }
 
+function buildTimeoutMs(): number {
+  const configured = process.env[BUILD_TIMEOUT_ENV];
+  if (configured === undefined) return DEFAULT_BUILD_TIMEOUT_MS;
+  const timeout = Number(configured);
+  if (!Number.isSafeInteger(timeout) || timeout <= 0) {
+    throw new Error(`${BUILD_TIMEOUT_ENV} must be a positive integer`);
+  }
+  return timeout;
+}
+
 function buildIdentity(build: CustomBuild, cwd: string, env: NodeJS.ProcessEnv): string {
   const invocation = canonicalize({
     build: { ...build, cwd },
@@ -71,23 +94,55 @@ function readResult(path: string): BuildResult | undefined {
   }
 }
 
-function writeResult(path: string, result: BuildResult): void {
-  const temporary = `${path}.${process.pid}.tmp`;
-  writeFileSync(temporary, JSON.stringify(result));
-  renameSync(temporary, path);
+function writeJsonAtomic(path: string, value: unknown): void {
+  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  let descriptor: number | undefined;
+  try {
+    descriptor = openSync(temporary, "wx");
+    writeFileSync(descriptor, JSON.stringify(value));
+    fsyncSync(descriptor);
+    closeSync(descriptor);
+    descriptor = undefined;
+    renameSync(temporary, path);
+  } catch (error) {
+    if (descriptor !== undefined) {
+      try {
+        closeSync(descriptor);
+      } catch {
+        // Preserve the publication error; lock cleanup below removes any incomplete temporary file.
+      }
+    }
+    rmSync(temporary, { force: true });
+    throw error;
+  }
 }
 
-function builderIsAlive(path: string): boolean | undefined {
-  let owner: { pid: number };
+function writeResult(path: string, result: BuildResult): void {
+  writeJsonAtomic(path, result);
+}
+
+function ownerMetadataIsTransient(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException).code === "ENOENT" || error instanceof SyntaxError;
+}
+
+function builderIsAlive(ownerPath: string, lockPath: string): boolean | undefined {
+  let owner: unknown;
   try {
-    owner = JSON.parse(readFileSync(path, "utf8")) as { pid: number };
+    owner = JSON.parse(readFileSync(ownerPath, "utf8"));
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    if (ownerMetadataIsTransient(error)) return existsSync(lockPath) ? undefined : false;
     throw error;
   }
 
+  const pid = typeof owner === "object" && owner !== null && "pid" in owner
+    ? (owner as { pid?: unknown }).pid
+    : undefined;
+  if (!Number.isSafeInteger(pid) || (pid as number) <= 0) {
+    return existsSync(lockPath) ? undefined : false;
+  }
+
   try {
-    process.kill(owner.pid, 0);
+    process.kill(pid as number, 0);
     return true;
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === "EPERM";
@@ -95,14 +150,20 @@ function builderIsAlive(path: string): boolean | undefined {
 }
 
 async function waitForBuild(
-    resultPath: string, ownerPath: string, description: string): Promise<void> {
-  const deadline = Date.now() + BUILD_WAIT_TIMEOUT_MS;
+    resultPath: string,
+    ownerPath: string,
+    lockPath: string,
+    description: string,
+    timeoutMs: number,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs + BUILD_TERMINATION_GRACE_MS
+    + FOLLOWER_PUBLICATION_GRACE_MS;
   while (Date.now() < deadline) {
     const result = readResult(resultPath);
     if (result?.status === "success") return;
     if (result?.status === "failure") throw new Error(result.message);
 
-    if (builderIsAlive(ownerPath) === false) {
+    if (builderIsAlive(ownerPath, lockPath) === false) {
       throw new Error(`Custom build process exited before reporting completion: ${description}`);
     }
     await new Promise(complete => setTimeout(complete, BUILD_WAIT_INTERVAL_MS));
@@ -115,18 +176,91 @@ function failureMessage(error: unknown, description: string): string {
   return `Custom build failed (${description}): ${detail}`;
 }
 
+function childOutcome(child: ChildProcess): Promise<ChildOutcome> {
+  return new Promise(resolveOutcome => {
+    child.once("error", error => resolveOutcome({ type: "error", error }));
+    child.once("close", (code, signal) => resolveOutcome({ type: "close", code, signal }));
+  });
+}
+
+function sleep(milliseconds: number): Promise<void> {
+  return new Promise(resolveSleep => setTimeout(resolveSleep, milliseconds));
+}
+
+function signalProcessGroup(pid: number, signal: NodeJS.Signals): void {
+  try {
+    process.kill(-pid, signal);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+  }
+}
+
+async function runTaskkill(pid: number): Promise<void> {
+  const taskkill = spawn("taskkill", ["/pid", String(pid), "/t", "/f"], {
+    stdio: "ignore",
+    windowsHide: true,
+  });
+  await childOutcome(taskkill);
+}
+
+async function terminateProcessTree(
+    child: ChildProcess, outcome: Promise<ChildOutcome>): Promise<void> {
+  const pid = child.pid;
+  if (pid === undefined) {
+    await outcome;
+    return;
+  }
+
+  if (process.platform === "win32") {
+    await runTaskkill(pid);
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    await outcome;
+    return;
+  }
+
+  signalProcessGroup(pid, "SIGTERM");
+  await Promise.race([outcome, sleep(BUILD_TERMINATION_GRACE_MS)]);
+  // The elected child may have exited while a descendant ignored SIGTERM. Kill the group even when
+  // the direct child has already closed so no build descendant survives the timeout.
+  signalProcessGroup(pid, "SIGKILL");
+  await outcome;
+}
+
+async function executeChild(
+    child: ChildProcess, description: string, timeoutMs: number): Promise<void> {
+  const outcome = childOutcome(child);
+  let timeout: NodeJS.Timeout | undefined;
+  const deadline = new Promise<"timeout">(resolveDeadline => {
+    timeout = setTimeout(() => resolveDeadline("timeout"), timeoutMs);
+  });
+  const completed = await Promise.race([outcome, deadline]);
+  if (timeout !== undefined) clearTimeout(timeout);
+
+  if (completed === "timeout") {
+    await terminateProcessTree(child, outcome);
+    throw new Error(`Timed out after ${timeoutMs}ms`);
+  }
+  if (completed.type === "error") throw completed.error;
+  if (completed.code === 0) return;
+  const ending = completed.code === null
+    ? `signal ${completed.signal ?? "unknown"}`
+    : `exit code ${completed.code}`;
+  throw new Error(`Build process ended with ${ending}: ${description}`);
+}
+
 async function coordinateBuild(
     build: CustomBuild,
-    execute: (cwd: string, env: NodeJS.ProcessEnv) => void,
+    execute: (cwd: string, env: NodeJS.ProcessEnv, timeoutMs: number) => Promise<void>,
 ): Promise<void> {
   const command = build.command;
   if (!command) return;
 
   const cwd = resolve(build.cwd ?? process.cwd());
   const env = buildEnvironment();
+  const timeoutMs = buildTimeoutMs();
   const coordinationDir = process.env[BUILD_COORDINATION_DIR_ENV];
   if (!coordinationDir) {
-    execute(cwd, env);
+    await execute(cwd, env, timeoutMs);
     return;
   }
 
@@ -145,18 +279,23 @@ async function coordinateBuild(
     mkdirSync(lockPath);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    await waitForBuild(resultPath, ownerPath, description);
+    await waitForBuild(resultPath, ownerPath, lockPath, description, timeoutMs);
     return;
   }
 
-  writeFileSync(ownerPath, JSON.stringify({ pid: process.pid }));
   try {
-    execute(cwd, env);
+    writeJsonAtomic(ownerPath, { pid: process.pid });
+    await execute(cwd, env, timeoutMs);
     // Atomic result publication is the fence: peers cannot proceed while output is still changing.
     writeResult(resultPath, { status: "success" });
   } catch (error) {
     const message = failureMessage(error, description);
-    writeResult(resultPath, { status: "failure", message });
+    try {
+      writeResult(resultPath, { status: "failure", message });
+    } catch {
+      // The original failure is more actionable. Peers observe lock removal and fail boundedly when
+      // the filesystem also prevents publishing the shared result.
+    }
     throw new Error(message, { cause: error });
   } finally {
     rmSync(lockPath, { recursive: true, force: true });
@@ -166,17 +305,33 @@ async function coordinateBuild(
 export function runCustomBuildOnce(build: CustomBuild): Promise<void> {
   const command = build.command;
   if (!command) return Promise.resolve();
-  return coordinateBuild(build, (cwd, env) => {
-    execSync(command, { cwd, env, stdio: "inherit" });
+  return coordinateBuild(build, async (cwd, env, timeoutMs) => {
+    const child = spawn(command, {
+      cwd,
+      detached: process.platform !== "win32",
+      env,
+      shell: true,
+      stdio: "inherit",
+      windowsHide: true,
+    });
+    await executeChild(child, command, timeoutMs);
   });
 }
 
 export function runFileBuildOnce(file: string, args: string[], cwd: string): Promise<void> {
+  const description = JSON.stringify([file, ...args]);
   return coordinateBuild({
-    command: JSON.stringify([file, ...args]),
+    command: description,
     cwd,
     invocation: "execFile",
-  }, (resolvedCwd, env) => {
-    execFileSync(file, args, { cwd: resolvedCwd, env, stdio: "inherit" });
+  }, async (resolvedCwd, env, timeoutMs) => {
+    const child = spawn(file, args, {
+      cwd: resolvedCwd,
+      detached: process.platform !== "win32",
+      env,
+      stdio: "inherit",
+      windowsHide: true,
+    });
+    await executeChild(child, description, timeoutMs);
   });
 }
