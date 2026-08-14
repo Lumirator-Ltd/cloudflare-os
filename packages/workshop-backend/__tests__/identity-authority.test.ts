@@ -65,7 +65,8 @@ describe("privileged authority watchdog", () => {
       const watchdog = startIdentityAuthorityWatchdog(
         () => assertCurrentIdentityAuthority(registry, internalUserId, authority), abort);
 
-      await vi.advanceTimersByTimeAsync(IDENTITY_AUTHORITY_WATCHDOG_INTERVAL_MS - 1);
+      const pollInterval = IDENTITY_AUTHORITY_WATCHDOG_INTERVAL_MS / 2;
+      await vi.advanceTimersByTimeAsync(pollInterval - 1);
       expect(registry.getIdentity).not.toHaveBeenCalled();
       await vi.advanceTimersByTimeAsync(1);
       expect(registry.getIdentity).toHaveBeenCalledOnce();
@@ -74,7 +75,7 @@ describe("privileged authority watchdog", () => {
       // Model a registry restart dropping its ephemeral subscriber, followed by a durable version
       // change that only the privileged watchdog can now observe.
       current = activeState({ identityVersion: authority.identityVersion + 1 });
-      await vi.advanceTimersByTimeAsync(IDENTITY_AUTHORITY_WATCHDOG_INTERVAL_MS);
+      await vi.advanceTimersByTimeAsync(pollInterval);
       expect(registry.getIdentity).toHaveBeenCalledTimes(2);
       expect(abort).toHaveBeenCalledOnce();
       expect(abort.mock.calls[0][0]).toEqual(
@@ -94,12 +95,14 @@ describe("privileged authority watchdog", () => {
       const abort = vi.fn();
       startIdentityAuthorityWatchdog(assertCurrent, abort);
 
-      await vi.advanceTimersByTimeAsync(IDENTITY_AUTHORITY_WATCHDOG_INTERVAL_MS - 1);
-      expect(assertCurrent).not.toHaveBeenCalled();
+      const pollInterval = IDENTITY_AUTHORITY_WATCHDOG_INTERVAL_MS / 2;
+      await vi.advanceTimersByTimeAsync(pollInterval);
+      expect(assertCurrent).toHaveBeenCalledOnce();
       expect(abort).not.toHaveBeenCalled();
 
+      await vi.advanceTimersByTimeAsync(pollInterval - 1);
+      expect(abort).not.toHaveBeenCalled();
       await vi.advanceTimersByTimeAsync(1);
-      expect(assertCurrent).toHaveBeenCalledOnce();
       expect(abort).toHaveBeenCalledExactlyOnceWith(
         expect.objectContaining({ message: CURRENT_IDENTITY_AUTHORITY_REQUIRED }),
       );
@@ -116,7 +119,9 @@ describe("privileged authority watchdog", () => {
       const abort = vi.fn();
       startIdentityAuthorityWatchdog(assertCurrent, abort);
 
-      await vi.advanceTimersByTimeAsync(IDENTITY_AUTHORITY_WATCHDOG_INTERVAL_MS);
+      await vi.advanceTimersByTimeAsync(IDENTITY_AUTHORITY_WATCHDOG_INTERVAL_MS / 2);
+      expect(abort).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(IDENTITY_AUTHORITY_WATCHDOG_INTERVAL_MS / 2);
       expect(abort).toHaveBeenCalledOnce();
       pending.resolve();
       await Promise.resolve();
@@ -158,7 +163,7 @@ describe("privileged authority watchdog", () => {
       const abort = vi.fn();
       watchdog = startIdentityAuthorityWatchdog(assertCurrent, abort);
 
-      await vi.advanceTimersByTimeAsync(IDENTITY_AUTHORITY_WATCHDOG_INTERVAL_MS);
+      await vi.advanceTimersByTimeAsync(IDENTITY_AUTHORITY_WATCHDOG_INTERVAL_MS / 2);
       pending.resolve();
       await Promise.resolve();
       await vi.advanceTimersByTimeAsync(IDENTITY_AUTHORITY_WATCHDOG_INTERVAL_MS * 2);

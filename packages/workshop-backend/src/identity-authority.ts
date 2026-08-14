@@ -15,6 +15,8 @@ export const IDENTITY_AUTHORITY_WATCHDOG_INTERVAL_MS = 30_000;
 
 type IdentityAuthorityReader = Pick<DurableObjectStub<IdentityRegistry>, "getIdentity">;
 
+const IDENTITY_AUTHORITY_WATCHDOG_POLL_MS = IDENTITY_AUTHORITY_WATCHDOG_INTERVAL_MS / 2;
+
 /** Requires an identity to remain active at its exact captured version and canonical email. */
 export async function assertCurrentIdentityAuthority(
     registry: IdentityAuthorityReader,
@@ -54,9 +56,9 @@ export function startIdentityAuthorityWatchdog(
   };
 
   const schedule = () => {
-    // Register the poll first. When it settles successfully at the bound, its microtask refreshes
-    // the deadline before the second timer runs. If it hangs, the independent deadline still fires.
-    pollTimer = setTimeout(poll, IDENTITY_AUTHORITY_WATCHDOG_INTERVAL_MS);
+    // Check halfway through the absolute lease. A successful check refreshes both bounds; a hung
+    // check cannot cancel the independently scheduled maximum stale-authority deadline.
+    pollTimer = setTimeout(poll, IDENTITY_AUTHORITY_WATCHDOG_POLL_MS);
     deadlineTimer = setTimeout(
       () => stop(new Error(CURRENT_IDENTITY_AUTHORITY_REQUIRED)),
       IDENTITY_AUTHORITY_WATCHDOG_INTERVAL_MS,
