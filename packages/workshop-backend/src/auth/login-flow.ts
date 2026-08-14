@@ -11,8 +11,8 @@
 //   2. The browser opens `url` (the gatekeeper's self-closing OAuth popup) and calls
 //      `attempt.wait()`, which blocks on the PendingLogin DO.
 //   3. When the gatekeeper finishes, it calls LoginConnectCallbackImpl.complete(user). We read the
-//      verified email, resolve/create the email-keyed user DO, mint a session, and deliver the token
-//      to the PendingLogin DO, which resolves the awaiting RPC.
+//      verified email, resolve its stable internal identity, mint a local Workshop session, and
+//      deliver the token to the PendingLogin DO, which resolves the awaiting RPC.
 //
 // Sign-in only requests minimal scopes and the gatekeeper grant is transient (it self-destructs
 // shortly after we read the email) — so login does NOT create a persistent connected account.
@@ -24,8 +24,11 @@ import { GatekeeperConnectCallback, GatekeeperUser } from "@gadgets/workshop-sha
 import { createWorkshopLogger } from "../observability";
 import { CLOUDFLARE_VENDOR_ID } from "../user.js";
 import { readAdminConfig } from "../admin-config.js";
+import type { IdentityResolution } from "../identity-registry.js";
 
 const logger = createWorkshopLogger("workshop.auth");
+
+const SIGNUPS_DISABLED = "New sign-ups are currently disabled on this deployment.";
 
 type PendingResult = { token: string } | { error: string };
 
@@ -103,28 +106,35 @@ export class LoginConnectCallbackImpl
         await pending.fail("This account has no verified email, so it can't be used to sign in.");
         return;
       }
-      const userStub = this.ctx.exports.UserDurableObject.get(
-          this.ctx.exports.UserDurableObject.idFromName(email));
-      // Closed signups block first-time account creation here too (not just password signup); an
-      // existing user signing in is unaffected.
+      // Signup policy is read at the Workshop trust boundary before the verified provider email is
+      // resolved. The registry canonicalizes the email and initializes the stable User DO.
       const signupsEnabled = (await readAdminConfig(this.env)).signupsEnabled;
-      const secret = await userStub.loginOrCreateViaGatekeeper(email, signupsEnabled);
-      if (secret === null) {
-        loginLogger.info("gatekeeper login finished", {
-          event: "gatekeeper.login.finished", outcome: "signups_disabled",
-        });
-        await pending.fail("New sign-ups are currently disabled on this deployment.");
-        return;
+      let identity: IdentityResolution;
+      try {
+        identity = await this.ctx.exports.IdentityRegistry.getByName("")
+          .resolveEmailIdentity(email, signupsEnabled);
+      } catch (error) {
+        if (error instanceof Error && error.message === SIGNUPS_DISABLED) {
+          loginLogger.info("gatekeeper login finished", {
+            event: "gatekeeper.login.finished", outcome: "signups_disabled",
+          });
+          await pending.fail(SIGNUPS_DISABLED);
+          return;
+        }
+        throw error;
       }
+      const userStub = this.ctx.exports.UserDurableObject.get(
+        this.ctx.exports.UserDurableObject.idFromName(identity.internalUserId));
+      const secret = await userStub.createGatekeeperSession();
       // For Cloudflare, signing in also links the account for AI Gateway billing: startGatekeeperLogin
       // requested full (non-transient) scopes, so persist the grant as a connected account before
       // handing back the session. Other providers use minimal, transient sign-in grants (no persist).
       if (this.ctx.props.vendorId === CLOUDFLARE_VENDOR_ID) {
         await userStub.linkConnectedAccountFromLogin(account, this.ctx.props.vendorId, expiresAt);
       }
-      // Session tokens are "<doName>:<secret>"; PublicApi.authenticate() routes via idFromName of
-      // the first part. The user DO is keyed by email, so the prefix must be the email.
-      await pending.deliver(`${email}:${secret}`);
+      // Session tokens remain "<doName>:<secret>"; the route prefix is now the opaque stable
+      // internal user ID, never the provider email.
+      await pending.deliver(`${identity.internalUserId}:${secret}`);
       loginLogger.info("gatekeeper login finished", {
         event: "gatekeeper.login.finished", outcome: "ok",
       });

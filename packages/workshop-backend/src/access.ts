@@ -39,6 +39,12 @@ export async function verifyCfAccessJwt(
   }
 }
 
+/** Returns the non-empty verified Access email claim, without changing its representation. */
+export function verifiedCfAccessEmail(payload: JWTPayload): string | null {
+  if (typeof payload.email !== "string" || payload.email.trim().length === 0) return null;
+  return payload.email;
+}
+
 /** Returns a privacy-preserving limiter key derived only from verified Access claims. */
 export async function accessRateLimitKey(payload: JWTPayload): Promise<string | null> {
   if (payload.sub) return `access-sub:${payload.sub}`;

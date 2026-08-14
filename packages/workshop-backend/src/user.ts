@@ -369,27 +369,6 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     }
   }
 
-  // Returns true when this login created the account on first use. When the account doesn't yet
-  // exist and `allowCreate` is false (deployment signups are closed), refuses rather than creating —
-  // existing users can still sign in.
-  async authenticateFromCfAccess(email: string, allowCreate: boolean): Promise<boolean> {
-    if (!this.storage.created.get()) {
-      if (!allowCreate) {
-        throw new Error("New sign-ups are currently disabled on this deployment.");
-      }
-      // Create on first use.
-      this.storage.created.put(true);
-      this.storage.profile.put({
-        type: "user",
-        name: email.split("@")[0],
-        id: email,
-      });
-      return true;
-    }
-
-    return false;
-  }
-
   async #newSessionToken(): Promise<string> {
     let sessionToken = new Uint8Array(32);
     crypto.getRandomValues(sessionToken);
@@ -448,27 +427,13 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return this.#newSessionToken();
   }
 
-  // Log in via an authentication gatekeeper, creating the account on first use. The user DO is keyed
-  // by the verified email (this DO's id derives from idFromName(email)), so `email` is also used as
-  // the profile id and the initial display name is the email's local-part — consistent with the
-  // Cloudflare Access flow. Password login is left disabled for these accounts. Returns the session
-  // secret to store client-side.
-  //
-  // The profile is written only on first sign-in. We intentionally do NOT refresh the display name
-  // on later logins: once set, the name is the user's to change (via setOwnDisplayName), so we don't
-  // clobber a customized name with the email local-part.
-  //
-  // When the account doesn't yet exist and `allowCreate` is false (deployment signups are closed),
-  // returns null instead of creating one — existing users can still sign in.
-  async loginOrCreateViaGatekeeper(email: string, allowCreate: boolean): Promise<string | null> {
-    if (!this.storage.created.get()) {
-      if (!allowCreate) return null;
-      this.storage.created.put(true);
-      this.storage.profile.put({
-        type: "user",
-        name: email.split("@")[0],
-        id: email,
-      });
+  // Mint a retained local Workshop session only after IdentityRegistry initialized this stable user.
+  // Gatekeeper identity and signup policy are resolved at the backend callback boundary before this
+  // method is called; the User DO never treats an email as routing authority.
+  async createGatekeeperSession(): Promise<string> {
+    if (!this.storage.created.get() ||
+        this.storage.identityInternalUserId.get() !== this.ctx.id.name) {
+      throw new Error("Gatekeeper session identity is not initialized.");
     }
     return this.#newSessionToken();
   }

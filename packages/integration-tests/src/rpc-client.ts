@@ -1,7 +1,8 @@
-// Drives the Workshop over its real Cap'n Web WebSocket API, the same transport the browser uses.
+// Drives the Workshop over its real Cap'n Web API, using the browser's WebSocket transport by
+// default and HTTP batch only where tests need edge-injected request headers.
 
 import { createHash } from "node:crypto";
-import { RpcStub, RpcTarget, newWebSocketRpcSession } from "capnweb";
+import { RpcStub, RpcTarget, newHttpBatchRpcSession, newWebSocketRpcSession } from "capnweb";
 import type {
   AuthenticatedApi, ConnectedAccountsSubscriber, ObserverAccountChoice, ObserverBindingNeed,
   ObserverConfigCallback, PublicApi,
@@ -48,6 +49,11 @@ export function connect(baseUrl: URL): RpcStub<PublicApi> {
   const wsUrl = new URL("/api", baseUrl);
   wsUrl.protocol = wsUrl.protocol === "https:" ? "wss:" : "ws:";
   return newWebSocketRpcSession<PublicApi>(wsUrl.toString());
+}
+
+/** Open one HTTP-batch RPC session with custom request headers. */
+export function connectBatch(request: Request): RpcStub<PublicApi> {
+  return newHttpBatchRpcSession<PublicApi>(request);
 }
 
 /**

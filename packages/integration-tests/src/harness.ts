@@ -120,6 +120,8 @@ export type Harness = {
    */
   fetchWorker(name: string, ...args: Parameters<TestHarness["fetch"]>)
       : ReturnType<TestHarness["fetch"]>;
+  /** Reload the Workshop's inline config while retaining this harness's durable storage. */
+  updateWorkshop(patch: (config: WorkerConfig) => void): Promise<void>;
 };
 
 export async function startHarness(opts: {
@@ -138,20 +140,28 @@ export async function startHarness(opts: {
     return { binding: gk.binding, name: config.name, config };
   });
 
-  const server = createTestHarness({
-    root: opts.root ?? REPO_ROOT,
+  const root = opts.root ?? REPO_ROOT;
+  let workshop = workshopConfig(gatekeepers, opts.patchWorkshop, opts.enableWorkerLoader);
+  const harnessOptions = () => ({
+    root,
     // workshop-backend is primary, so unrouted requests (e.g. /api) go to it.
     workers: [
-      { config: workshopConfig(gatekeepers, opts.patchWorkshop, opts.enableWorkerLoader) },
+      { config: workshop },
       ...gatekeepers.map(({ config }) => ({ config })),
     ],
   });
+  const server = createTestHarness(harnessOptions());
 
   const { url } = await server.listen();
   return {
     server,
     url,
     fetchWorker: (name, ...args) => server.getWorker(name).fetch(...args),
+    async updateWorkshop(patch) {
+      workshop = structuredClone(workshop);
+      patch(workshop);
+      await server.update(harnessOptions());
+    },
   };
 }
 

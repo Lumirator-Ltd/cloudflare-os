@@ -23,8 +23,8 @@
 import { DurableObject, RpcTarget, WorkerEntrypoint, type RpcStub } from "cloudflare:workers";
 import type {
   AccountDescription, ActionKind, AppUiContext, ApprovalQueue, Gatekeeper, GatekeeperConnectCallback,
-  GatekeeperUiFrame, GatekeeperUser, GatekeeperUserVerifier, ResourceDescription, ResourceConfiguratorFrame,
-  SupportedResource, VendorDescription,
+  GatekeeperConnectOptions, GatekeeperUiFrame, GatekeeperUser, GatekeeperUserVerifier,
+  ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
 
 // Nothing but classes and the default handler may be exported from a Worker entry module: workerd
@@ -58,6 +58,14 @@ type VerifyOutcome = { allow: true } | { allow: false; reason: string };
 type ClerkProfile = { email: string; status: string };
 
 export class TestControl extends DurableObject<Cloudflare.Env> {
+  setGatekeeperLoginEmail(email: string): void {
+    this.ctx.storage.kv.put("gatekeeper-login-email", email);
+  }
+
+  getGatekeeperLoginEmail(): string | null {
+    return this.ctx.storage.kv.get<string>("gatekeeper-login-email") ?? null;
+  }
+
   setVerifyOutcome(label: string, outcome: VerifyOutcome): void {
     this.ctx.storage.kv.put(`outcome:${label}`, outcome);
   }
@@ -120,7 +128,7 @@ export class ClerkTestProfiles extends WorkerEntrypoint<Cloudflare.Env> {
 // ---------------------------------------------------------------------------
 // Vendor
 
-type AccountProps = { label: string };
+type AccountProps = { label: string; authenticatedEmail?: string };
 type BindingProps = AccountProps & { resourceUrl: string; ambient?: true };
 
 export class GatekeeperVendor extends WorkerEntrypoint<Cloudflare.Env> {
@@ -130,6 +138,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Cloudflare.Env> {
       url: `https://${VENDOR_HOST}`,
       logo: AVATAR,
       tagline: "A gatekeeper that exists only for integration tests.",
+      providesAuth: true,
       // Accounts are minted on request with no auth flow, which is what keeps these tests about the
       // overseer rather than about somebody's OAuth dance.
       autoProvisionsAccount: true,
@@ -151,10 +160,17 @@ export class GatekeeperVendor extends WorkerEntrypoint<Cloudflare.Env> {
     return TYPES_CODE;
   }
 
-  // Required by the interface but unreachable: autoProvisionsAccount means the Workshop mints
-  // accounts through createAccount() and never offers a connect flow.
-  async connectAccount(_callback: Fetcher<GatekeeperConnectCallback>): Promise<{ url: string }> {
-    throw new Error("The test gatekeeper auto-provisions accounts; it has no connect flow.");
+  async connectAccount(
+      callback: Fetcher<GatekeeperConnectCallback>, options?: GatekeeperConnectOptions,
+  ): Promise<{ url: string }> {
+    if (options?.scopes !== "auth") {
+      throw new Error("The test gatekeeper supports only its transient authentication fixture flow.");
+    }
+    const email = await control(this.ctx.exports).getGatekeeperLoginEmail();
+    if (!email) throw new Error("The test gatekeeper login email is not configured.");
+    const account = this.ctx.exports.TestAccount({ props: { label: email, authenticatedEmail: email } });
+    await callback.complete(account);
+    return { url: `https://${VENDOR_HOST}/oauth/test-login` };
   }
 }
 
@@ -212,7 +228,7 @@ export class TestAccount
   }
 
   async getAuthenticatedEmail(): Promise<string | null> {
-    return null;
+    return this.ctx.props.authenticatedEmail ?? null;
   }
 
   async revoke(): Promise<void> {}
@@ -382,6 +398,15 @@ export default {
       if (typeof body !== "object" || body === null) {
         return badRequest("the body is not a JSON object");
       }
+    }
+
+    if (url.pathname === "/control/gatekeeper-login-email" && req.method === "POST") {
+      const { email } = body as Record<string, unknown>;
+      if (!isNonEmptyString(email) || !email.includes("@")) {
+        return badRequest("`email` must be a non-empty email");
+      }
+      await control(ctx.exports).setGatekeeperLoginEmail(email);
+      return new Response(null, { status: 204 });
     }
 
     // Set what addObserver() should do for one account.

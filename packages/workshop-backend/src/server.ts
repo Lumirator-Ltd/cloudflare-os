@@ -1,6 +1,5 @@
 import { RpcStub, RpcTarget, newHttpBatchRpcResponse, newWebSocketRpcSession, RpcSessionOptions } from "capnweb";
 import { validateRpc } from "capnweb-validate";
-import type { JWTPayload } from "jose";
 import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, ClerkAuthentication, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError } from '@gadgets/workshop-shared/api';
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
 import { getServerConfig } from "./deployment-config.js";
@@ -10,7 +9,7 @@ import { getUsageInfo } from "./ai-gateway-billing/limits/usage-checker.js";
 import { listConnectedAccounts, selectAccount } from "./ai-gateway-billing/cloudflare/connection-service.js";
 import { PendingLogin, LoginConnectCallbackImpl } from "./auth/login-flow.js";
 import { deploymentOutputForBlueprint, listFormatOffers, readAdminConfig } from "./admin-config.js";
-import { IdentityRegistry } from "./identity-registry.js";
+import { canonicalizeVerifiedEmail, IdentityRegistry } from "./identity-registry.js";
 import { verifyClerkIdentity } from "./clerk-auth.js";
 import { createClerkSession } from "./clerk-session.js";
 
@@ -27,7 +26,7 @@ import { ExternalMessageGateway } from "./external-message-gateway";
 import { RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { recordAnalytics } from "./analytics";
 import { handleClientErrorRequest } from "./client-errors.js";
-import { verifyCfAccessJwt } from "./access.js";
+import { verifiedCfAccessEmail, verifyCfAccessJwt } from "./access.js";
 import { resolveUiFeatureFlags } from "./feature-flags";
 import { serveSiteLogo, SITE_LOGO_PATH } from "./site-logo.js";
 import { createWorkshopLogger } from "./observability";
@@ -83,6 +82,25 @@ type VerifiedAuthorityContext = {
   identityVersion: number;
 };
 
+const ADMINS_CONFIG_ERROR =
+  "ADMINS must be configured as an array of verified email strings.";
+const COLLISION_LOCKED = "Identity collision requires deployment operator assistance.";
+
+function canonicalAdminEmails(value: unknown): string[] {
+  if (typeof value === "string") {
+    try {
+      value = JSON.parse(value);
+    } catch {
+      throw new TypeError(ADMINS_CONFIG_ERROR);
+    }
+  }
+  if (!Array.isArray(value) || value.some(entry =>
+    typeof entry !== "string" || canonicalizeVerifiedEmail(entry).length === 0)) {
+    throw new TypeError(ADMINS_CONFIG_ERROR);
+  }
+  return value.map(canonicalizeVerifiedEmail);
+}
+
 @validateRpc()
 class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   constructor(private ctx: ExecutionContext, private env: Env,
@@ -112,24 +130,11 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   #isAdmin(): boolean {
     // Verified external identities are authorized by their current canonical email, never by the
     // random internal routing ID. The version is retained with the authority context and Clerk
-    // session invalidation prevents a stale version from surviving an identity change.
-    let name = this.authority?.identityVersion && this.authority.canonicalVerifiedEmail ||
-      this.#userId.name;
-    let admins = this.env.ADMINS;
-
-    if (!name || !admins) return false;
-
-    if (typeof admins === "string") {
-      // Admins should be a JSON binding of array type, but `.env` doesn't actually let you
-      // specify JSON bindings, so we also support a string that parses as JSON array.
-      admins = JSON.parse(admins);
-    }
-
-    if (!Array.isArray(admins)) {
-      throw new TypeError("ADMINS must be configured as an array of usernames.");
-    }
-
-    return admins.includes(name);
+    // session invalidation prevents a stale version from surviving an identity change. Password
+    // sessions remain on their legacy route-name authority only until Task 7 removes that path.
+    const name = this.authority?.canonicalVerifiedEmail ?? this.#userId.name;
+    if (!name || this.env.ADMINS === undefined) return false;
+    return canonicalAdminEmails(this.env.ADMINS).includes(canonicalizeVerifiedEmail(name));
   }
 
   whoami(): Promise<AiChatAuthorInfo> {
@@ -656,7 +661,7 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
       private abortSession: (reason: Error) => void,
       private abortSignal: AbortSignal,
       private verifyClerk: (token: string) => ReturnType<typeof verifyClerkIdentity>,
-      private accessPayload?: JWTPayload) {
+      private accessEmail?: string) {
     super();
     this.users = this.ctx.exports.UserDurableObject;
     this.abortSignal.addEventListener("abort", () => this.#disposeClerkSession(), { once: true });
@@ -713,14 +718,33 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
       throw createAuthError(AUTH_ERROR_CODES.invalidSessionToken);
     }
 
-    let userId = this.users.idFromName(split[0]);
+    const internalUserId = split[0];
+    const userId = this.users.idFromName(internalUserId);
     await this.users.get(userId).authenticate(split[1]);
+
+    // Registry-routed Gatekeeper sessions carry their stable internal ID as the token prefix. Read
+    // the current active authority when authenticating a new local session. A retained API keeps
+    // the authority captured here, preserving Gatekeeper's existing session lifetime semantics.
+    const identity = await this.ctx.exports.IdentityRegistry.getByName("")
+      .getIdentity(internalUserId);
+    let authority: VerifiedAuthorityContext | undefined;
+    if (identity) {
+      if (identity.status !== "active" || identity.canonicalVerifiedEmail === null) {
+        throw new Error(COLLISION_LOCKED);
+      }
+      authority = {
+        canonicalVerifiedEmail: identity.canonicalVerifiedEmail,
+        identityVersion: identity.identityVersion,
+      };
+    }
+
     recordAnalytics(this.ctx, this.env, {
       event_name: "user_authenticated",
       user_id: userId.name!,
       source: "session_token",
     });
-    return new AuthenticatedApiImpl(this.ctx, this.env, userId, this.abortSession);
+    return new AuthenticatedApiImpl(
+      this.ctx, this.env, userId, this.abortSession, authority);
   }
 
   async authenticateWithClerk(token: string): Promise<ClerkAuthentication> {
@@ -787,28 +811,34 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
   }
 
   async authenticateFromCfAccess(): Promise<AuthenticatedApi> {
-    if (!this.accessPayload) {
+    if (!this.accessEmail) {
       throw createAuthError(AUTH_ERROR_CODES.notAuthenticatedWithAccess);
     }
 
-    let email = this.accessPayload.email as string;
-    let userId = this.users.idFromName(email);
-    let signupsEnabled = (await readAdminConfig(this.env)).signupsEnabled;
-    let accountCreated =
-        await this.users.get(userId).authenticateFromCfAccess(email, signupsEnabled);
+    // Access has already verified this email claim and same-origin request. Apply deployment signup
+    // policy at this trust boundary before resolving the stable registry identity.
+    const signupsEnabled = (await readAdminConfig(this.env)).signupsEnabled;
+    const registry = this.ctx.exports.IdentityRegistry.getByName("");
+    const accountCreated =
+      (await registry.findInternalUserIdByVerifiedEmail(this.accessEmail)) === null;
+    const resolved = await registry.resolveEmailIdentity(this.accessEmail, signupsEnabled);
+    const userId = this.users.idFromName(resolved.internalUserId);
     if (accountCreated) {
       recordAnalytics(this.ctx, this.env, {
         event_name: "account_created",
-        user_id: userId.name!,
+        user_id: resolved.internalUserId,
         source: "cf_access",
       });
     }
     recordAnalytics(this.ctx, this.env, {
       event_name: "user_authenticated",
-      user_id: userId.name!,
+      user_id: resolved.internalUserId,
       source: "cf_access",
     });
-    return new AuthenticatedApiImpl(this.ctx, this.env, userId, this.abortSession);
+    return new AuthenticatedApiImpl(this.ctx, this.env, userId, this.abortSession, {
+      canonicalVerifiedEmail: resolved.canonicalVerifiedEmail,
+      identityVersion: resolved.identityVersion,
+    });
   }
 
   async login(username: string, passwordHash: Uint8Array): Promise<string | null> {
@@ -934,7 +964,7 @@ export default {
             }));
       }
 
-      let accessPayload: JWTPayload | undefined;
+      let accessEmail: string | undefined;
 
       if (env.CF_ACCESS_AUD) {
         if (req.headers.get("Origin") !== url.origin) {
@@ -944,11 +974,12 @@ export default {
         const payload = await verifyCfAccessJwt(req, env);
         if (!payload) return new Response("Invalid CF access JWT.", { status: 403 });
 
-        if (!payload.email) {
+        const email = verifiedCfAccessEmail(payload);
+        if (!email) {
           return new Response("Access JWT didn't specify email address.", { status: 403 });
         }
 
-        accessPayload = payload;
+        accessEmail = email;
       }
 
       // HACK: Implement `abortSession` callback by closing the websocket.
@@ -962,7 +993,7 @@ export default {
 
       return await newWorkersRpcResponse(req,
           new PublicApiImpl(
-            ctx, env, abortSession, abortController.signal, verifyClerk, accessPayload),
+            ctx, env, abortSession, abortController.signal, verifyClerk, accessEmail),
           { abortSignal: abortController.signal });
     }
 
