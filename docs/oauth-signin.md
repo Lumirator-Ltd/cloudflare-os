@@ -13,13 +13,16 @@ The deployment opts gatekeepers into sign-in via the `AUTH_GATEKEEPERS` allowlis
 vendor ids). Set `DISABLE_PASSWORD_AUTH=true` to hide username/password and offer gatekeeper sign-in
 only (ignored unless the allowlist is non-empty, to avoid locking everyone out).
 
-## Identity: keyed by verified email
+## Identity: stable internal ID resolved from verified authority
 
-The primary account key is always the user's **verified email**. Signing in with any allowlisted
-gatekeeper that yields the same verified email resolves to the same account — its `UserDurableObject`
-is addressed by `idFromName(email)` (the same scheme as Cloudflare Access). Each gatekeeper must only
-return an email the provider has verified (Google `email_verified`, a GitHub primary+verified email,
-the Cloudflare account email); otherwise it returns null and can't be used to sign in.
+A provider-verified email is an identity claim, not a durable account key. The deployment-local
+`IdentityRegistry` canonicalizes that claim and resolves it to a random opaque internal user ID;
+`UserDurableObject` is addressed by `idFromName(internalUserId)`. Gatekeeper, Clerk, and Cloudflare
+Access sign-in can therefore converge on the same deployment-local account without persisting an
+email as durable identity. Each Gatekeeper must return only an email the provider has verified
+(Google `email_verified`, a GitHub primary+verified email, or the Cloudflare account email);
+otherwise it returns null and cannot be used to sign in. Session records capture the registry's
+exact canonical email and identity version so a moved or collision-locked identity fails closed.
 
 ## Incremental scopes
 
@@ -41,9 +44,9 @@ what persists a usable connected account. `GatekeeperVendor.connectAccount` take
 2. The client opens `url` in a pop-up (the gatekeeper's self-closing OAuth window) and calls
    `attempt.wait()`, which blocks on the `PendingLogin` DO.
 3. When the gatekeeper finishes, it calls `complete(user)`. The callback reads
-   `user.getAuthenticatedEmail()`, resolves/creates the email-keyed `UserDurableObject`, mints a
-   session, and delivers the `"<email>:<secret>"` token to the `PendingLogin` DO — which resolves the
-   awaiting RPC.
+   `user.getAuthenticatedEmail()`, resolves/creates the registry-backed stable identity, initializes
+   its `UserDurableObject`, and mints an exact-version session. It delivers the
+   `"<opaque-internal-id>:<secret>"` token to the `PendingLogin` DO, which resolves the awaiting RPC.
 4. The client stores the token and authenticates as usual.
 
 Sign-in does **not** persist a connected account: the minimal-scope grant is only used to read the

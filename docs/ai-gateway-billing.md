@@ -29,10 +29,10 @@ holds money.
 
 Billing is tied to the **Cloudflare gatekeeper**: the OAuth tokens live in that gatekeeper's
 connection, and the billing flow obtains a usable token from it via `getUsableAccessToken()`. A user
-connects Cloudflare either by signing in with it, or — if they signed in another way — via the
-"Connect Cloudflare" button, which runs the normal gatekeeper connect flow
-(`AuthenticatedApi.connectAccount("cloudflare")`). See [sign-in](./oauth-signin.md) for the OAuth
-mechanics and redirect URIs.
+connects Cloudflare through the "Connect Cloudflare" button, which runs the explicit full-scope
+gatekeeper connect flow (`AuthenticatedApi.connectAccount("cloudflare")`). Signing in with
+Cloudflare is deliberately separate: it requests only transient identity scopes and never creates
+billing authority. See [sign-in](./oauth-signin.md) for the OAuth mechanics and redirect URIs.
 
 The account to bill is auto-selected when the grant sees exactly one account; with several, the user
 is prompted to choose one. Billing is account-level (Unified Billing): inference is routed through

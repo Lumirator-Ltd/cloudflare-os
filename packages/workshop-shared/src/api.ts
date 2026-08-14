@@ -399,9 +399,13 @@ export interface AuthenticatedApi extends RpcTarget {
   // Get the user's current free-tier usage and connected-account balance.
   getCloudflareUsage(): Promise<CloudflareUsageInfo>;
 
-  // List the Cloudflare accounts the connected grant can access. Used to prompt account selection
-  // when the user has more than one. Returns an empty array if not connected. Connecting Cloudflare
-  // is done via the Cloudflare gatekeeper (connectAccount("cloudflare")) or by signing in with it.
+  /**
+   * List the Cloudflare accounts the explicitly connected grant can access.
+   *
+   * Used to prompt account selection when the user has more than one. Returns an empty array if the
+   * user has not called `connectAccount("cloudflare")`; Cloudflare sign-in is identity-only and does
+   * not create billing authority.
+   */
   listCloudflareAccounts(): Promise<CloudflareAccountOption[]>;
 
   // Select which Cloudflare account to bill. Persists the choice. Throws if the account isn't

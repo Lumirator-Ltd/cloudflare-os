@@ -659,9 +659,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   // Cloudflare account connection (optional top-up flow).
   // ---------------------------------------------------------------------------------------------
 
-  // Return the connected Cloudflare *gatekeeper* account stub, if any. The AI Gateway billing flow
-  // narrows it to CloudflareGatekeeperUser to obtain a usable access token. Null if the user hasn't
-  // connected (or signed in with) Cloudflare.
+  // Return the explicitly connected Cloudflare *gatekeeper* account stub, if any. The AI Gateway
+  // billing flow narrows it to CloudflareGatekeeperUser to obtain a usable access token. Sign-in is
+  // identity-only and never stores a billing grant.
   async getCloudflareGatekeeperAccount(): Promise<Fetcher<CloudflareGatekeeperUser> | null> {
     let nextAccountId = this.storage.nextAccountId.get();
     for (let id = 0; id < nextAccountId; id++) {
