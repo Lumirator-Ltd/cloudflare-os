@@ -5,13 +5,13 @@
 // harness at the package and plug in a handler module", not a forked copy of this file. Per-vendor
 // suites in consumer repos use this as-is.
 
-import { execFileSync, execSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse } from "jsonc-parser";
 import { createTestHarness, type TestHarness } from "wrangler";
 import { z } from "zod";
+import { runCustomBuildOnce, runFileBuildOnce } from "./custom-build.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -81,12 +81,11 @@ function readWorkerConfig(dir: string): WorkerConfig {
   return config;
 }
 
-function runCustomBuildOnce(config: WorkerConfig): void {
+async function prepareCustomBuild(config: WorkerConfig): Promise<void> {
   const build = config.build;
-  const command = build?.command;
-  if (!command) return;
+  if (!build?.command) return;
 
-  execSync(command, { cwd: build.cwd, stdio: "inherit" });
+  await runCustomBuildOnce(build);
   delete build.command;
 }
 
@@ -102,7 +101,7 @@ async function waitForRuntimeConfig(
     } catch {
       // A runtime that is between bundles may temporarily reject environment inspection.
     }
-    await new Promise(resolve => setTimeout(resolve, 10));
+    await new Promise(complete => setTimeout(complete, 10));
   }
   throw new Error("Timed out waiting for every harness worker to apply its runtime config");
 }
@@ -172,17 +171,19 @@ export async function startHarness(opts: {
   let workshop = workshopConfig(gatekeepers, opts.patchWorkshop, opts.enableWorkerLoader);
 
   // This generated module is gitignored, so prepare it explicitly just as run-dev-server.js does.
-  execFileSync(
+  await runFileBuildOnce(
     process.execPath,
     [join(WORKSHOP_DIR, "scripts", "build-format-blueprints.mjs")],
-    { cwd: WORKSHOP_DIR, stdio: "inherit" },
+    WORKSHOP_DIR,
   );
 
   // Inline config updates make Wrangler run every custom build again, including unchanged workers.
   // Build before workerd starts, then remove the commands so runtime-only updates cannot rewrite a
   // generated entrypoint while the active runtime is reloading it.
-  runCustomBuildOnce(workshop);
-  for (const { config } of gatekeepers) runCustomBuildOnce(config);
+  await Promise.all([
+    prepareCustomBuild(workshop),
+    ...gatekeepers.map(({ config }) => prepareCustomBuild(config)),
+  ]);
 
   const harnessOptions = () => ({
     root,
