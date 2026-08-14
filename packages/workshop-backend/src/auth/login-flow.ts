@@ -133,20 +133,37 @@ export class LoginConnectCallbackImpl
         canonicalVerifiedEmail: identity.canonicalVerifiedEmail,
         identityVersion: identity.identityVersion,
       };
+      const assertCurrent = () => assertCurrentIdentityAuthority(
+        registry, identity.internalUserId, authority);
       // Close the issuance race: a Clerk update may move or collision-lock this identity after its
       // email resolution but before the local token is ready. Re-read exact durable authority and
       // revoke the just-created token rather than delivering stale authority.
       const secret = await mintCurrentIdentitySessionToken({
         mint: () => userStub.createGatekeeperSession(identity, this.ctx.props.vendorId),
         revoke: token => userStub.revokeGatekeeperSession(token),
-        assertCurrent: () => assertCurrentIdentityAuthority(
-          registry, identity.internalUserId, authority),
+        assertCurrent,
       });
       // For Cloudflare, signing in also links the account for AI Gateway billing: startGatekeeperLogin
       // requested full (non-transient) scopes, so persist the grant as a connected account before
       // handing back the session. Other providers use minimal, transient sign-in grants (no persist).
       if (this.ctx.props.vendorId === CLOUDFLARE_VENDOR_ID) {
-        await userStub.linkConnectedAccountFromLogin(account, this.ctx.props.vendorId, expiresAt);
+        const accountId = await userStub.linkConnectedAccountFromLogin(
+          account, this.ctx.props.vendorId, expiresAt);
+        try {
+          await assertCurrent();
+        } catch (error) {
+          try {
+            await userStub.revokeGatekeeperSession(secret);
+          } catch {
+            // Never deliver stale authority even if best-effort token cleanup is unavailable.
+          }
+          try {
+            await userStub.disconnectAccount(accountId);
+          } catch {
+            // Login still fails closed if best-effort connected-account cleanup is unavailable.
+          }
+          throw error;
+        }
       }
       // Session tokens remain "<doName>:<secret>"; the opaque record also retains this exact
       // registry version/email so a post-check delivery race cannot upgrade it on reconnect.

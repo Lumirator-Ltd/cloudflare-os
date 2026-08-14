@@ -1580,12 +1580,15 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return record.account.startResourceConfigurator(resourceUrlPattern);
   }
 
-  // Persist a connected gatekeeper account that was established during sign-in (rather than via the
-  // usual logged-in connectAccount flow). Used for providers like Cloudflare where signing in also
-  // links the account for AI Gateway billing: the login callback resolves this user by verified
-  // email, then calls here to store the full-scope grant.
+  /**
+   * Persists a connected account established during sign-in and returns its removable account ID.
+   *
+   * Used for providers like Cloudflare where signing in also links the account for AI Gateway
+   * billing. The login callback retains the ID so stale identity authority can disconnect the grant
+   * before failing the pending login.
+   */
   async linkConnectedAccountFromLogin(
-      account: Fetcher<GatekeeperUser>, vendorId: string, expiresAt?: Date): Promise<void> {
+      account: Fetcher<GatekeeperUser>, vendorId: string, expiresAt?: Date): Promise<number> {
     let description = await account.describe();
     let uniqueName = description.uniqueName;
 
@@ -1612,7 +1615,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         existing.credentialExpiresAt = expiresAt;
         existing.credentialsExpired = false;
         this.storage.connectedAccounts.put(existing);
-        return;
+        return existing.id;
       }
     }
 
@@ -1625,6 +1628,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       vendorId,
       credentialExpiresAt: expiresAt,
     });
+    return id;
   }
 
   // Find an existing connected account for the given vendor + identity (uniqueName), excluding
