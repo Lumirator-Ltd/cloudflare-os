@@ -37,7 +37,11 @@ beforeAll(async () => {
   // The fetch-probe case below is what proves this is actually wired up.
   interceptor = new NetworkInterceptor();
   interceptor.install();
-  harness = await startTestGatekeeperHarness();
+  harness = await startTestGatekeeperHarness({
+    patchWorkshop(config) {
+      config.vars = { ...config.vars, AUTH_GATEKEEPERS: TEST_VENDOR_ID };
+    },
+  });
 });
 
 afterAll(async () => {
@@ -63,6 +67,33 @@ async function withSession<T>(body: (api: RpcStub<PublicApi>) => Promise<T>): Pr
 
 function thingUrl(name: string): string {
   return `https://gadgets-test.example/things/${name}`;
+}
+
+let gatekeeperLoginQueue = Promise.resolve();
+
+async function signUpVerified(
+    publicApi: RpcStub<PublicApi>, email: string): Promise<RpcStub<AuthenticatedApi>> {
+  const previous = gatekeeperLoginQueue;
+  let release!: () => void;
+  gatekeeperLoginQueue = new Promise<void>(resolve => { release = resolve; });
+  await previous;
+
+  try {
+    const response = await harness.fetchWorker(
+      TEST_GATEKEEPER_WORKER,
+      "http://gatekeeper-test.test/control/gatekeeper-login-email",
+      { method: "POST", body: JSON.stringify({ email }) },
+    );
+    if (!response.ok) {
+      throw new Error(`Failed to configure verified test identity: ${await response.text()}`);
+    }
+
+    const login = await publicApi.startGatekeeperLogin(TEST_VENDOR_ID);
+    using attempt = login.attempt;
+    return await publicApi.authenticate(await attempt.wait());
+  } finally {
+    release();
+  }
 }
 
 /** Mint this user's test-gatekeeper account -- no auth flow -- and read it back. */
@@ -116,10 +147,11 @@ type SharedGadget = {
 async function shareGadgetWithBob(
     publicApi: RpcStub<PublicApi>, thingNames: string[]): Promise<SharedGadget> {
   const [alice, bob] = nextUsernames("alice", "bob");
+  const bobEmail = `${bob}@example.com`;
 
   const aliceApi = await signUp(publicApi, alice);
-  // Bob must exist before he can be added as a collaborator.
-  const bobApi = await signUp(publicApi, bob);
+  // Bob needs a verified identity before he can be discovered as a collaborator.
+  const bobApi = await signUpVerified(publicApi, bobEmail);
 
   const aliceAccount = await provisionAccount(aliceApi);
 
@@ -128,8 +160,8 @@ async function shareGadgetWithBob(
     await overseer.newGatekeeper(aliceAccount.id, thingUrl(thingName));
   }
   const { id: gadgetId } = await overseer.getMetadata();
-  const collaborator = await overseer.addCollaborator(bob, "build");
-  if (!collaborator) throw new Error(`Failed to share the gadget with ${bob}`);
+  const collaborator = await overseer.addCollaborator(bobEmail, "build");
+  if (!collaborator) throw new Error(`Failed to share the gadget with ${bobEmail}`);
   overseer[Symbol.dispose]();
 
   const bobAccount = await provisionAccount(bobApi);
@@ -198,15 +230,16 @@ describe("observer re-verification", () => {
       async () => {
     await withSession(async publicApi => {
       const [alice, bob] = nextUsernames("ambientalice", "ambientbob");
+      const bobEmail = `${bob}@example.com`;
       const aliceApi = await signUp(publicApi, alice);
-      const bobApi = await signUp(publicApi, bob);
+      const bobApi = await signUpVerified(publicApi, bobEmail);
       const aliceAccount = await provisionAccount(aliceApi);
       const bobAccount = await provisionAccount(bobApi);
 
       const ownerWorkspace = await aliceApi.newGadget();
       const { id: gadgetId } = await ownerWorkspace.getMetadata();
-      const collaborator = await ownerWorkspace.addCollaborator(bob, "build");
-      if (!collaborator) throw new Error(`Failed to share the gadget with ${bob}`);
+      const collaborator = await ownerWorkspace.addCollaborator(bobEmail, "build");
+      if (!collaborator) throw new Error(`Failed to share the gadget with ${bobEmail}`);
       ownerWorkspace[Symbol.dispose]();
 
       // No ObserverConfigCallback is supplied. Opening can only succeed if the Workshop discovers
