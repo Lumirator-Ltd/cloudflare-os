@@ -66,6 +66,15 @@ export class TestControl extends DurableObject<Cloudflare.Env> {
     return this.ctx.storage.kv.get<string>("gatekeeper-login-email") ?? null;
   }
 
+  recordConnectScope(scope: "auth" | "full"): void {
+    const scopes = this.ctx.storage.kv.get<Array<"auth" | "full">>("connect-scopes") ?? [];
+    this.ctx.storage.kv.put("connect-scopes", [...scopes, scope]);
+  }
+
+  getConnectScopes(): Array<"auth" | "full"> {
+    return this.ctx.storage.kv.get<Array<"auth" | "full">>("connect-scopes") ?? [];
+  }
+
   setVerifyOutcome(label: string, outcome: VerifyOutcome): void {
     this.ctx.storage.kv.put(`outcome:${label}`, outcome);
   }
@@ -163,9 +172,8 @@ export class GatekeeperVendor extends WorkerEntrypoint<Cloudflare.Env> {
   async connectAccount(
       callback: Fetcher<GatekeeperConnectCallback>, options?: GatekeeperConnectOptions,
   ): Promise<{ url: string }> {
-    if (options?.scopes !== "auth") {
-      throw new Error("The test gatekeeper supports only its transient authentication fixture flow.");
-    }
+    const scope = options?.scopes ?? "full";
+    await control(this.ctx.exports).recordConnectScope(scope);
     const email = await control(this.ctx.exports).getGatekeeperLoginEmail();
     if (!email) throw new Error("The test gatekeeper login email is not configured.");
     const account = this.ctx.exports.TestAccount({ props: { label: email, authenticatedEmail: email } });
@@ -407,6 +415,10 @@ export default {
       }
       await control(ctx.exports).setGatekeeperLoginEmail(email);
       return new Response(null, { status: 204 });
+    }
+
+    if (url.pathname === "/control/connect-scopes" && req.method === "GET") {
+      return Response.json({ scopes: await control(ctx.exports).getConnectScopes() });
     }
 
     // Set what addObserver() should do for one account.

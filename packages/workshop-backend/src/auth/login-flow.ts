@@ -22,7 +22,6 @@
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { GatekeeperConnectCallback, GatekeeperUser } from "@gadgets/workshop-shared/gatekeeper";
 import { createWorkshopLogger } from "../observability";
-import { CLOUDFLARE_VENDOR_ID } from "../user.js";
 import { readAdminConfig } from "../admin-config.js";
 import type { IdentityResolution } from "../identity-registry.js";
 import {
@@ -92,7 +91,7 @@ export class LoginConnectCallbackImpl
     return this.ctx.exports.PendingLogin.get(id);
   }
 
-  async complete(account: Fetcher<GatekeeperUser>, expiresAt?: Date): Promise<void> {
+  async complete(account: Fetcher<GatekeeperUser>, _expiresAt?: Date): Promise<void> {
     const loginLogger = logger.with({
       operation: "gatekeeper.login",
       vendorId: this.ctx.props.vendorId,
@@ -143,31 +142,6 @@ export class LoginConnectCallbackImpl
         revoke: token => userStub.revokeGatekeeperSession(token),
         assertCurrent,
       });
-      // For Cloudflare, signing in also links the account for AI Gateway billing: startGatekeeperLogin
-      // requested full (non-transient) scopes, so persist the grant as a connected account before
-      // handing back the session. Other providers use minimal, transient sign-in grants (no persist).
-      if (this.ctx.props.vendorId === CLOUDFLARE_VENDOR_ID) {
-        const link = await userStub.linkConnectedAccountFromLogin(
-          account, this.ctx.props.vendorId, expiresAt);
-        try {
-          await assertCurrent();
-        } catch (error) {
-          try {
-            // This conditionally restores/deletes the exact local mutation before scheduling remote
-            // revocation, so pending failure never waits on the gatekeeper account.
-            await userStub.rollbackConnectedAccountLogin(link);
-          } catch {
-            // Login still fails closed if best-effort connected-account cleanup is unavailable.
-          }
-          try {
-            await userStub.revokeGatekeeperSession(secret);
-          } catch {
-            // Never deliver stale authority even if best-effort token cleanup is unavailable.
-          }
-          throw error;
-        }
-        await userStub.commitConnectedAccountLogin(link);
-      }
       // Session tokens remain "<doName>:<secret>"; the opaque record also retains this exact
       // registry version/email so a post-check delivery race cannot upgrade it on reconnect.
       await pending.deliver(`${identity.internalUserId}:${secret}`);
@@ -185,11 +159,7 @@ export class LoginConnectCallbackImpl
     }
   }
 
-  // No-ops: for transient sign-in grants there's nothing persisted to update. For the Cloudflare
-  // billing connection (persisted on login) these would ideally flip the account's credential flag,
-  // but the callback doesn't carry the user/account identity (it's only learned in complete()). The
-  // billing path degrades gracefully regardless — getUsableAccessToken() returns null on expiry and
-  // the user falls back to the free tier / a reconnect prompt.
+  // No-ops: transient sign-in grants do not create connected-account credential state.
   async credentialsExpired(): Promise<void> {}
   async credentialsRestored(_expiresAt?: Date): Promise<void> {}
 }
