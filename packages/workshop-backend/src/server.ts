@@ -12,6 +12,12 @@ import { deploymentOutputForBlueprint, listFormatOffers, readAdminConfig } from 
 import { canonicalizeVerifiedEmail, IdentityRegistry } from "./identity-registry.js";
 import { verifyClerkIdentity } from "./clerk-auth.js";
 import { createClerkSession } from "./clerk-session.js";
+import {
+  CURRENT_IDENTITY_AUTHORITY_REQUIRED,
+  assertCurrentIdentityAuthority,
+  startIdentityAuthorityWatchdog,
+  type VerifiedAuthorityContext,
+} from "./identity-authority.js";
 
 // Re-export the optional-feature Durable Objects + entrypoints so they can be bound in wrangler.
 export { PendingLogin, LoginConnectCallbackImpl };
@@ -77,11 +83,6 @@ type Env = Cloudflare.Env & {
 
 // =======================================================================================
 
-type VerifiedAuthorityContext = {
-  canonicalVerifiedEmail: string;
-  identityVersion: number;
-};
-
 const ADMINS_CONFIG_ERROR =
   "ADMINS must be configured as an array of verified email strings.";
 const COLLISION_LOCKED = "Identity collision requires deployment operator assistance.";
@@ -106,7 +107,10 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   constructor(private ctx: ExecutionContext, private env: Env,
       userId: DurableObjectId,
       private abortSession: (reason: Error) => void,
-      private authority?: VerifiedAuthorityContext) {
+      private authority?: VerifiedAuthorityContext,
+      private beginAuthorityWatchdog?: (
+        internalUserId: string, authority: VerifiedAuthorityContext,
+      ) => void) {
     super();
 
     this.#userId = userId;
@@ -128,13 +132,37 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   }
 
   #isAdmin(): boolean {
-    // Verified external identities are authorized by their current canonical email, never by the
-    // random internal routing ID. The version is retained with the authority context and Clerk
-    // session invalidation prevents a stale version from surviving an identity change. Password
+    // Verified external identities are authorized by canonical email, never by their random routing
+    // ID. Every privileged use first revalidates the captured registry authority below. Password
     // sessions remain on their legacy route-name authority only until Task 7 removes that path.
     const name = this.authority?.canonicalVerifiedEmail ?? this.#userId.name;
     if (!name || this.env.ADMINS === undefined) return false;
     return canonicalAdminEmails(this.env.ADMINS).includes(canonicalizeVerifiedEmail(name));
+  }
+
+  async #assertCurrentAuthority(): Promise<void> {
+    if (!this.authority) return;
+    const internalUserId = this.#userId.name;
+    if (!internalUserId) throw new Error(CURRENT_IDENTITY_AUTHORITY_REQUIRED);
+    await assertCurrentIdentityAuthority(
+      this.ctx.exports.IdentityRegistry.getByName(""), internalUserId, this.authority);
+  }
+
+  async #currentAdmin(): Promise<boolean> {
+    await this.#assertCurrentAuthority();
+    return this.#isAdmin();
+  }
+
+  async #authorizeAdminOperation(): Promise<void> {
+    await this.#assertCurrentAuthority();
+    if (!this.#isAdmin()) throw new Error(CURRENT_IDENTITY_AUTHORITY_REQUIRED);
+  }
+
+  #startPrivilegedAuthorityWatchdog(): void {
+    if (!this.authority) return;
+    const internalUserId = this.#userId.name;
+    if (!internalUserId) throw new Error(CURRENT_IDENTITY_AUTHORITY_REQUIRED);
+    this.beginAuthorityWatchdog?.(internalUserId, this.authority);
   }
 
   whoami(): Promise<AiChatAuthorInfo> {
@@ -599,24 +627,31 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     let accounts = await user.listProvidedAccounts();
     let app = accounts.find(account => account.vendorId === id && account.description.providesUi);
     if (!app) return null;
-    // isAdmin is supplied fresh per open so admin-gated features reflect the user's current status.
-    return user.startAccountAppUi(app.accountId, { isAdmin: this.#isAdmin() });
+    // Revalidate immediately before minting admin-bearing nested authority. A non-admin frame carries
+    // no deployment authority and does not start the bounded privileged watchdog.
+    const isAdmin = await this.#currentAdmin();
+    if (isAdmin) this.#startPrivilegedAuthorityWatchdog();
+    return user.startAccountAppUi(app.accountId, { isAdmin });
   }
 
   // --- Deployment admin ---
 
   async amIAdmin(): Promise<boolean> {
-    return this.#isAdmin();
+    return this.#currentAdmin();
   }
 
   async getAdminApi(): Promise<RpcStub<AdminApi> | null> {
-    if (!this.#isAdmin()) return null;
-    // #isAdmin() guarantees a non-empty user id name. Forwarded to gatekeepers when listing the
-    // resource catalog so RBAC-gated ones still surface for this admin.
-    let adminUserId = this.#userId.name!;
+    if (!(await this.#currentAdmin())) return null;
+    this.#startPrivilegedAuthorityWatchdog();
+    // Stable internal ID is forwarded to gatekeepers when listing the resource catalog so
+    // RBAC-gated ones still surface for this admin; verified email is never used as an ID.
+    const adminUserId = this.#userId.name!;
     // @ts-expect-error Cap'n Web RPC stubs and native RPC targets are compatible but the type
     //     system doesn't know this.
-    return new AdminApiImpl(this.adminSettings.getByName(""), adminUserId);
+    return new AdminApiImpl(
+      this.adminSettings.getByName(""), adminUserId,
+      () => this.#authorizeAdminOperation(),
+    );
   }
 }
 
@@ -656,6 +691,8 @@ class LoginAttemptImpl extends RpcTarget implements LoginAttempt {
 class PublicApiImpl extends RpcTarget implements PublicApi {
   users: DurableObjectNamespace<UserDurableObject>;
   #clerkSession: "authenticating" | { dispose(): Promise<void> } | undefined;
+  #identitySessions = new Map<string, { internalUserId: string; subscriberId: string }>();
+  #authorityWatchdogs = new Map<string, { dispose(): void }>();
 
   constructor(private ctx: ExecutionContext, private env: Env,
       private abortSession: (reason: Error) => void,
@@ -664,11 +701,18 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
       private accessEmail?: string) {
     super();
     this.users = this.ctx.exports.UserDurableObject;
-    this.abortSignal.addEventListener("abort", () => this.#disposeClerkSession(), { once: true });
+    this.abortSignal.addEventListener("abort", () => this.#dispose(), { once: true });
   }
 
   [Symbol.dispose](): void {
+    this.#dispose();
+  }
+
+  #dispose(): void {
     this.#disposeClerkSession();
+    this.#disposeIdentitySessions();
+    for (const watchdog of this.#authorityWatchdogs.values()) watchdog.dispose();
+    this.#authorityWatchdogs.clear();
   }
 
   #disposeClerkSession(): void {
@@ -680,6 +724,60 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
         event: "clerk.session.dispose.failed", error,
       });
     });
+  }
+
+  #disposeIdentitySessions(): void {
+    const sessions = [...this.#identitySessions.values()];
+    this.#identitySessions.clear();
+    const registry = this.ctx.exports.IdentityRegistry.getByName("");
+    for (const session of sessions) {
+      void registry.unregisterIdentitySession(session.internalUserId, session.subscriberId)
+        .catch(error => {
+          logger.warn("failed to dispose identity session", {
+            event: "identity.session.dispose.failed", error,
+          });
+        });
+    }
+  }
+
+  async #registerIdentitySession(
+      internalUserId: string, authority: VerifiedAuthorityContext): Promise<void> {
+    const subscriberId = crypto.randomUUID();
+    const registry = this.ctx.exports.IdentityRegistry.getByName("");
+    try {
+      await registry.registerIdentitySession(
+        internalUserId,
+        authority.identityVersion,
+        subscriberId,
+        async () => this.abortSession(new Error(CURRENT_IDENTITY_AUTHORITY_REQUIRED)),
+      );
+    } catch {
+      const error = new Error(CURRENT_IDENTITY_AUTHORITY_REQUIRED);
+      this.abortSession(error);
+      throw error;
+    }
+
+    if (this.abortSignal.aborted) {
+      await registry.unregisterIdentitySession(internalUserId, subscriberId);
+      throw new Error("This API socket is closed.");
+    }
+    this.#identitySessions.set(subscriberId, { internalUserId, subscriberId });
+  }
+
+  #startAuthorityWatchdog(
+      internalUserId: string, authority: VerifiedAuthorityContext): void {
+    const key = `${internalUserId}:${authority.identityVersion}`;
+    if (this.#authorityWatchdogs.has(key)) return;
+    const registry = this.ctx.exports.IdentityRegistry.getByName("");
+    const watchdog = startIdentityAuthorityWatchdog(
+      () => assertCurrentIdentityAuthority(registry, internalUserId, authority),
+      this.abortSession,
+    );
+    if (this.abortSignal.aborted) {
+      watchdog.dispose();
+      return;
+    }
+    this.#authorityWatchdogs.set(key, watchdog);
   }
 
   async getServerConfig(): Promise<ServerConfig> {
@@ -723,8 +821,8 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
     await this.users.get(userId).authenticate(split[1]);
 
     // Registry-routed Gatekeeper sessions carry their stable internal ID as the token prefix. Read
-    // the current active authority when authenticating a new local session. A retained API keeps
-    // the authority captured here, preserving Gatekeeper's existing session lifetime semantics.
+    // current active authority for this socket without changing the reusable local token's lifetime;
+    // the registry callback below invalidates the socket if that captured authority later changes.
     const identity = await this.ctx.exports.IdentityRegistry.getByName("")
       .getIdentity(internalUserId);
     let authority: VerifiedAuthorityContext | undefined;
@@ -738,13 +836,16 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
       };
     }
 
+    if (authority) await this.#registerIdentitySession(internalUserId, authority);
+
     recordAnalytics(this.ctx, this.env, {
       event_name: "user_authenticated",
       user_id: userId.name!,
       source: "session_token",
     });
     return new AuthenticatedApiImpl(
-      this.ctx, this.env, userId, this.abortSession, authority);
+      this.ctx, this.env, userId, this.abortSession, authority,
+      (id, currentAuthority) => this.#startAuthorityWatchdog(id, currentAuthority));
   }
 
   async authenticateWithClerk(token: string): Promise<ClerkAuthentication> {
@@ -778,7 +879,7 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
         resolve: (subject, email, allowSignups) =>
           registry.resolveClerkIdentity(subject, email, allowSignups),
         register: async (subscriberId, identity, invalidate) => {
-          await registry.registerClerkSession(
+          await registry.registerIdentitySession(
             identity.internalUserId,
             identity.identityVersion,
             subscriberId,
@@ -786,7 +887,7 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
           );
         },
         unregister: async (subscriberId, internalUserId) => {
-          await registry.unregisterClerkSession(internalUserId, subscriberId);
+          await registry.unregisterIdentitySession(internalUserId, subscriberId);
         },
       });
       if (this.#clerkSession !== "authenticating" || this.abortSignal.aborted) {
@@ -800,7 +901,8 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
         api: new AuthenticatedApiImpl(this.ctx, this.env, userId, this.abortSession, {
           canonicalVerifiedEmail: resolved.canonicalVerifiedEmail,
           identityVersion: resolved.identityVersion,
-        }) as unknown as RpcStub<AuthenticatedApi>,
+        }, (id, currentAuthority) =>
+          this.#startAuthorityWatchdog(id, currentAuthority)) as unknown as RpcStub<AuthenticatedApi>,
         session: clerkSession.control as unknown as ClerkAuthentication["session"],
         expiresAt: new Date(verified.expiresAt.getTime()),
       };
@@ -830,15 +932,19 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
         source: "cf_access",
       });
     }
+    const authority = {
+      canonicalVerifiedEmail: resolved.canonicalVerifiedEmail,
+      identityVersion: resolved.identityVersion,
+    };
+    await this.#registerIdentitySession(resolved.internalUserId, authority);
     recordAnalytics(this.ctx, this.env, {
       event_name: "user_authenticated",
       user_id: resolved.internalUserId,
       source: "cf_access",
     });
-    return new AuthenticatedApiImpl(this.ctx, this.env, userId, this.abortSession, {
-      canonicalVerifiedEmail: resolved.canonicalVerifiedEmail,
-      identityVersion: resolved.identityVersion,
-    });
+    return new AuthenticatedApiImpl(
+      this.ctx, this.env, userId, this.abortSession, authority,
+      (id, currentAuthority) => this.#startAuthorityWatchdog(id, currentAuthority));
   }
 
   async login(username: string, passwordHash: Uint8Array): Promise<string | null> {

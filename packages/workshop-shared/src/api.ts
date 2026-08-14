@@ -610,10 +610,9 @@ export interface AuthenticatedApi extends RpcTarget {
   // the admin UI.
   amIAdmin(): Promise<boolean>;
 
-  // Returns a capability for managing deployment-wide admin settings, or null when the caller is not
-  // an admin. The access check happens once here, so the returned stub's methods need no per-call
-  // checks. (Authentication config — sign-in providers, password login — is intentionally not
-  // managed here; it stays env-var driven.)
+  /** Returns a capability for managing deployment-wide admin settings, or null when the caller is
+   * not a current admin. Registry-backed authority is revalidated here and by every operation on
+   * the returned capability. Authentication config remains environment-driven. */
   getAdminApi(): Promise<RpcStub<AdminApi> | null>;
 
   // TODO:
@@ -797,11 +796,11 @@ export type AdminFormat = {
   bundled: boolean;
 };
 
-// Capability for managing deployment-wide admin settings, obtained via
-// AuthenticatedApi.getAdminApi() (which is null for non-admins). The access check happens when the
-// capability is minted, so these methods don't re-check. Covers branding, agent instructions, and
-// which gatekeeper connectors/resources are offered — NOT authentication config (that's env-var
-// driven). Each setter throws on invalid input.
+/** Capability for managing deployment-wide admin settings, obtained via
+ * AuthenticatedApi.getAdminApi() (which is null for non-admins). Every operation revalidates the
+ * retained caller's current admin authority. Covers branding, agent instructions, and which
+ * gatekeeper connectors/resources are offered, but not environment-driven authentication config.
+ * Each setter throws on invalid input. */
 export interface AdminApi {
   // Read all admin-managed settings for the admin UI in one call.
   getSettings(): Promise<AdminSettingsView>;

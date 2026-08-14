@@ -292,7 +292,7 @@ describe("IdentityRegistry", () => {
     });
   });
 
-  it("eagerly invalidates every Clerk session when an identity email changes", async () => {
+  it("eagerly invalidates every registry-backed session when an identity email changes", async () => {
     const subject = `clerk-subscribers-${crypto.randomUUID()}`;
     const oldEmail = unique("subscriber-old");
     const newEmail = unique("subscriber-new");
@@ -313,9 +313,9 @@ describe("IdentityRegistry", () => {
           [Symbol.dispose]() {},
         }) as Subscriber;
       };
-      await instance.registerClerkSession(
+      await instance.registerIdentitySession(
         initial.internalUserId, initial.identityVersion, "initiator", subscriber("initiator") as never);
-      await instance.registerClerkSession(
+      await instance.registerIdentitySession(
         initial.internalUserId, initial.identityVersion, "stale", subscriber("stale") as never);
 
       const moved = await instance.resolveClerkIdentity(subject, newEmail, false);
@@ -338,11 +338,11 @@ describe("IdentityRegistry", () => {
         onRpcBroken() {},
         [Symbol.dispose]() { disposed++; },
       });
-      instance.registerClerkSession(
+      instance.registerIdentitySession(
         initial.internalUserId, initial.identityVersion, "pending", callback as never);
 
       await instance.resolveClerkIdentity(subject, unique("pending-subscriber-new"), false);
-      instance.unregisterClerkSession(initial.internalUserId, "pending");
+      instance.unregisterIdentitySession(initial.internalUserId, "pending");
       expect(disposed).toBe(1);
       release.resolve();
       await Promise.resolve();
@@ -350,28 +350,24 @@ describe("IdentityRegistry", () => {
     });
   });
 
-  it("removes and disposes a Clerk callback when its RPC breaks", async () => {
-    const subject = `clerk-broken-subscriber-${crypto.randomUUID()}`;
+  it("does not invoke unsupported native onRpcBroken as an application callback", async () => {
+    const subject = `clerk-native-subscriber-${crypto.randomUUID()}`;
     const initial = await registry().resolveClerkIdentity(
-      subject, unique("broken-subscriber-old"), true);
+      subject, unique("native-subscriber-old"), true);
     let invalidations = 0;
     let disposed = 0;
-    let broken: (() => void) | undefined;
 
     await runInDurableObject(registry(), async (instance: IdentityRegistry) => {
       const callback = Object.assign(async () => { invalidations++; }, {
         dup() { return callback; },
-        onRpcBroken(listener: () => void) { broken = listener; },
         [Symbol.dispose]() { disposed++; },
       });
-      instance.registerClerkSession(
-        initial.internalUserId, initial.identityVersion, "broken", callback as never);
-      expect(broken).toBeTypeOf("function");
-      broken!();
+      instance.registerIdentitySession(
+        initial.internalUserId, initial.identityVersion, "native", callback as never);
 
-      await instance.resolveClerkIdentity(subject, unique("broken-subscriber-new"), false);
+      await instance.resolveClerkIdentity(subject, unique("native-subscriber-new"), false);
       await Promise.resolve();
-      expect(invalidations).toBe(0);
+      expect(invalidations).toBe(1);
       expect(disposed).toBe(1);
     });
   });
@@ -390,13 +386,13 @@ describe("IdentityRegistry", () => {
           onRpcBroken() {},
           [Symbol.dispose]() { disposed++; },
         });
-        instance.registerClerkSession(
+        instance.registerIdentitySession(
           initial.internalUserId, initial.identityVersion, "failing", callback as never);
 
         await instance.resolveClerkIdentity(subject, unique("failing-subscriber-new"), false);
         await vi.waitFor(() => expect(disposed).toBe(1));
         expect(warn.mock.calls.flat()).toEqual(expect.arrayContaining([
-          expect.objectContaining({ event: "clerk.session.invalidate.failed" }),
+          expect.objectContaining({ event: "identity.session.invalidate.failed" }),
         ]));
       });
     } finally {
@@ -404,7 +400,7 @@ describe("IdentityRegistry", () => {
     }
   });
 
-  it("does not persist live Clerk subscribers across a registry restart", async () => {
+  it("does not persist live identity subscribers across a registry restart", async () => {
     const subject = `clerk-lost-subscriber-${crypto.randomUUID()}`;
     const oldEmail = unique("lost-subscriber-old");
     const newEmail = unique("lost-subscriber-new");
@@ -418,7 +414,7 @@ describe("IdentityRegistry", () => {
         onRpcBroken() {},
         [Symbol.dispose]() {},
       });
-      await instance.registerClerkSession(
+      await instance.registerIdentitySession(
         initial.internalUserId, initial.identityVersion, "lost", subscriber as never);
     });
     await abortAllDurableObjects();

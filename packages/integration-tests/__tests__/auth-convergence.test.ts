@@ -25,6 +25,8 @@ const CANONICAL_EMAIL = "same.user@example.com";
 const CLERK_EMAIL_VARIANT = "Same.User@Example.COM";
 const PADDED_EMAIL_VARIANT = "  Same.User@Example.COM  ";
 const NON_ADMIN_EMAIL = "ordinary@example.com";
+const RETAINED_ADMIN_EMAIL = "retained.admin@example.com";
+const RETAINED_ADMIN_SUBJECT = "user_task6_retained_admin";
 const CLERK_TEST_SERVER = fileURLToPath(new URL(
   "../../workshop-backend/.wrangler/validate/src/testing/clerk-test-server.ts",
   import.meta.url,
@@ -33,6 +35,7 @@ const CLERK_TEST_SERVER = fileURLToPath(new URL(
 let harness: Harness;
 let interceptor: NetworkInterceptor;
 let clerkPrivateKey: KeyObject;
+let clerkPublicKeyPem: string;
 let accessPrivateKey: KeyObject;
 let accessPublicJwk: Record<string, unknown>;
 let canonicalInternalUserId: string;
@@ -141,7 +144,7 @@ function accessBatch(token: string, origin = harness.url.origin): RpcStub<Public
 beforeAll(async () => {
   const clerkPair = generateKeyPairSync("rsa", { modulusLength: 2048 });
   clerkPrivateKey = clerkPair.privateKey;
-  const clerkPublicKeyPem = clerkPair.publicKey
+  clerkPublicKeyPem = clerkPair.publicKey
     .export({ type: "spki", format: "pem" }).toString().trim();
 
   const accessPair = generateKeyPairSync("rsa", { modulusLength: 2048 });
@@ -271,6 +274,76 @@ describe.sequential("verified authentication convergence", () => {
     });
   });
 
+  it("revokes a retained Gatekeeper admin graph when its verified email moves", async () => {
+    await harness.updateWorkshop(config => {
+      config.vars = { ...config.vars, ADMINS: [RETAINED_ADMIN_EMAIL] };
+    });
+
+    using clerkPublic = connect(harness.url);
+    const clerk = await authenticateWithClerk(
+      clerkPublic, RETAINED_ADMIN_SUBJECT, RETAINED_ADMIN_EMAIL);
+    using _clerkApi = clerk.api;
+    using _clerkSession = clerk.session;
+
+    using gatekeeperPublic = connect(harness.url);
+    const token = await loginWithGatekeeper(gatekeeperPublic, RETAINED_ADMIN_EMAIL);
+    const retained = await waitFor("the retained-admin config to reload", async () => {
+      const publicApi = connect(harness.url);
+      try {
+        const api = await publicApi.authenticate(token);
+        if (await api.amIAdmin()) return { publicApi, api };
+        api[Symbol.dispose]();
+      } catch {
+        // A just-replaced isolate may close while the harness reloads; retry on the new worker.
+      }
+      publicApi[Symbol.dispose]();
+      return null;
+    });
+    using _retainedPublic = retained.publicApi;
+    using retainedApi = retained.api;
+    await retainedApi.provisionAmbientAccount(TEST_VENDOR_ID);
+
+    const retainedAdmin = await retainedApi.getAdminApi();
+    if (!retainedAdmin) throw new Error("retained Gatekeeper identity did not receive AdminApi");
+    using adminCapability = retainedAdmin as RpcStub<AdminApi>;
+    await expect(adminCapability.getSettings()).resolves.toMatchObject({ signupsEnabled: true });
+
+    const frame = await retainedApi.getGatekeeperApp(TEST_VENDOR_ID);
+    if (!frame) throw new Error("fixture Gatekeeper app was not returned");
+    using appUi = frame.ui as unknown as RpcStub<{ ping(): Promise<string> }>;
+    await expect(appUi.ping()).resolves.toBe("app:admin");
+    let resolveAppBroken!: () => void;
+    const appBroken = new Promise<void>(resolve => { resolveAppBroken = resolve; });
+    appUi.onRpcBroken(() => resolveAppBroken());
+
+    const movedEmail = "retained.admin.moved@example.com";
+    await setClerkProfile(RETAINED_ADMIN_SUBJECT, movedEmail);
+    using moverPublic = connect(harness.url);
+    const moved = await moverPublic.authenticateWithClerk(clerkToken(RETAINED_ADMIN_SUBJECT));
+    moved.api[Symbol.dispose]();
+    moved.session[Symbol.dispose]();
+
+    await expect(adminCapability.getSettings()).rejects.toThrow();
+    await expect(retainedApi.getAdminApi()).rejects.toThrow();
+    await expect(Promise.race([
+      appBroken.then(() => "broken"),
+      new Promise(resolve => setTimeout(() => resolve("timeout"), 5_000)),
+    ])).resolves.toBe("broken");
+
+    await harness.updateWorkshop(config => {
+      config.vars = { ...config.vars, ADMINS: [CANONICAL_EMAIL] };
+    });
+    await waitFor("the canonical-admin config to reload", async () => {
+      try {
+        using publicApi = connect(harness.url);
+        using api = await publicApi.authenticate(canonicalGatekeeperToken);
+        return await api.amIAdmin() ? true : null;
+      } catch {
+        return null;
+      }
+    });
+  });
+
   it("denies unknown Clerk and Gatekeeper identities when signups close but permits existing ones",
       async () => {
     using adminPublic = connect(harness.url);
@@ -322,7 +395,7 @@ describe.sequential("verified authentication convergence", () => {
     await expect(localApi.getAdminApi()).resolves.toBeNull();
   });
 
-  it("locks a collided identity for new authentication without revoking retained Gatekeeper RPC",
+  it("locks a collided identity and eagerly aborts its retained Gatekeeper RPC graph",
       async () => {
     const firstEmail = "collision-first@example.com";
     const occupiedEmail = "collision-occupied@example.com";
@@ -350,9 +423,9 @@ describe.sequential("verified authentication convergence", () => {
     await expect(collisionPublic.authenticateWithClerk(clerkToken(subject)))
       .rejects.toThrow(/collision/i);
 
-    // Gatekeeper sessions keep their prior lifetime semantics; only a new registry-backed auth is
-    // denied after the collision. Clerk is the only provider with eager session broadcasts.
-    await expect(retainedApi.whoami()).resolves.toMatchObject({ id: firstId });
+    // The random local token retains its independent lifetime, but every registry-backed socket is
+    // invalidated when the authority version changes so retained capabilities cannot stay privileged.
+    await expect(retainedApi.whoami()).rejects.toThrow();
     using rejectedPublic = connect(harness.url);
     await expect(rejectedPublic.authenticate(firstToken)).rejects.toThrow(/collision/i);
   });
@@ -406,6 +479,10 @@ describe.sequential("verified authentication convergence", () => {
 
     using accessAdminPublic = accessBatch(accessToken(CANONICAL_EMAIL));
     await expect(accessAdminPublic.authenticateFromCfAccess().amIAdmin()).resolves.toBe(true);
+    using accessSettingsPublic = accessBatch(accessToken(CANONICAL_EMAIL));
+    using accessSettings = (accessSettingsPublic.authenticateFromCfAccess().getAdminApi()) as unknown as RpcStub<AdminApi>;
+    await expect(accessSettings.getSettings())
+      .resolves.toMatchObject({ signupsEnabled: false });
 
     using accessNonAdminPublic = accessBatch(accessToken(NON_ADMIN_EMAIL));
     await expect(accessNonAdminPublic.authenticateFromCfAccess().whoami())
@@ -417,6 +494,35 @@ describe.sequential("verified authentication convergence", () => {
 
     using unknownAccessPublic = accessBatch(accessToken("unknown-access@example.com"));
     await expect(unknownAccessPublic.authenticateFromCfAccess().whoami())
+      .rejects.toThrow(/sign-ups are currently disabled/i);
+
+    // Access minted this retained admin graph with no Clerk configuration. Re-enable Clerk only as
+    // an independent identity-change producer, then prove the retained Access authority is current.
+    await harness.updateWorkshop(config => {
+      config.vars = {
+        ...config.vars,
+        CLERK_PUBLISHABLE_KEY,
+        CLERK_SECRET_KEY,
+        CLERK_JWT_KEY: clerkPublicKeyPem,
+        PUBLIC_BASE_URL: CLERK_AUTHORIZED_PARTY,
+      };
+    });
+    await setClerkProfile("user_task6_canonical", "access-moved@example.com");
+    await waitFor("Clerk identity-change support to reload", async () => {
+      using moverPublic = accessBatch(accessToken(CANONICAL_EMAIL));
+      try {
+        const moved = await moverPublic.authenticateWithClerk(clerkToken("user_task6_canonical"));
+        moved.api[Symbol.dispose]();
+        moved.session[Symbol.dispose]();
+        return true;
+      } catch (error) {
+        if (error instanceof Error && error.message.includes("not configured correctly")) return null;
+        throw error;
+      }
+    });
+
+    using staleAccessPublic = accessBatch(accessToken(CANONICAL_EMAIL));
+    await expect(staleAccessPublic.authenticateFromCfAccess().getAdminApi())
       .rejects.toThrow(/sign-ups are currently disabled/i);
   });
 

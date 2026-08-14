@@ -25,6 +25,10 @@ import { createWorkshopLogger } from "../observability";
 import { CLOUDFLARE_VENDOR_ID } from "../user.js";
 import { readAdminConfig } from "../admin-config.js";
 import type { IdentityResolution } from "../identity-registry.js";
+import {
+  assertCurrentIdentityAuthority,
+  mintCurrentIdentitySessionToken,
+} from "../identity-authority.js";
 
 const logger = createWorkshopLogger("workshop.auth");
 
@@ -109,10 +113,10 @@ export class LoginConnectCallbackImpl
       // Signup policy is read at the Workshop trust boundary before the verified provider email is
       // resolved. The registry canonicalizes the email and initializes the stable User DO.
       const signupsEnabled = (await readAdminConfig(this.env)).signupsEnabled;
+      const registry = this.ctx.exports.IdentityRegistry.getByName("");
       let identity: IdentityResolution;
       try {
-        identity = await this.ctx.exports.IdentityRegistry.getByName("")
-          .resolveEmailIdentity(email, signupsEnabled);
+        identity = await registry.resolveEmailIdentity(email, signupsEnabled);
       } catch (error) {
         if (error instanceof Error && error.message === SIGNUPS_DISABLED) {
           loginLogger.info("gatekeeper login finished", {
@@ -125,7 +129,19 @@ export class LoginConnectCallbackImpl
       }
       const userStub = this.ctx.exports.UserDurableObject.get(
         this.ctx.exports.UserDurableObject.idFromName(identity.internalUserId));
-      const secret = await userStub.createGatekeeperSession();
+      const authority = {
+        canonicalVerifiedEmail: identity.canonicalVerifiedEmail,
+        identityVersion: identity.identityVersion,
+      };
+      // Close the issuance race: a Clerk update may move or collision-lock this identity after its
+      // email resolution but before the local token is ready. Re-read exact durable authority and
+      // revoke the just-created token rather than delivering stale authority.
+      const secret = await mintCurrentIdentitySessionToken({
+        mint: () => userStub.createGatekeeperSession(),
+        revoke: token => userStub.revokeGatekeeperSession(token),
+        assertCurrent: () => assertCurrentIdentityAuthority(
+          registry, identity.internalUserId, authority),
+      });
       // For Cloudflare, signing in also links the account for AI Gateway billing: startGatekeeperLogin
       // requested full (non-transient) scopes, so persist the grant as a connected account before
       // handing back the session. Other providers use minimal, transient sign-in grants (no persist).

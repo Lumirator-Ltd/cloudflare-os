@@ -544,103 +544,126 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
 }
 
 // Capability for managing deployment-wide admin settings, obtained via
-// AuthenticatedApi.getAdminApi() (which is null for non-admins). The admin access check happens once
-// when the capability is minted in server.ts, so these methods don't re-check. This is a thin
-// validation+forwarding facade over the AdminSettings DO — fully user-independent — so a disabled
-// gatekeeper/resource can't be re-enabled via a crafted request, and the client never receives a
-// stub to the DO's internal methods. Covers branding, agent instructions, signups, and gatekeeper
-// connector/resource availability; authentication config stays env-var driven.
+// AuthenticatedApi.getAdminApi() (which is null for non-admins). Every operation revalidates the
+// retained caller's current authority before this thin validation+forwarding facade reaches the
+// AdminSettings DO. This prevents a retained capability from outliving an external identity change,
+// while keeping the client away from the DO's internal methods. Covers branding, agent instructions,
+// signups, and gatekeeper connector/resource availability; authentication config stays env-var driven.
 @validateRpc()
 export class AdminApiImpl extends RpcTarget implements AdminApi {
-  // `adminUserId` is the requesting admin's identity, forwarded to gatekeepers when listing the
-  // resource catalog (some are RBAC-gated per user). It's plain data — not a user-DO dependency.
-  constructor(private admin: DurableObjectStub<AdminSettings>, private adminUserId: string) {
+  // `adminUserId` is the requesting admin's stable identity, forwarded to gatekeepers when listing
+  // the resource catalog (some are RBAC-gated per user). `authorize` is local to this Worker target
+  // and is awaited immediately before every operation reaches deployment state.
+  constructor(
+    private admin: DurableObjectStub<AdminSettings>,
+    private adminUserId: string,
+    private authorize: () => Promise<void>,
+  ) {
     super();
   }
 
+  async #authorized<T>(operation: () => Promise<T>): Promise<T> {
+    await this.authorize();
+    return operation();
+  }
+
   getSettings(): Promise<AdminSettingsView> {
-    return this.admin.getSettings(this.adminUserId);
+    return this.#authorized(() => this.admin.getSettings(this.adminUserId));
   }
 
-  async setSignupsEnabled(enabled: boolean): Promise<void> {
-    await this.admin.updateAdminConfig({ signupsEnabled: enabled });
+  setSignupsEnabled(enabled: boolean): Promise<void> {
+    return this.#authorized(() => this.admin.updateAdminConfig({ signupsEnabled: enabled }));
   }
 
-  async setSiteName(name: string): Promise<void> {
-    if (name.length > MAX_SITE_NAME_LENGTH) {
-      throw new Error(`Site name too long (max ${MAX_SITE_NAME_LENGTH} characters).`);
-    }
-    await this.admin.updateAdminConfig({ siteName: name });
+  setSiteName(name: string): Promise<void> {
+    return this.#authorized(async () => {
+      if (name.length > MAX_SITE_NAME_LENGTH) {
+        throw new Error(`Site name too long (max ${MAX_SITE_NAME_LENGTH} characters).`);
+      }
+      await this.admin.updateAdminConfig({ siteName: name });
+    });
   }
 
-  async setSiteLogo(data: Uint8Array | null): Promise<AdminSettingsView['siteLogo']> {
-    if (data !== null) validateSiteLogo(data);
-    return siteLogoImage(await this.admin.setSiteLogo(data));
+  setSiteLogo(data: Uint8Array | null): Promise<AdminSettingsView['siteLogo']> {
+    return this.#authorized(async () => {
+      if (data !== null) validateSiteLogo(data);
+      return siteLogoImage(await this.admin.setSiteLogo(data));
+    });
   }
 
-  async setInstanceInstructions(text: string): Promise<void> {
-    if (text.length > MAX_INSTANCE_INSTRUCTIONS_LENGTH) {
-      throw new Error(`Instructions too long (max ${MAX_INSTANCE_INSTRUCTIONS_LENGTH} characters).`);
-    }
-    await this.admin.updateAdminConfig({ instanceInstructions: text });
+  setInstanceInstructions(text: string): Promise<void> {
+    return this.#authorized(async () => {
+      if (text.length > MAX_INSTANCE_INSTRUCTIONS_LENGTH) {
+        throw new Error(`Instructions too long (max ${MAX_INSTANCE_INSTRUCTIONS_LENGTH} characters).`);
+      }
+      await this.admin.updateAdminConfig({ instanceInstructions: text });
+    });
   }
 
   setResourceEnabled(vendorId: string, urlPattern: string, enabled: boolean): Promise<void> {
-    return this.admin.setResourceEnabled(vendorId, urlPattern, enabled);
+    return this.#authorized(() => this.admin.setResourceEnabled(vendorId, urlPattern, enabled));
   }
 
   setGatekeeperMode(vendorId: string, mode: AmbientGatekeeperMode): Promise<void> {
-    if (!isAmbientGatekeeperMode(mode)) {
-      throw new Error(`Invalid gatekeeper mode: ${mode}`);
-    }
-    return this.admin.setGatekeeperMode(vendorId, mode);
+    return this.#authorized(async () => {
+      if (!isAmbientGatekeeperMode(mode)) {
+        throw new Error(`Invalid gatekeeper mode: ${mode}`);
+      }
+      await this.admin.setGatekeeperMode(vendorId, mode);
+    });
   }
 
-  async setAnnouncement(text: string): Promise<void> {
-    if (text.length > MAX_ANNOUNCEMENT_LENGTH) {
-      throw new Error(`Announcement too long (max ${MAX_ANNOUNCEMENT_LENGTH} characters).`);
-    }
-    await this.admin.updateAdminConfig({ announcement: text });
+  setAnnouncement(text: string): Promise<void> {
+    return this.#authorized(async () => {
+      if (text.length > MAX_ANNOUNCEMENT_LENGTH) {
+        throw new Error(`Announcement too long (max ${MAX_ANNOUNCEMENT_LENGTH} characters).`);
+      }
+      await this.admin.updateAdminConfig({ announcement: text });
+    });
   }
 
-  async setBanner(text: string, color: BannerColor): Promise<void> {
-    if (text.length > MAX_ANNOUNCEMENT_LENGTH) {
-      throw new Error(`Banner too long (max ${MAX_ANNOUNCEMENT_LENGTH} characters).`);
-    }
-    if (!isBannerColor(color)) {
-      throw new Error(`Invalid banner color: ${color}`);
-    }
-    await this.admin.updateAdminConfig({ banner: { text, color } });
+  setBanner(text: string, color: BannerColor): Promise<void> {
+    return this.#authorized(async () => {
+      if (text.length > MAX_ANNOUNCEMENT_LENGTH) {
+        throw new Error(`Banner too long (max ${MAX_ANNOUNCEMENT_LENGTH} characters).`);
+      }
+      if (!isBannerColor(color)) {
+        throw new Error(`Invalid banner color: ${color}`);
+      }
+      await this.admin.updateAdminConfig({ banner: { text, color } });
+    });
   }
 
-  async setAccentColor(color: string): Promise<void> {
-    if (color !== "" && !isHexColor(color)) {
-      throw new Error(`Invalid accent color: ${color}`);
-    }
-    await this.admin.updateAdminConfig({ accentColor: color });
+  setAccentColor(color: string): Promise<void> {
+    return this.#authorized(async () => {
+      if (color !== "" && !isHexColor(color)) {
+        throw new Error(`Invalid accent color: ${color}`);
+      }
+      await this.admin.updateAdminConfig({ accentColor: color });
+    });
   }
 
   isBlueprintFeatured(blueprintId: string): Promise<boolean | null> {
-    return this.admin.isBlueprintFeatured(blueprintId);
+    return this.#authorized(() => this.admin.isBlueprintFeatured(blueprintId));
   }
 
   setBlueprintFeatured(blueprintId: string, featured: boolean): Promise<void> {
-    return this.admin.setBlueprintFeatured(blueprintId, featured);
+    return this.#authorized(() => this.admin.setBlueprintFeatured(blueprintId, featured));
   }
 
   promoteFormat(blueprintId: string): Promise<void> {
-    return this.admin.promoteFormat(blueprintId);
+    return this.#authorized(() => this.admin.promoteFormat(blueprintId));
   }
 
   removeFormat(blueprintId: string): Promise<void> {
-    return this.admin.removeFormat(blueprintId);
+    return this.#authorized(() => this.admin.removeFormat(blueprintId));
   }
 
   updateFormat(blueprintId: string, patch: AdminFormatPatch): Promise<void> {
-    return this.admin.updateFormat(blueprintId, patch);
+    return this.#authorized(() => this.admin.updateFormat(blueprintId, patch));
   }
 
   setFormatOrder(blueprintIds: string[]): Promise<void> {
-    return this.admin.setFormatOrder(blueprintIds);
+    return this.#authorized(() => this.admin.setFormatOrder(blueprintIds));
   }
 }

@@ -438,6 +438,18 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return this.#newSessionToken();
   }
 
+  /** Revokes one just-minted Gatekeeper session when registry authority changes during issuance. */
+  async revokeGatekeeperSession(token: string): Promise<void> {
+    let tokenBytes: Uint8Array;
+    try {
+      tokenBytes = Uint8Array.fromBase64(token);
+    } catch {
+      return;
+    }
+    const hash = await crypto.subtle.digest("SHA-256", tokenBytes);
+    this.storage.sessions.delete(new Uint8Array(hash).toHex());
+  }
+
   // Whether this account has a password set (false for gatekeeper sign-in accounts).
   async hasPasswordLogin(): Promise<boolean> {
     return this.storage.passwordHashHash.get() !== null;
