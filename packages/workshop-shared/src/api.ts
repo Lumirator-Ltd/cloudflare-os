@@ -40,7 +40,26 @@ export interface LoginAttempt extends RpcTarget {
   wait(): Promise<string>;
 }
 
-// Public API exposed to the internet.
+/** Controls the verified Clerk lease associated with one authenticated WebSocket session. */
+export interface ClerkSessionControl extends RpcTarget {
+  /** Replaces the lease with a fully verified token and returns its exact server-verified expiry. */
+  refresh(token: string): Promise<Date>;
+
+  /** Aborts the whole WebSocket session and all capabilities descended from it. */
+  logout(): Promise<void>;
+}
+
+/** Capabilities and verified deadline returned by Clerk authentication. */
+export type ClerkAuthentication = {
+  /** The authenticated Workshop API capability governed by this Clerk lease. */
+  api: RpcStub<AuthenticatedApi>;
+  /** The sole capability through which the Clerk lease can be refreshed or logged out. */
+  session: RpcStub<ClerkSessionControl>;
+  /** The exact expiry accepted by the backend verifier; clients should refresh before this time. */
+  expiresAt: Date;
+};
+
+/** Public API exposed to the internet. */
 export interface PublicApi extends RpcTarget {
   // Returns deployment-level configuration the client needs at boot (auth mode, available sign-in
   // vendors, whether the Cloudflare limits flow is enabled). Contains no secrets.
@@ -57,6 +76,12 @@ export interface PublicApi extends RpcTarget {
 
   // Authenticates the user using an auth token (typically stored in localStorage).
   authenticate(token: string): Promise<AuthenticatedApi>;
+
+  /**
+   * Authenticates a verified Clerk session and returns sibling API/session-control capabilities
+   * governed by the same hard WebSocket deadline.
+   */
+  authenticateWithClerk(token: string): Promise<ClerkAuthentication>;
 
   // Like authenticate() but the server is expected to be sitting behind Cloudflare Access, and the
   // client is expected to have already authenticated with Access (before they could load the

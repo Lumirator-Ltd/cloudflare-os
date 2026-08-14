@@ -1,7 +1,7 @@
 import { RpcStub, RpcTarget, newHttpBatchRpcResponse, newWebSocketRpcSession, RpcSessionOptions } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import type { JWTPayload } from "jose";
-import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError } from '@gadgets/workshop-shared/api';
+import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, ClerkAuthentication, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError } from '@gadgets/workshop-shared/api';
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
 import { getServerConfig } from "./deployment-config.js";
 import { isPasswordAuthEnabled, getAuthGatekeeperAllowlist } from "./auth/config.js";
@@ -11,6 +11,8 @@ import { listConnectedAccounts, selectAccount } from "./ai-gateway-billing/cloud
 import { PendingLogin, LoginConnectCallbackImpl } from "./auth/login-flow.js";
 import { deploymentOutputForBlueprint, listFormatOffers, readAdminConfig } from "./admin-config.js";
 import { IdentityRegistry } from "./identity-registry.js";
+import { verifyClerkIdentity } from "./clerk-auth.js";
+import { createClerkSession } from "./clerk-session.js";
 
 // Re-export the optional-feature Durable Objects + entrypoints so they can be bound in wrangler.
 export { PendingLogin, LoginConnectCallbackImpl };
@@ -76,11 +78,17 @@ type Env = Cloudflare.Env & {
 
 // =======================================================================================
 
+type VerifiedAuthorityContext = {
+  canonicalVerifiedEmail: string;
+  identityVersion: number;
+};
+
 @validateRpc()
 class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   constructor(private ctx: ExecutionContext, private env: Env,
       userId: DurableObjectId,
-      private abortSession: (reason: Error) => void) {
+      private abortSession: (reason: Error) => void,
+      private authority?: VerifiedAuthorityContext) {
     super();
 
     this.#userId = userId;
@@ -102,7 +110,11 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   }
 
   #isAdmin(): boolean {
-    let name = this.#userId.name;
+    // Verified external identities are authorized by their current canonical email, never by the
+    // random internal routing ID. The version is retained with the authority context and Clerk
+    // session invalidation prevents a stale version from surviving an identity change.
+    let name = this.authority?.identityVersion && this.authority.canonicalVerifiedEmail ||
+      this.#userId.name;
     let admins = this.env.ADMINS;
 
     if (!name || !admins) return false;
@@ -638,12 +650,25 @@ class LoginAttemptImpl extends RpcTarget implements LoginAttempt {
 @validateRpc()
 class PublicApiImpl extends RpcTarget implements PublicApi {
   users: DurableObjectNamespace<UserDurableObject>;
+  #clerkSessions = new Set<{ dispose(): Promise<void> }>();
 
   constructor(private ctx: ExecutionContext, private env: Env,
       private abortSession: (reason: Error) => void,
+      private abortSignal: AbortSignal,
       private accessPayload?: JWTPayload) {
     super();
     this.users = this.ctx.exports.UserDurableObject;
+    this.abortSignal.addEventListener("abort", () => this.#disposeClerkSessions(), { once: true });
+  }
+
+  [Symbol.dispose](): void {
+    this.#disposeClerkSessions();
+  }
+
+  #disposeClerkSessions(): void {
+    const sessions = [...this.#clerkSessions];
+    this.#clerkSessions.clear();
+    for (const session of sessions) void session.dispose();
   }
 
   async getServerConfig(): Promise<ServerConfig> {
@@ -690,6 +715,47 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
       source: "session_token",
     });
     return new AuthenticatedApiImpl(this.ctx, this.env, userId, this.abortSession);
+  }
+
+  async authenticateWithClerk(token: string): Promise<ClerkAuthentication> {
+    const verified = await verifyClerkIdentity(token, this.env);
+    const signupsEnabled = (await readAdminConfig(this.env)).signupsEnabled;
+    const registry = this.ctx.exports.IdentityRegistry.getByName("");
+    const resolved = await registry.resolveClerkIdentity(
+      verified.subject,
+      verified.email,
+      signupsEnabled,
+    );
+    if (verified.expiresAt.getTime() <= Date.now()) {
+      const error = new Error("Clerk session expired.");
+      this.abortSession(error);
+      throw error;
+    }
+
+    const clerkSession = await createClerkSession({
+      initialIdentity: verified,
+      initialResolution: resolved,
+      signupsEnabled,
+      abortSession: this.abortSession,
+      verify: replacement => verifyClerkIdentity(replacement, this.env),
+      resolve: (subject, email, allowSignups) =>
+        registry.resolveClerkIdentity(subject, email, allowSignups),
+      // Eager registry subscriptions are added in the identity-invalidation concern. The hard
+      // verified deadline remains authoritative even if this process-local registration is absent.
+      register: async () => {},
+      unregister: async () => {},
+    });
+    this.#clerkSessions.add(clerkSession);
+
+    const userId = this.users.idFromName(resolved.internalUserId);
+    return {
+      api: new AuthenticatedApiImpl(this.ctx, this.env, userId, this.abortSession, {
+        canonicalVerifiedEmail: resolved.canonicalVerifiedEmail,
+        identityVersion: resolved.identityVersion,
+      }) as unknown as RpcStub<AuthenticatedApi>,
+      session: clerkSession.control as unknown as ClerkAuthentication["session"],
+      expiresAt: new Date(verified.expiresAt.getTime()),
+    };
   }
 
   async authenticateFromCfAccess(): Promise<AuthenticatedApi> {
@@ -863,7 +929,7 @@ export default {
       };
 
       return await newWorkersRpcResponse(req,
-          new PublicApiImpl(ctx, env, abortSession, accessPayload),
+          new PublicApiImpl(ctx, env, abortSession, abortController.signal, accessPayload),
           { abortSignal: abortController.signal });
     }
 
