@@ -300,5 +300,7 @@ export async function verifyClerkIdentity(
   }
 
   validateBackendSession(session, sessionId, subject);
-  return { subject, email: verifiedEmail(profile, subject), expiresAt };
+  const email = verifiedEmail(profile, subject);
+  if (expiresAt.getTime() <= Date.now()) throw verificationError();
+  return { subject, email, expiresAt };
 }

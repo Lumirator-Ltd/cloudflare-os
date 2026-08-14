@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   deriveClerkIssuer,
   resolveClerkVerificationConfig,
@@ -55,6 +55,11 @@ function dependencies(
   const createClient = vi.fn().mockReturnValue({ sessions: { getSession }, users: { getUser } });
   return { verifyToken, createClient, getSession, getUser };
 }
+
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
 
 describe("Clerk verification configuration", () => {
   it("derives the exact HTTPS issuer from a Clerk publishable key", () => {
@@ -212,6 +217,45 @@ describe("verifyClerkIdentity", () => {
       )).rejects.toThrow("Clerk identity could not be verified.");
     } finally {
       vi.restoreAllMocks();
+    }
+  });
+
+  it("rejects a token that expires while Backend API lookups are pending", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(NOW * 1_000);
+      let resolveSession!: (session: Record<string, unknown>) => void;
+      let resolveUser!: (user: Record<string, unknown>) => void;
+      const deps = dependencies(claims({
+        iat: NOW - 299,
+        nbf: NOW - 299,
+        exp: NOW + 1,
+      }));
+      deps.getSession.mockImplementation(() => new Promise(resolve => {
+        resolveSession = resolve;
+      }));
+      deps.getUser.mockImplementation(() => new Promise(resolve => {
+        resolveUser = resolve;
+      }));
+
+      const verification = verifyClerkIdentity(TOKEN, env(), deps);
+      await vi.waitFor(() => {
+        expect(deps.getSession).toHaveBeenCalledOnce();
+        expect(deps.getUser).toHaveBeenCalledOnce();
+      });
+      vi.setSystemTime((NOW + 1) * 1_000);
+      resolveSession({ id: "sess_active123", userId: "user_stable123", status: "active" });
+      resolveUser({
+        id: "user_stable123",
+        primaryEmailAddress: {
+          emailAddress: "verified@example.com",
+          verification: { status: "verified" },
+        },
+      });
+
+      await expect(verification).rejects.toThrow("Clerk identity could not be verified.");
+    } finally {
+      vi.useRealTimers();
     }
   });
 

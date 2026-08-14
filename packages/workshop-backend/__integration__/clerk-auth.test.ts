@@ -140,6 +140,18 @@ function localDependencies() {
   };
 }
 
+async function verifyLocalToken(
+    claimOverrides: Record<string, unknown> = {},
+    envOverrides: Record<string, unknown> = {},
+) {
+  vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("unexpected network request"));
+  return verifyClerkIdentity(
+    await token(claimOverrides),
+    env({ CLERK_JWT_KEY: publicKeyPem, ...envOverrides }),
+    localDependencies(),
+  );
+}
+
 function installClerkFetchFixture() {
   return vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const request = new Request(input, init);
@@ -167,6 +179,7 @@ beforeAll(async () => {
 beforeEach(() => vi.stubEnv("NODE_ENV", "test"));
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
 });
@@ -183,12 +196,59 @@ describe("Clerk JWT cryptographic verification", () => {
   });
 
   it("rejects an actually signed pending session token", async () => {
-    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("unexpected network request"));
-    await expect(verifyClerkIdentity(
-      await token({ sts: "pending" }),
-      env({ CLERK_JWT_KEY: publicKeyPem }),
-      localDependencies(),
-    )).rejects.toThrow("Clerk identity could not be verified.");
+    await expect(verifyLocalToken({ sts: "pending" }))
+        .rejects.toThrow("Clerk identity could not be verified.");
+  });
+
+  it("rejects an actually signed expired token", async () => {
+    const now = Math.floor(Date.now() / 1_000);
+    await expect(verifyLocalToken({ iat: now - 120, nbf: now - 120, exp: now - 60 }))
+        .rejects.toThrow("Clerk identity could not be verified.");
+  });
+
+  it("rejects an actually signed token with a future not-before time", async () => {
+    const now = Math.floor(Date.now() / 1_000);
+    await expect(verifyLocalToken({ nbf: now + 60 }))
+        .rejects.toThrow("Clerk identity could not be verified.");
+  });
+
+  it.each([
+    ["missing", undefined],
+    ["wrong", "https://wrong.example"],
+    ["path-suffixed", `${ISSUER}/path`],
+    ["lookalike", `${ISSUER}.attacker.example`],
+  ])("rejects an actually signed token with a %s issuer", async (_description, iss) => {
+    await expect(verifyLocalToken({ iss }))
+        .rejects.toThrow("Clerk identity could not be verified.");
+  });
+
+  it.each([
+    ["missing", undefined],
+    ["wrong", "wrong"],
+    ["empty string", ""],
+    ["empty array", []],
+    ["mixed malformed array", ["expected", ""]],
+    ["non-string", 42],
+  ])("rejects an actually signed token with %s configured audience", async (_description, aud) => {
+    await expect(verifyLocalToken({ aud }, { CLERK_JWT_AUDIENCE: "expected" }))
+        .rejects.toThrow("Clerk identity could not be verified.");
+  });
+
+  it.each(["expected", ["other", "expected"]])(
+    "accepts an actually signed token with exact configured audience %j",
+    async (aud) => {
+      await expect(verifyLocalToken({ aud }, { CLERK_JWT_AUDIENCE: "expected" }))
+          .resolves.toMatchObject({ subject: SUBJECT });
+    },
+  );
+
+  it.each([
+    ["missing", undefined],
+    ["wrong", "https://wrong.example"],
+    ["lookalike", `${AUTHORIZED_PARTY}.attacker.example`],
+  ])("rejects an actually signed token with a %s authorized party", async (_description, azp) => {
+    await expect(verifyLocalToken({ azp }))
+        .rejects.toThrow("Clerk identity could not be verified.");
   });
 
   it("rejects an actually signed token over the 300 second lifetime bound", async () => {
