@@ -687,8 +687,9 @@ class LoginAttemptImpl extends RpcTarget implements LoginAttempt {
   }
 }
 
+/** Per-connection public RPC implementation that owns retained authentication lifecycles. */
 @validateRpc()
-class PublicApiImpl extends RpcTarget implements PublicApi {
+export class PublicApiImpl extends RpcTarget implements PublicApi {
   users: DurableObjectNamespace<UserDurableObject>;
   #clerkSession: "authenticating" | { dispose(): Promise<void> } | undefined;
   #identitySessions = new Map<string, { internalUserId: string; subscriberId: string }>();
@@ -852,7 +853,10 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
       return rejectStaleSession(error);
     }
 
-    if (authority) await this.#registerIdentitySession(internalUserId, authority);
+    if (authority) {
+      await this.#registerIdentitySession(internalUserId, authority);
+      this.#startAuthorityWatchdog(internalUserId, authority);
+    }
 
     recordAnalytics(this.ctx, this.env, {
       event_name: "user_authenticated",
