@@ -418,9 +418,10 @@ export interface GatekeeperVendor extends WorkerEntrypoint {
   // Get the list of resource types this vendor supports. Each entry describes a category of
   // resource the vendor can provide access to, along with a URL pattern for matching.
   //
-  // `options.userId` specifies the user ID (usually, email address) of the user who is driving the
-  // query, which the gatekeeper can consider in deciding what resources are available. If it
-  // returns an empty list, then the gatekeeper will be totally hidden from the user.
+  // `options.userId` specifies the opaque, deployment-local stable application ID of the user who
+  // is driving the query. A gatekeeper may use it for deployment-scoped RBAC but must not interpret
+  // it as an email address or external-provider identity. If this method returns an empty list, the
+  // gatekeeper is totally hidden from the user.
   //
   // TODO: Providing the user ID here is a temporary hack to enable a hidden internal gatekeeper.
   //   Later on we should come up with a better way to manage which users see which gatekeepers.
@@ -530,11 +531,12 @@ export interface GatekeeperUser extends WorkerEntrypoint {
   // prevent replay attacks.
   reconnect(): Promise<{url: string}>;
 
-  // For vendors that advertise `providesAuth`, returns the account's email address for use as the
-  // user's sign-in identity. The email MUST be verified by the provider (e.g. Google
-  // `email_verified`, a GitHub primary+verified email, or a Cloudflare account email) — the
-  // Workshop keys accounts by email, so an unverified address would allow account takeover.
-  // Returns null when the account has no verified email or the vendor does not support auth.
+  // For vendors that advertise `providesAuth`, returns a provider-verified email identity claim.
+  // The email MUST be verified by the provider (e.g. Google `email_verified`, a GitHub
+  // primary+verified email, or a Cloudflare account email). The Workshop uses this claim only to
+  // resolve an opaque deployment-local stable identity through its Identity Registry; an
+  // unverified address would allow account takeover. Returns null when the account has no verified
+  // email or the vendor does not support auth.
   getAuthenticatedEmail(): Promise<string | null>;
 
   // Get a `GatekeeperUserVerifier` representing this user.

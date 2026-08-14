@@ -43,7 +43,7 @@ the account's auto-created "default" AI Gateway.
 ```
 ENABLE_CLOUDFLARE_LIMITS=true
 PUBLIC_BASE_URL=https://your-host
-AUTH_GATEKEEPERS=cloudflare       # allow Cloudflare sign-in/connect (plus any others)
+AUTH_GATEKEEPERS=cloudflare       # allow Cloudflare sign-in (connector availability is separate)
 
 # The Cloudflare gatekeeper's OAuth app (client id/secret live on the gatekeeper Worker; in dev
 # they're seeded from these shell vars by run-dev-server.js):
@@ -73,7 +73,9 @@ The Cloudflare dashboard OAuth endpoints and scopes are **hardcoded** in the Clo
 
 - auth: `https://dash.cloudflare.com/oauth2/auth`
 - token: `https://dash.cloudflare.com/oauth2/token`
-- scopes: `offline_access aig.read aig.run aig.write user-details.read account-settings.read`
+- sign-in scopes: `offline_access user-details.read` (transient identity grant)
+- explicit connector scopes: `offline_access aig.read aig.run aig.write user-details.read account-settings.read`
+  (persistent billing grant)
 
 Cloudflare gatekeeper redirect URI: `${PUBLIC_BASE_URL}/gatekeeper/cloudflare/oauth`.
 
