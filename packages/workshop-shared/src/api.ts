@@ -31,6 +31,16 @@ export const SERVICE_SALT = new Uint8Array([
   0xd9, 0x4e, 0x54, 0x1d, 0x29, 0xc1, 0x03, 0x74, 0x73, 0x7e, 0xb3, 0xe3, 0x34, 0x6d, 0x8f, 0x21
 ]);
 
+/**
+ * Same-origin POST endpoint for idempotently revoking one local Gatekeeper bearer.
+ *
+ * Send an exact `application/json` body shaped as `{ token: string }`. A 204 response means durable
+ * deletion and live-session invalidation have completed; it intentionally does not distinguish an
+ * already-revoked, otherwise missing, or newly revoked well-formed bearer. This affects only the
+ * deployment-local Workshop session because the transient provider OAuth grant is not retained.
+ */
+export const GATEKEEPER_SESSION_LOGOUT_PATH = "/api/gatekeeper-session/logout";
+
 // A pending gatekeeper sign-in attempt, returned by `PublicApi.startGatekeeperLogin()`. Holding this
 // stub is the capability to receive the resulting session token; dispose it to abandon the attempt.
 export interface LoginAttempt extends RpcTarget {
@@ -76,18 +86,6 @@ export interface PublicApi extends RpcTarget {
 
   // Authenticates the user using an auth token (typically stored in localStorage).
   authenticate(token: string): Promise<AuthenticatedApi>;
-
-  /**
-   * Revokes the deployment-local Gatekeeper bearer authenticated on this PublicApi socket.
-   *
-   * This is valid only after this socket successfully calls `authenticate()` with a Gatekeeper
-   * session, is idempotent after revocation starts, and accepts no client-selected identity or
-   * token. It durably deletes that bearer and invalidates sibling graphs before acknowledging,
-   * then closes the caller's graph immediately after delivering the acknowledgement. Closing or
-   * disposing the socket does not revoke the bearer. The transient provider sign-in grant is not
-   * retained, so this does not perform provider OAuth revocation.
-   */
-  logoutGatekeeperSession(): Promise<void>;
 
   /**
    * Authenticates a verified Clerk session and returns sibling API/session-control capabilities

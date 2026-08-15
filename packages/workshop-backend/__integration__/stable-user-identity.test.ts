@@ -1,12 +1,13 @@
 import { abortAllDurableObjects, env, runInDurableObject } from "cloudflare:test";
 import { exports, RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { newWebSocketRpcSession, RpcStub as CapnWebRpcStub, RpcTarget } from "capnweb";
-import type {
-  AiChatAuthorInfo,
-  AuthenticatedApi,
-  PresenceParticipant,
-  PresenceSubscriber,
-  PublicApi,
+import {
+  GATEKEEPER_SESSION_LOGOUT_PATH,
+  type AiChatAuthorInfo,
+  type AuthenticatedApi,
+  type PresenceParticipant,
+  type PresenceSubscriber,
+  type PublicApi,
 } from "@gadgets/workshop-shared/api";
 import type { SupportedResource } from "@gadgets/workshop-shared/gatekeeper";
 import type { ChatGatewayRpcTarget } from "@gadgets/workshop-shared/external-message-gateway";
@@ -44,8 +45,10 @@ async function subjectRegistryUser(prefix: string) {
   };
 }
 
+const WORKSHOP_ORIGIN = "https://workshop.invalid";
+
 async function connect(): Promise<CapnWebRpcStub<PublicApi>> {
-  const response = await exports.default.fetch(new Request("https://workshop.invalid/api", {
+  const response = await exports.default.fetch(new Request(`${WORKSHOP_ORIGIN}/api`, {
     headers: { Upgrade: "websocket" },
   }));
   if (response.status !== 101 || !response.webSocket) {
@@ -53,6 +56,22 @@ async function connect(): Promise<CapnWebRpcStub<PublicApi>> {
   }
   response.webSocket.accept();
   return newWebSocketRpcSession<PublicApi>(response.webSocket);
+}
+
+async function logoutGatekeeperSession(
+    token: string, options: { origin?: string; contentType?: string; body?: string } = {},
+): Promise<Response> {
+  return await exports.default.fetch(new Request(
+    `${WORKSHOP_ORIGIN}${GATEKEEPER_SESSION_LOGOUT_PATH}`,
+    {
+      method: "POST",
+      headers: {
+        Origin: options.origin ?? WORKSHOP_ORIGIN,
+        "Content-Type": options.contentType ?? "application/json",
+      },
+      body: options.body ?? JSON.stringify({ token }),
+    },
+  ));
 }
 
 async function sessionTokenId(token: string): Promise<string> {
@@ -202,33 +221,70 @@ describe("stable human application identities", () => {
       `${other.identity.internalUserId}:${otherToken}`,
     );
 
-    const events: string[] = [];
-    firstApi.onRpcBroken(() => events.push("caller aborted"));
-    siblingApi.onRpcBroken(() => events.push("sibling aborted"));
-
-    await expect(firstPublic.logoutGatekeeperSession()).resolves.toBeUndefined();
-    events.push("logout acknowledged");
+    const response = await logoutGatekeeperSession(
+      `${owner.identity.internalUserId}:${ownerToken}`,
+    );
+    expect(response.status).toBe(204);
+    expect(response.headers.get("Access-Control-Allow-Origin")).toBeNull();
     expect(await storedSession(owner.user, ownerToken)).toBeUndefined();
-    await expect(siblingApi.whoami()).rejects.toThrow();
 
     await runInDurableObject(owner.user, async (instance: UserDurableObject) => {
       await expect(instance.authenticate(ownerToken)).rejects.toThrow(/session token/i);
     });
-
-    await vi.waitFor(() => {
-      expect(events).toContain("sibling aborted");
-      expect(events).toContain("caller aborted");
-    });
-    expect(events.indexOf("caller aborted")).toBeGreaterThan(
-      events.indexOf("logout acknowledged"),
-    );
     await expect(firstApi.whoami()).rejects.toThrow();
+    await expect(siblingApi.whoami()).rejects.toThrow();
+
+    const repeated = await logoutGatekeeperSession(
+      `${owner.identity.internalUserId}:${ownerToken}`,
+    );
+    expect(repeated.status).toBe(204);
+    expect(await repeated.text()).toBe("");
     await expect(ownerOtherApi.whoami()).resolves.toMatchObject({
       id: owner.identity.internalUserId,
     });
     await expect(otherApi.whoami()).resolves.toMatchObject({
       id: other.identity.internalUserId,
     });
+  });
+
+  it("rejects invalid Gatekeeper logout HTTP requests without reflecting the bearer", async () => {
+    const owner = await registryUser("logout-validation");
+    const token = await owner.user.createGatekeeperSession({
+      canonicalVerifiedEmail: owner.identity.canonicalVerifiedEmail,
+      identityVersion: owner.identity.identityVersion,
+    }, "test", "logout-validation-subject");
+    const bearer = `${owner.identity.internalUserId}:${token}`;
+    const validBody = JSON.stringify({ token: bearer });
+
+    const responses = [
+      await exports.default.fetch(new Request(
+        `${WORKSHOP_ORIGIN}${GATEKEEPER_SESSION_LOGOUT_PATH}`,
+        { method: "GET", headers: { Origin: WORKSHOP_ORIGIN } },
+      )),
+      await logoutGatekeeperSession(bearer, { origin: "https://attacker.invalid" }),
+      await logoutGatekeeperSession(bearer, { contentType: "text/plain" }),
+      await logoutGatekeeperSession(bearer, { body: "x".repeat(300) }),
+      await logoutGatekeeperSession(bearer, { body: "{" }),
+      await logoutGatekeeperSession(bearer, {
+        body: JSON.stringify({ token: bearer, userId: owner.identity.internalUserId }),
+      }),
+      await logoutGatekeeperSession(bearer, {
+        body: JSON.stringify({ token: "malformed-bearer" }),
+      }),
+    ];
+
+    expect(responses.map(response => response.status)).toEqual([
+      405, 403, 415, 413, 400, 400, 400,
+    ]);
+    expect(responses[0].headers.get("Allow")).toBe("POST");
+    for (const response of responses) {
+      expect(response.headers.get("Access-Control-Allow-Origin")).toBeNull();
+      expect(await response.text()).not.toContain(token);
+      expect(response.redirected).toBe(false);
+    }
+
+    await expect(owner.user.authenticate(token)).resolves.toBeDefined();
+    expect(validBody.length).toBeLessThanOrEqual(256);
   });
 
   it("socket disposal unregisters without revoking its Gatekeeper bearer", async () => {
@@ -402,7 +458,7 @@ describe("stable human application identities", () => {
     });
   });
 
-  it("excludes the caller while awaiting every sibling invalidation after durable revocation",
+  it("includes the caller while awaiting every invalidation after durable revocation",
       async () => {
     const { identity, user } = await registryUser("revoked-token-excluded-caller");
     const token = await user.createGatekeeperSession({
@@ -439,9 +495,9 @@ describe("stable human application identities", () => {
       );
 
       let revocationSettled = false;
-      const revocation = instance.revokeGatekeeperSession(token, "caller")
+      const revocation = instance.revokeGatekeeperSession(token)
         .then(() => { revocationSettled = true; });
-      await vi.waitFor(() => expect(invalidated).toEqual(["sibling"]));
+      await vi.waitFor(() => expect(invalidated).toEqual(["caller", "sibling"]));
       const inspected = instance as unknown as {
         storage: { sessions: { get(id: string): unknown } };
       };
@@ -451,7 +507,7 @@ describe("stable human application identities", () => {
 
       releaseSibling.resolve();
       await revocation;
-      expect(invalidated).toEqual(["sibling"]);
+      expect(invalidated).toEqual(["caller", "sibling"]);
       expect(disposed).toBe(2);
     });
   });

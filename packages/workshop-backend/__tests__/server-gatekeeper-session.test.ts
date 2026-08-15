@@ -80,57 +80,7 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-function logout(publicApi: PublicApiImpl): Promise<void> {
-  return Promise.resolve().then(() => publicApi.logoutGatekeeperSession());
-}
-
 describe("PublicApi Gatekeeper session ownership", () => {
-  it("logs out only the Gatekeeper bearer authenticated on this socket and is idempotent", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(Date.UTC(2026, 0, 1));
-    const { abortSession, publicApi, user } = setup();
-
-    await expect(logout(publicApi)).rejects.toThrow(/authenticated.*Gatekeeper|Gatekeeper.*authenticated/i);
-    await publicApi.authenticate(`${INTERNAL_USER_ID}:${TOKEN}`);
-    const revocation = Promise.withResolvers<void>();
-    user.revokeGatekeeperSession.mockImplementation(() => revocation.promise);
-
-    const first = logout(publicApi);
-    const duplicate = logout(publicApi);
-    await Promise.resolve();
-    expect(abortSession).not.toHaveBeenCalled();
-    revocation.resolve();
-    await expect(Promise.all([first, duplicate])).resolves.toEqual([undefined, undefined]);
-    await expect(logout(publicApi)).resolves.toBeUndefined();
-    expect(user.revokeGatekeeperSession).toHaveBeenCalledExactlyOnceWith(
-      TOKEN, expect.any(String),
-    );
-    expect(abortSession).not.toHaveBeenCalled();
-
-    await vi.advanceTimersByTimeAsync(0);
-    expect(abortSession).toHaveBeenCalledExactlyOnceWith(
-      expect.objectContaining({ message: CURRENT_GATEKEEPER_SESSION_REQUIRED }),
-    );
-  });
-
-  it("rejects logout failures before durable deletion without acknowledging or aborting", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(Date.UTC(2026, 0, 1));
-    const { abortSession, publicApi, user } = setup();
-    await publicApi.authenticate(`${INTERNAL_USER_ID}:${TOKEN}`);
-    user.revokeGatekeeperSession.mockRejectedValueOnce(new Error("durable delete failed"));
-
-    await expect(logout(publicApi)).rejects.toThrow("durable delete failed");
-    await vi.advanceTimersByTimeAsync(0);
-    expect(abortSession).not.toHaveBeenCalled();
-
-    user.revokeGatekeeperSession.mockResolvedValueOnce(undefined);
-    await expect(logout(publicApi)).resolves.toBeUndefined();
-    await vi.advanceTimersByTimeAsync(0);
-    expect(user.revokeGatekeeperSession).toHaveBeenCalledTimes(2);
-    expect(abortSession).toHaveBeenCalledOnce();
-  });
-
   it("fails closed for concurrent, duplicate, and mixed-provider authentication", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(Date.UTC(2026, 0, 1));

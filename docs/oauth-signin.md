@@ -39,13 +39,17 @@ future credential expiry and a fixed one-hour local maximum. Missing or stale pr
 the one-hour maximum. Expired and legacy subjectless/unbounded records are rejected and removed, and
 the complete capability graph is aborted at the retained session deadline.
 
-`PublicApi.logoutGatekeeperSession()` revokes only the local bearer authenticated on that PublicApi
-socket; it accepts no user ID or token argument. The User DO durably deletes that exact token before
-best-effort notification aborts every live capability graph authenticated with it. Each graph also
-polls the exact durable token behind an independent absolute 30-second deadline, so a User DO restart
-or lost callback cannot preserve revoked authority beyond that bound. Socket disposal unregisters
-its ephemeral subscriber but does not revoke the token, so closing a tab is not logout. The sign-in
-grant is transient and never retained, so local logout has no provider OAuth credential to revoke.
+Same-origin `POST /api/gatekeeper-session/logout` revokes only the local bearer supplied in its
+strict, bounded `application/json` body (`{ "token": "<opaque-internal-id>:<secret>" }`). A 204 is
+returned only after the User DO durably deletes that exact token and finishes notifying every live
+capability graph authenticated with it, including the requesting browser's graph. A syntactically
+valid missing or already-revoked bearer is idempotently acknowledged with the same 204 so the
+endpoint does not disclose token existence; malformed requests are rejected before Durable Object
+lookup. Each graph also polls the exact durable token behind an independent absolute 30-second
+deadline, so a User DO restart or lost callback cannot preserve revoked authority beyond that bound.
+Socket disposal unregisters its ephemeral subscriber but does not revoke the token, so closing a tab
+is not logout. Logout is deployment-local: the sign-in grant is transient and never retained, so
+there is no provider OAuth credential to revoke.
 
 The strict stable-subject cutover rejects legacy subjectless Gatekeeper sessions instead of upgrading
 them by email. This release assumes a greenfield deployment with no existing users. Any deployment

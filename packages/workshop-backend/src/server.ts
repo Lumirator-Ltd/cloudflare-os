@@ -1,6 +1,6 @@
 import { RpcStub, RpcTarget, newHttpBatchRpcResponse, newWebSocketRpcSession, RpcSessionOptions } from "capnweb";
 import { validateRpc } from "capnweb-validate";
-import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, ClerkAuthentication, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError } from '@gadgets/workshop-shared/api';
+import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, ClerkAuthentication, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, GATEKEEPER_SESSION_LOGOUT_PATH } from '@gadgets/workshop-shared/api';
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
 import { getServerConfig } from "./deployment-config.js";
 import { isPasswordAuthEnabled, getAuthGatekeeperAllowlist } from "./auth/config.js";
@@ -49,6 +49,7 @@ import { serveSiteLogo, SITE_LOGO_PATH } from "./site-logo.js";
 import { createWorkshopLogger } from "./observability";
 import { wrapDoStubForTelemetry } from "./do-telemetry";
 import { armAbsoluteDeadline, type AbsoluteDeadline } from "./absolute-deadline.js";
+import { handleGatekeeperSessionLogoutRequest } from "./gatekeeper-session-logout.js";
 
 const logger = createWorkshopLogger("workshop.server");
 
@@ -118,12 +119,6 @@ const COLLISION_LOCKED = "Identity collision requires deployment operator assist
 const ACCESS_SESSION_EXPIRED = "Cloudflare Access session expired.";
 const GATEKEEPER_SESSION_EXPIRED = "Gatekeeper session expired.";
 const MAX_TIMEOUT_MILLISECONDS = 0x7fffffff;
-
-// Cap'n Web serializes a resolved invocation before the event loop enters its next task. Keep graph
-// teardown out of the current invocation so a successful logout result can be delivered first.
-function scheduleAfterRpcResponse(task: () => void): void {
-  setTimeout(task, 0);
-}
 
 function canonicalAdminEmails(value: unknown): string[] {
   if (typeof value === "string") {
@@ -730,8 +725,7 @@ class LoginAttemptImpl extends RpcTarget implements LoginAttempt {
 export class PublicApiImpl extends RpcTarget implements PublicApi {
   users: DurableObjectNamespace<UserDurableObject>;
   #clerkSession: "authenticating" | { dispose(): Promise<void> } | undefined;
-  #gatekeeperSession: "authenticating" | "loggedOut" | GatekeeperPublicApiSession | undefined;
-  #gatekeeperLogout: Promise<void> | undefined;
+  #gatekeeperSession: "authenticating" | GatekeeperPublicApiSession | undefined;
   #identitySessions = new Map<string, { internalUserId: string; subscriberId: string }>();
   #authorityWatchdogs = new Map<string, { dispose(): void }>();
   #accessDeadline: ReturnType<typeof setTimeout> | undefined;
@@ -851,7 +845,7 @@ export class PublicApiImpl extends RpcTarget implements PublicApi {
 
   #takeGatekeeperSessionCleanup(): PublicApiCleanup[] {
     const session = this.#gatekeeperSession;
-    if (!session || session === "authenticating" || session === "loggedOut") {
+    if (!session || session === "authenticating") {
       if (session === "authenticating") this.#gatekeeperSession = undefined;
       return [];
     }
@@ -1079,30 +1073,6 @@ export class PublicApiImpl extends RpcTarget implements PublicApi {
       (id, currentAuthority) => this.#startAuthorityWatchdog(id, currentAuthority));
   }
 
-  async logoutGatekeeperSession(): Promise<void> {
-    if (this.#gatekeeperLogout) return await this.#gatekeeperLogout;
-    const session = this.#gatekeeperSession;
-    if (session === "loggedOut") return;
-    if (!session || session === "authenticating") {
-      throw new Error("This API socket is not authenticated with a Gatekeeper session.");
-    }
-
-    const logout = (async () => {
-      await session.user.revokeGatekeeperSession(session.token, session.subscriberId);
-      if (this.#gatekeeperSession === session) {
-        this.#gatekeeperSession = "loggedOut";
-        session.watchdog.dispose();
-      }
-      scheduleAfterRpcResponse(() => this.#abortGatekeeperSession());
-    })();
-    this.#gatekeeperLogout = logout;
-    try {
-      await logout;
-    } finally {
-      if (this.#gatekeeperSession !== "loggedOut") this.#gatekeeperLogout = undefined;
-    }
-  }
-
   async authenticateWithClerk(token: string): Promise<ClerkAuthentication> {
     if (this.#gatekeeperSession !== undefined) {
       throw new Error("This API socket is already authenticating or authenticated with Gatekeeper.");
@@ -1326,6 +1296,10 @@ export default {
 
     if (url.pathname === "/api/client-errors") {
       return handleClientErrorRequest(req, env, ctx);
+    }
+
+    if (url.pathname === GATEKEEPER_SESSION_LOGOUT_PATH) {
+      return handleGatekeeperSessionLogoutRequest(req, ctx.exports.UserDurableObject);
     }
 
     if (url.pathname === "/api") {

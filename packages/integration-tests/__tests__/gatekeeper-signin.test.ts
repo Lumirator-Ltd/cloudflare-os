@@ -1,6 +1,9 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { RpcStub } from "capnweb";
-import type { PublicApi } from "@gadgets/workshop-shared/api";
+import {
+  GATEKEEPER_SESSION_LOGOUT_PATH,
+  type PublicApi,
+} from "@gadgets/workshop-shared/api";
 import {
   startHarness, TEST_GATEKEEPER_DIR, TEST_GATEKEEPER_WORKER, type Harness,
 } from "../src/harness.js";
@@ -37,6 +40,15 @@ async function login(vendorId: string): Promise<{
   const started = await publicApi.startGatekeeperLogin(vendorId);
   using attempt = started.attempt;
   return { publicApi, token: await attempt.wait() };
+}
+
+async function logoutGatekeeperSession(token: string): Promise<Response> {
+  const origin = new URL(harness.url).origin;
+  return await fetch(new URL(GATEKEEPER_SESSION_LOGOUT_PATH, origin), {
+    method: "POST",
+    headers: { Origin: origin, "Content-Type": "application/json" },
+    body: JSON.stringify({ token }),
+  });
 }
 
 beforeAll(async () => {
@@ -123,17 +135,16 @@ describe("Cloudflare Gatekeeper sign-in", () => {
     using otherPublic = other.publicApi;
     using otherApi = await otherPublic.authenticate(other.token);
 
-    using unauthenticated = connect(harness.url) as RpcStub<PublicApi>;
-    await expect(unauthenticated.logoutGatekeeperSession()).rejects.toThrow(/not authenticated/i);
-    await expect(unauthenticated.getServerConfig()).resolves.toBeDefined();
-
-    await expect(firstPublic.logoutGatekeeperSession()).resolves.toBeUndefined();
+    const response = await logoutGatekeeperSession(owner.token);
+    expect(response.status).toBe(204);
+    expect(response.headers.get("Access-Control-Allow-Origin")).toBeNull();
 
     using replayPublic = connect(harness.url) as RpcStub<PublicApi>;
     await expect(replayPublic.authenticate(owner.token)).rejects.toThrow(/invalid session token/i);
     await expect(siblingApi.whoami()).rejects.toThrow();
     await expect(firstApi.whoami()).rejects.toThrow();
     await expect(otherApi.whoami()).resolves.toMatchObject({ name: otherEmail.split("@")[0] });
+    await expect(logoutGatekeeperSession(owner.token)).resolves.toMatchObject({ status: 204 });
   });
 
   it("breaks a real retained capability graph at the provider's earlier expiry", async () => {
