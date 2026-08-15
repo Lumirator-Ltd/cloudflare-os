@@ -577,9 +577,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
    *
    * This revokes only the deployment-local Workshop session. The transient provider sign-in grant
    * is not retained, so there is no provider OAuth credential to revoke here. Missing tokens are
-   * harmless. Durable deletion occurs before any best-effort subscriber notification.
+   * harmless. Durable deletion occurs before subscriber notification. An excluded subscriber is
+   * disposed without notification so its owning RPC can acknowledge before closing its own graph.
    */
-  async revokeGatekeeperSession(token: string): Promise<void> {
+  async revokeGatekeeperSession(token: string, excludedSubscriberId?: string): Promise<void> {
     let tokenId: string;
     try {
       tokenId = await this.#gatekeeperTokenId(token);
@@ -590,9 +591,15 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     const sessions = this.gatekeeperSessions.get(tokenId);
     if (!sessions) return;
     this.gatekeeperSessions.delete(tokenId);
-    for (const subscriber of sessions.values()) {
-      void this.#invalidateGatekeeperSession(subscriber);
+    const invalidations: Promise<void>[] = [];
+    for (const [subscriberId, subscriber] of sessions) {
+      if (subscriberId === excludedSubscriberId) {
+        subscriber[Symbol.dispose]();
+      } else {
+        invalidations.push(this.#invalidateGatekeeperSession(subscriber));
+      }
     }
+    await Promise.all(invalidations);
   }
 
   async #invalidateGatekeeperSession(

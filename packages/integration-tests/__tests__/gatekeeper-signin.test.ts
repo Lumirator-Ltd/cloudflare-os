@@ -127,19 +127,13 @@ describe("Cloudflare Gatekeeper sign-in", () => {
     await expect(unauthenticated.logoutGatekeeperSession()).rejects.toThrow(/not authenticated/i);
     await expect(unauthenticated.getServerConfig()).resolves.toBeDefined();
 
-    let logoutError: unknown;
-    try {
-      await firstPublic.logoutGatekeeperSession();
-    } catch (error) {
-      logoutError = error;
-    }
-    expect(logoutError).toBeInstanceOf(Error);
-    await expect(firstApi.whoami()).rejects.toThrow();
-    await expect(siblingApi.whoami()).rejects.toThrow();
-    await expect(otherApi.whoami()).resolves.toMatchObject({ name: otherEmail.split("@")[0] });
+    await expect(firstPublic.logoutGatekeeperSession()).resolves.toBeUndefined();
 
     using replayPublic = connect(harness.url) as RpcStub<PublicApi>;
     await expect(replayPublic.authenticate(owner.token)).rejects.toThrow(/invalid session token/i);
+    await expect(siblingApi.whoami()).rejects.toThrow();
+    await expect(firstApi.whoami()).rejects.toThrow();
+    await expect(otherApi.whoami()).resolves.toMatchObject({ name: otherEmail.split("@")[0] });
   });
 
   it("breaks a real retained capability graph at the provider's earlier expiry", async () => {

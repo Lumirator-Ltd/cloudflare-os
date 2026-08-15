@@ -202,16 +202,27 @@ describe("stable human application identities", () => {
       `${other.identity.internalUserId}:${otherToken}`,
     );
 
-    let logoutError: unknown;
-    try {
-      await firstPublic.logoutGatekeeperSession();
-    } catch (error) {
-      logoutError = error;
-    }
-    expect(logoutError).toBeInstanceOf(Error);
+    const events: string[] = [];
+    firstApi.onRpcBroken(() => events.push("caller aborted"));
+    siblingApi.onRpcBroken(() => events.push("sibling aborted"));
+
+    await expect(firstPublic.logoutGatekeeperSession()).resolves.toBeUndefined();
+    events.push("logout acknowledged");
     expect(await storedSession(owner.user, ownerToken)).toBeUndefined();
-    await expect(firstApi.whoami()).rejects.toThrow();
     await expect(siblingApi.whoami()).rejects.toThrow();
+
+    await runInDurableObject(owner.user, async (instance: UserDurableObject) => {
+      await expect(instance.authenticate(ownerToken)).rejects.toThrow(/session token/i);
+    });
+
+    await vi.waitFor(() => {
+      expect(events).toContain("sibling aborted");
+      expect(events).toContain("caller aborted");
+    });
+    expect(events.indexOf("caller aborted")).toBeGreaterThan(
+      events.indexOf("logout acknowledged"),
+    );
+    await expect(firstApi.whoami()).rejects.toThrow();
     await expect(ownerOtherApi.whoami()).resolves.toMatchObject({
       id: owner.identity.internalUserId,
     });
@@ -368,22 +379,80 @@ describe("stable human application identities", () => {
         token, authentication, "second", subscriber("second") as never,
       );
 
-      await instance.revokeGatekeeperSession(token);
+      let revocationSettled = false;
+      const revocation = instance.revokeGatekeeperSession(token)
+        .then(() => { revocationSettled = true; });
+      await vi.waitFor(() => expect(invalidated.toSorted()).toEqual(["first", "second"]));
       const inspected = instance as unknown as {
         storage: { sessions: { get(id: string): unknown } };
       };
       expect(inspected.storage.sessions.get(tokenId)).toBeUndefined();
-      expect(invalidated.toSorted()).toEqual(["first", "second"]);
+      expect(revocationSettled).toBe(false);
       await expect(instance.registerGatekeeperSession(
         token, authentication, "late", subscriber("late") as never,
       )).rejects.toThrow(/session token/i);
 
       release.resolve();
-      await vi.waitFor(() => expect(disposed).toBe(2));
+      await revocation;
+      expect(disposed).toBe(2);
     });
 
     await runInDurableObject(user, async (instance: UserDurableObject) => {
       await expect(instance.authenticate(token)).rejects.toThrow(/invalid session token/i);
+    });
+  });
+
+  it("excludes the caller while awaiting every sibling invalidation after durable revocation",
+      async () => {
+    const { identity, user } = await registryUser("revoked-token-excluded-caller");
+    const token = await user.createGatekeeperSession({
+      canonicalVerifiedEmail: identity.canonicalVerifiedEmail,
+      identityVersion: identity.identityVersion,
+    }, "test", "revoked-token-excluded-caller-subject");
+    const authentication = await user.authenticate(token);
+    if (!authentication) throw new Error("expected Gatekeeper session authority");
+    const tokenId = await sessionTokenId(token);
+    const releaseSibling = Promise.withResolvers<void>();
+    const invalidated: string[] = [];
+    let disposed = 0;
+
+    await runInDurableObject(user, async (instance: UserDurableObject) => {
+      type Subscriber = (() => Promise<void>) & {
+        dup(): Subscriber;
+        [Symbol.dispose](): void;
+      };
+      const subscriber = (name: string, wait = false): Subscriber => {
+        const callback = Object.assign(async () => {
+          invalidated.push(name);
+          if (wait) await releaseSibling.promise;
+        }, {
+          dup() { return callback; },
+          [Symbol.dispose]() { disposed++; },
+        });
+        return callback;
+      };
+      await instance.registerGatekeeperSession(
+        token, authentication, "caller", subscriber("caller") as never,
+      );
+      await instance.registerGatekeeperSession(
+        token, authentication, "sibling", subscriber("sibling", true) as never,
+      );
+
+      let revocationSettled = false;
+      const revocation = instance.revokeGatekeeperSession(token, "caller")
+        .then(() => { revocationSettled = true; });
+      await vi.waitFor(() => expect(invalidated).toEqual(["sibling"]));
+      const inspected = instance as unknown as {
+        storage: { sessions: { get(id: string): unknown } };
+      };
+      expect(inspected.storage.sessions.get(tokenId)).toBeUndefined();
+      expect(revocationSettled).toBe(false);
+      expect(disposed).toBe(1);
+
+      releaseSibling.resolve();
+      await revocation;
+      expect(invalidated).toEqual(["sibling"]);
+      expect(disposed).toBe(2);
     });
   });
 

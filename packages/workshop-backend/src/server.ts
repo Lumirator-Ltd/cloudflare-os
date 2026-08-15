@@ -119,6 +119,12 @@ const ACCESS_SESSION_EXPIRED = "Cloudflare Access session expired.";
 const GATEKEEPER_SESSION_EXPIRED = "Gatekeeper session expired.";
 const MAX_TIMEOUT_MILLISECONDS = 0x7fffffff;
 
+// Cap'n Web serializes a resolved invocation before the event loop enters its next task. Keep graph
+// teardown out of the current invocation so a successful logout result can be delivered first.
+function scheduleAfterRpcResponse(task: () => void): void {
+  setTimeout(task, 0);
+}
+
 function canonicalAdminEmails(value: unknown): string[] {
   if (typeof value === "string") {
     try {
@@ -1082,12 +1088,12 @@ export class PublicApiImpl extends RpcTarget implements PublicApi {
     }
 
     const logout = (async () => {
-      await session.user.revokeGatekeeperSession(session.token);
+      await session.user.revokeGatekeeperSession(session.token, session.subscriberId);
       if (this.#gatekeeperSession === session) {
         this.#gatekeeperSession = "loggedOut";
         session.watchdog.dispose();
       }
-      this.#abortGatekeeperSession();
+      scheduleAfterRpcResponse(() => this.#abortGatekeeperSession());
     })();
     this.#gatekeeperLogout = logout;
     try {

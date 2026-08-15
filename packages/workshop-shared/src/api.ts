@@ -81,10 +81,11 @@ export interface PublicApi extends RpcTarget {
    * Revokes the deployment-local Gatekeeper bearer authenticated on this PublicApi socket.
    *
    * This is valid only after this socket successfully calls `authenticate()` with a Gatekeeper
-   * session, is idempotent after revocation starts, accepts no client-selected identity or token,
-   * and aborts every live capability graph authenticated with that exact bearer. Closing or
-   * disposing the socket does not revoke it. The transient provider sign-in grant is not retained,
-   * so this does not perform provider OAuth revocation.
+   * session, is idempotent after revocation starts, and accepts no client-selected identity or
+   * token. It durably deletes that bearer and invalidates sibling graphs before acknowledging,
+   * then closes the caller's graph immediately after delivering the acknowledgement. Closing or
+   * disposing the socket does not revoke the bearer. The transient provider sign-in grant is not
+   * retained, so this does not perform provider OAuth revocation.
    */
   logoutGatekeeperSession(): Promise<void>;
 

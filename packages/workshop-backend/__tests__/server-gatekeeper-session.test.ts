@@ -1,14 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { VerifiedCfAccessIdentity } from "../src/access.js";
 import type { IdentityState } from "../src/identity-registry.js";
-import { IDENTITY_AUTHORITY_WATCHDOG_INTERVAL_MS } from "../src/identity-authority.js";
+import { GATEKEEPER_SESSION_WATCHDOG_INTERVAL_MS } from "../src/identity-authority.js";
 import { PublicApiImpl } from "../src/server.js";
 import type { RegistrySessionAuthentication } from "../src/user.js";
 
 const INTERNAL_USER_ID = "gatekeeper-session-user";
 const TOKEN = "secret-token";
 const CURRENT_GATEKEEPER_SESSION_REQUIRED = "Current Gatekeeper session is no longer valid.";
-const GATEKEEPER_SESSION_WATCHDOG_INTERVAL_MS = IDENTITY_AUTHORITY_WATCHDOG_INTERVAL_MS;
 const AUTHENTICATION: RegistrySessionAuthentication = {
   kind: "gatekeeper",
   provider: "test",
@@ -103,10 +102,33 @@ describe("PublicApi Gatekeeper session ownership", () => {
     revocation.resolve();
     await expect(Promise.all([first, duplicate])).resolves.toEqual([undefined, undefined]);
     await expect(logout(publicApi)).resolves.toBeUndefined();
-    expect(user.revokeGatekeeperSession).toHaveBeenCalledExactlyOnceWith(TOKEN);
+    expect(user.revokeGatekeeperSession).toHaveBeenCalledExactlyOnceWith(
+      TOKEN, expect.any(String),
+    );
+    expect(abortSession).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(0);
     expect(abortSession).toHaveBeenCalledExactlyOnceWith(
       expect.objectContaining({ message: CURRENT_GATEKEEPER_SESSION_REQUIRED }),
     );
+  });
+
+  it("rejects logout failures before durable deletion without acknowledging or aborting", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.UTC(2026, 0, 1));
+    const { abortSession, publicApi, user } = setup();
+    await publicApi.authenticate(`${INTERNAL_USER_ID}:${TOKEN}`);
+    user.revokeGatekeeperSession.mockRejectedValueOnce(new Error("durable delete failed"));
+
+    await expect(logout(publicApi)).rejects.toThrow("durable delete failed");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(abortSession).not.toHaveBeenCalled();
+
+    user.revokeGatekeeperSession.mockResolvedValueOnce(undefined);
+    await expect(logout(publicApi)).resolves.toBeUndefined();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(user.revokeGatekeeperSession).toHaveBeenCalledTimes(2);
+    expect(abortSession).toHaveBeenCalledOnce();
   });
 
   it("fails closed for concurrent, duplicate, and mixed-provider authentication", async () => {

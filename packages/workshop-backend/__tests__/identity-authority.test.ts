@@ -2,9 +2,11 @@ import { describe, expect, it, vi } from "vitest";
 import type { IdentityState } from "../src/identity-registry.js";
 import {
   CURRENT_IDENTITY_AUTHORITY_REQUIRED,
+  GATEKEEPER_SESSION_WATCHDOG_INTERVAL_MS,
   IDENTITY_AUTHORITY_WATCHDOG_INTERVAL_MS,
   assertCurrentIdentityAuthority,
   mintCurrentIdentitySessionToken,
+  startGatekeeperSessionWatchdog,
   startIdentityAuthorityWatchdog,
   type VerifiedAuthorityContext,
 } from "../src/identity-authority.js";
@@ -106,6 +108,48 @@ describe("privileged authority watchdog", () => {
       expect(abort).toHaveBeenCalledExactlyOnceWith(
         expect.objectContaining({ message: CURRENT_IDENTITY_AUTHORITY_REQUIRED }),
       );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    [
+      "identity",
+      IDENTITY_AUTHORITY_WATCHDOG_INTERVAL_MS,
+      startIdentityAuthorityWatchdog,
+    ],
+    [
+      "Gatekeeper token",
+      GATEKEEPER_SESSION_WATCHDOG_INTERVAL_MS,
+      startGatekeeperSessionWatchdog,
+    ],
+  ])("counts a delayed successful %s check against the next hard deadline",
+      async (_name, intervalMs, startWatchdog) => {
+    vi.useFakeTimers();
+    try {
+      const firstCheck = Promise.withResolvers<void>();
+      const assertCurrent = vi.fn()
+        .mockImplementationOnce(() => firstCheck.promise)
+        .mockImplementationOnce(() => new Promise<void>(() => {}));
+      const abort = vi.fn();
+      startWatchdog(assertCurrent, abort);
+
+      await vi.advanceTimersByTimeAsync(intervalMs / 2);
+      expect(assertCurrent).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(intervalMs / 2 - 1);
+      firstCheck.resolve();
+      await Promise.resolve();
+      expect(abort).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(assertCurrent).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(intervalMs / 2 - 1);
+      expect(abort).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(abort).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+        message: expect.stringMatching(/authority|Gatekeeper session/i),
+      }));
     } finally {
       vi.useRealTimers();
     }

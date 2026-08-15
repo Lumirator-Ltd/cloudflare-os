@@ -61,17 +61,20 @@ function startRetainedAuthorityWatchdog(options: {
     if (reason) options.abort(reason);
   };
 
-  const schedule = () => {
-    // Poll halfway through the lease; a hung poll cannot cancel the independent absolute deadline.
-    pollTimer = setTimeout(poll, options.intervalMs / 2);
+  const schedule = (observationEpoch: number) => {
+    // Renew from when the poll started, not when it completed. Time spent waiting on the authority
+    // read therefore consumes the next lease, and an overdue poll or deadline runs immediately.
+    const elapsed = Date.now() - observationEpoch;
+    pollTimer = setTimeout(poll, Math.max(0, options.intervalMs / 2 - elapsed));
     deadlineTimer = setTimeout(
       () => stop(new Error(options.errorMessage)),
-      options.intervalMs,
+      Math.max(0, options.intervalMs - elapsed),
     );
   };
 
   const poll = async () => {
     pollTimer = undefined;
+    const observationEpoch = Date.now();
     try {
       await options.assertCurrent();
     } catch {
@@ -81,10 +84,10 @@ function startRetainedAuthorityWatchdog(options: {
     if (!active) return;
     if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
     deadlineTimer = undefined;
-    schedule();
+    schedule(observationEpoch);
   };
 
-  schedule();
+  schedule(Date.now());
   return { dispose: () => stop() };
 }
 
