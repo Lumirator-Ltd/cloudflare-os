@@ -168,6 +168,78 @@ describe("stable human application identities", () => {
     )).toEqual(expect.objectContaining({ message: expect.stringMatching(/identity authority/i) }));
   });
 
+  it("revokes one Gatekeeper bearer across sibling sockets and isolates other tokens and users",
+      async () => {
+    const owner = await registryUser("logout-owner");
+    const ownerToken = await owner.user.createGatekeeperSession({
+      canonicalVerifiedEmail: owner.identity.canonicalVerifiedEmail,
+      identityVersion: owner.identity.identityVersion,
+    }, "test", "logout-owner-subject");
+    const ownerOtherToken = await owner.user.createGatekeeperSession({
+      canonicalVerifiedEmail: owner.identity.canonicalVerifiedEmail,
+      identityVersion: owner.identity.identityVersion,
+    }, "test", "logout-owner-subject");
+    const other = await registryUser("logout-other");
+    const otherToken = await other.user.createGatekeeperSession({
+      canonicalVerifiedEmail: other.identity.canonicalVerifiedEmail,
+      identityVersion: other.identity.identityVersion,
+    }, "test", "logout-other-subject");
+
+    using firstPublic = await connect();
+    using firstApi = await firstPublic.authenticate(
+      `${owner.identity.internalUserId}:${ownerToken}`,
+    );
+    using siblingPublic = await connect();
+    using siblingApi = await siblingPublic.authenticate(
+      `${owner.identity.internalUserId}:${ownerToken}`,
+    );
+    using ownerOtherPublic = await connect();
+    using ownerOtherApi = await ownerOtherPublic.authenticate(
+      `${owner.identity.internalUserId}:${ownerOtherToken}`,
+    );
+    using otherPublic = await connect();
+    using otherApi = await otherPublic.authenticate(
+      `${other.identity.internalUserId}:${otherToken}`,
+    );
+
+    let logoutError: unknown;
+    try {
+      await firstPublic.logoutGatekeeperSession();
+    } catch (error) {
+      logoutError = error;
+    }
+    expect(logoutError).toBeInstanceOf(Error);
+    expect(await storedSession(owner.user, ownerToken)).toBeUndefined();
+    await expect(firstApi.whoami()).rejects.toThrow();
+    await expect(siblingApi.whoami()).rejects.toThrow();
+    await expect(ownerOtherApi.whoami()).resolves.toMatchObject({
+      id: owner.identity.internalUserId,
+    });
+    await expect(otherApi.whoami()).resolves.toMatchObject({
+      id: other.identity.internalUserId,
+    });
+  });
+
+  it("socket disposal unregisters without revoking its Gatekeeper bearer", async () => {
+    const { identity, user } = await registryUser("socket-disposal-token");
+    const token = await user.createGatekeeperSession({
+      canonicalVerifiedEmail: identity.canonicalVerifiedEmail,
+      identityVersion: identity.identityVersion,
+    }, "test", "socket-disposal-subject");
+
+    {
+      using publicApi = await connect();
+      using api = await publicApi.authenticate(`${identity.internalUserId}:${token}`);
+      await expect(api.whoami()).resolves.toMatchObject({ id: identity.internalUserId });
+    }
+
+    using reconnectedPublic = await connect();
+    using reconnectedApi = await reconnectedPublic.authenticate(
+      `${identity.internalUserId}:${token}`,
+    );
+    await expect(reconnectedApi.whoami()).resolves.toMatchObject({ id: identity.internalUserId });
+  });
+
   it("bounds Gatekeeper tokens to one hour or an earlier valid provider expiry", async () => {
     const { identity, user } = await registryUser("bounded-token");
     const startedAt = Date.now();
@@ -258,6 +330,87 @@ describe("stable human application identities", () => {
       subject: "restart-subject",
       expiresAt: providerExpiry,
     });
+  });
+
+  it("durably revokes a Gatekeeper token before notifying and disposing every live subscriber",
+      async () => {
+    const { identity, user } = await registryUser("revoked-token-subscribers");
+    const token = await user.createGatekeeperSession({
+      canonicalVerifiedEmail: identity.canonicalVerifiedEmail,
+      identityVersion: identity.identityVersion,
+    }, "test", "revoked-token-subject");
+    const authentication = await user.authenticate(token);
+    if (!authentication) throw new Error("expected Gatekeeper session authority");
+    const tokenId = await sessionTokenId(token);
+    const release = Promise.withResolvers<void>();
+    const invalidated: string[] = [];
+    let disposed = 0;
+
+    await runInDurableObject(user, async (instance: UserDurableObject) => {
+      type Subscriber = (() => Promise<void>) & {
+        dup(): Subscriber;
+        [Symbol.dispose](): void;
+      };
+      const subscriber = (name: string): Subscriber => {
+        const callback = Object.assign(async () => {
+          invalidated.push(name);
+          await release.promise;
+        }, {
+          dup() { return callback; },
+          [Symbol.dispose]() { disposed++; },
+        });
+        return callback;
+      };
+      await instance.registerGatekeeperSession(
+        token, authentication, "first", subscriber("first") as never,
+      );
+      await instance.registerGatekeeperSession(
+        token, authentication, "second", subscriber("second") as never,
+      );
+
+      await instance.revokeGatekeeperSession(token);
+      const inspected = instance as unknown as {
+        storage: { sessions: { get(id: string): unknown } };
+      };
+      expect(inspected.storage.sessions.get(tokenId)).toBeUndefined();
+      expect(invalidated.toSorted()).toEqual(["first", "second"]);
+      await expect(instance.registerGatekeeperSession(
+        token, authentication, "late", subscriber("late") as never,
+      )).rejects.toThrow(/session token/i);
+
+      release.resolve();
+      await vi.waitFor(() => expect(disposed).toBe(2));
+    });
+
+    await runInDurableObject(user, async (instance: UserDurableObject) => {
+      await expect(instance.authenticate(token)).rejects.toThrow(/invalid session token/i);
+    });
+  });
+
+  it("fails closed when token revocation wins a concurrent subscriber registration", async () => {
+    const { identity, user } = await registryUser("revocation-registration-race");
+    const token = await user.createGatekeeperSession({
+      canonicalVerifiedEmail: identity.canonicalVerifiedEmail,
+      identityVersion: identity.identityVersion,
+    }, "test", "revocation-registration-race-subject");
+    const authentication = await user.authenticate(token);
+    if (!authentication) throw new Error("expected Gatekeeper session authority");
+    let invalidations = 0;
+
+    await runInDurableObject(user, async (instance: UserDurableObject) => {
+      const callback = Object.assign(async () => { invalidations++; }, {
+        dup() { return callback; },
+        [Symbol.dispose]() {},
+      });
+      const revocation = instance.revokeGatekeeperSession(token);
+      const registration = instance.registerGatekeeperSession(
+        token, authentication, "racing", callback as never,
+      );
+
+      await revocation;
+      await expect(registration).rejects.toThrow(/session token/i);
+    });
+    expect(invalidations).toBe(0);
   });
 
   it("rejects an old unversioned registry token instead of assigning current authority", async () => {

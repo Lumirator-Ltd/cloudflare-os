@@ -13,9 +13,14 @@ export const CURRENT_IDENTITY_AUTHORITY_REQUIRED =
 /** Maximum stale privileged-authority window if the registry's live callback is lost. */
 export const IDENTITY_AUTHORITY_WATCHDOG_INTERVAL_MS = 30_000;
 
-type IdentityAuthorityReader = Pick<DurableObjectStub<IdentityRegistry>, "getIdentity">;
+/** Bounded error used when retained local Gatekeeper bearer authority is no longer exact. */
+export const CURRENT_GATEKEEPER_SESSION_REQUIRED =
+  "Current Gatekeeper session is no longer valid.";
 
-const IDENTITY_AUTHORITY_WATCHDOG_POLL_MS = IDENTITY_AUTHORITY_WATCHDOG_INTERVAL_MS / 2;
+/** Maximum stale-token window when a User Durable Object's live revocation callback is lost. */
+export const GATEKEEPER_SESSION_WATCHDOG_INTERVAL_MS = 30_000;
+
+type IdentityAuthorityReader = Pick<DurableObjectStub<IdentityRegistry>, "getIdentity">;
 
 /** Requires an identity to remain active at its exact captured version and canonical email. */
 export async function assertCurrentIdentityAuthority(
@@ -36,11 +41,12 @@ export async function assertCurrentIdentityAuthority(
   throw new Error(CURRENT_IDENTITY_AUTHORITY_REQUIRED);
 }
 
-/** Polls privileged authority with an absolute bound until failure or socket disposal. */
-export function startIdentityAuthorityWatchdog(
-    assertCurrent: () => Promise<void>,
-    abort: (reason: Error) => void,
-): { dispose(): void } {
+function startRetainedAuthorityWatchdog(options: {
+  assertCurrent: () => Promise<void>;
+  abort: (reason: Error) => void;
+  intervalMs: number;
+  errorMessage: string;
+}): { dispose(): void } {
   let active = true;
   let pollTimer: ReturnType<typeof setTimeout> | undefined;
   let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
@@ -52,25 +58,24 @@ export function startIdentityAuthorityWatchdog(
     if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
     pollTimer = undefined;
     deadlineTimer = undefined;
-    if (reason) abort(reason);
+    if (reason) options.abort(reason);
   };
 
   const schedule = () => {
-    // Check halfway through the absolute lease. A successful check refreshes both bounds; a hung
-    // check cannot cancel the independently scheduled maximum stale-authority deadline.
-    pollTimer = setTimeout(poll, IDENTITY_AUTHORITY_WATCHDOG_POLL_MS);
+    // Poll halfway through the lease; a hung poll cannot cancel the independent absolute deadline.
+    pollTimer = setTimeout(poll, options.intervalMs / 2);
     deadlineTimer = setTimeout(
-      () => stop(new Error(CURRENT_IDENTITY_AUTHORITY_REQUIRED)),
-      IDENTITY_AUTHORITY_WATCHDOG_INTERVAL_MS,
+      () => stop(new Error(options.errorMessage)),
+      options.intervalMs,
     );
   };
 
   const poll = async () => {
     pollTimer = undefined;
     try {
-      await assertCurrent();
+      await options.assertCurrent();
     } catch {
-      stop(new Error(CURRENT_IDENTITY_AUTHORITY_REQUIRED));
+      stop(new Error(options.errorMessage));
       return;
     }
     if (!active) return;
@@ -81,6 +86,32 @@ export function startIdentityAuthorityWatchdog(
 
   schedule();
   return { dispose: () => stop() };
+}
+
+/** Polls privileged authority with an absolute bound until failure or socket disposal. */
+export function startIdentityAuthorityWatchdog(
+    assertCurrent: () => Promise<void>,
+    abort: (reason: Error) => void,
+): { dispose(): void } {
+  return startRetainedAuthorityWatchdog({
+    assertCurrent,
+    abort,
+    intervalMs: IDENTITY_AUTHORITY_WATCHDOG_INTERVAL_MS,
+    errorMessage: CURRENT_IDENTITY_AUTHORITY_REQUIRED,
+  });
+}
+
+/** Polls exact durable Gatekeeper token authority until failure or owning-socket disposal. */
+export function startGatekeeperSessionWatchdog(
+    assertCurrent: () => Promise<void>,
+    abort: (reason: Error) => void,
+): { dispose(): void } {
+  return startRetainedAuthorityWatchdog({
+    assertCurrent,
+    abort,
+    intervalMs: GATEKEEPER_SESSION_WATCHDOG_INTERVAL_MS,
+    errorMessage: CURRENT_GATEKEEPER_SESSION_REQUIRED,
+  });
 }
 
 /** Mints a local token only if its captured registry authority is still exact after minting. */

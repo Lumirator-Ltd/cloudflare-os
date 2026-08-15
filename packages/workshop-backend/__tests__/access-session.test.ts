@@ -36,7 +36,11 @@ function accessIdentity(expiresAt: number, email = "member@example.com")
   };
 }
 
-function setup(expiresAt: number, email = "member@example.com") {
+function setup(
+    expiresAt: number,
+    email = "member@example.com",
+    includeAccessIdentity = true,
+) {
   const abortController = new AbortController();
   let graphAborted = false;
   const abortSession = vi.fn((reason: Error) => {
@@ -94,7 +98,7 @@ function setup(expiresAt: number, email = "member@example.com") {
     abortSession,
     abortController.signal,
     verifyClerk as never,
-    accessIdentity(expiresAt, email),
+    includeAccessIdentity ? accessIdentity(expiresAt, email) : undefined,
   );
   return { abortController, abortSession, ctx, env, publicApi, registry, verifyClerk };
 }
@@ -106,32 +110,24 @@ afterEach(() => {
 });
 
 describe("PublicApi asynchronous cleanup", () => {
-  it("tracks Clerk disposal and every identity unregister exactly once", async () => {
+  it("tracks every Access identity unregister exactly once", async () => {
     const now = Date.UTC(2026, 0, 1);
     vi.useFakeTimers();
     vi.setSystemTime(now);
-    const { ctx, publicApi, registry, verifyClerk } = setup(now + 60_000);
-    const clerkCleanup = Promise.withResolvers<void>();
+    const { ctx, publicApi, registry } = setup(now + 60_000);
     const registryCleanups = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
-    clerkMocks.dispose.mockImplementation(() => clerkCleanup.promise);
     registry.unregisterIdentitySession
       .mockImplementationOnce(() => registryCleanups[0].promise)
       .mockImplementationOnce(() => registryCleanups[1].promise);
-    verifyClerk.mockResolvedValue({
-      subject: "user_clerk",
-      email: "member@example.com",
-      expiresAt: new Date(now + 60_000),
-    });
 
     await publicApi.authenticateFromCfAccess();
     await publicApi.authenticateFromCfAccess();
-    await publicApi.authenticateWithClerk("signed-token");
     publicApi[Symbol.dispose]();
     publicApi[Symbol.dispose]();
 
     expect(ctx.waitUntil).toHaveBeenCalledOnce();
     await Promise.resolve();
-    expect(clerkMocks.dispose).toHaveBeenCalledOnce();
+    expect(clerkMocks.dispose).not.toHaveBeenCalled();
     expect(registry.unregisterIdentitySession).toHaveBeenCalledTimes(2);
     expect(registry.unregisterIdentitySession.mock.calls).toEqual([
       [INTERNAL_USER_ID, expect.any(String)],
@@ -140,8 +136,33 @@ describe("PublicApi asynchronous cleanup", () => {
     expect(registry.unregisterIdentitySession.mock.calls[0][1])
       .not.toBe(registry.unregisterIdentitySession.mock.calls[1][1]);
 
-    clerkCleanup.resolve();
     for (const cleanup of registryCleanups) cleanup.resolve();
+    await vi.mocked(ctx.waitUntil).mock.calls[0][0];
+  });
+
+  it("tracks Clerk disposal without mixing authentication modes", async () => {
+    const now = Date.UTC(2026, 0, 1);
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { ctx, publicApi, verifyClerk } = setup(
+      now + 60_000, "member@example.com", false,
+    );
+    const clerkCleanup = Promise.withResolvers<void>();
+    clerkMocks.dispose.mockImplementation(() => clerkCleanup.promise);
+    verifyClerk.mockResolvedValue({
+      subject: "user_clerk",
+      email: "member@example.com",
+      expiresAt: new Date(now + 60_000),
+    });
+
+    await publicApi.authenticateWithClerk("signed-token");
+    publicApi[Symbol.dispose]();
+    publicApi[Symbol.dispose]();
+
+    expect(ctx.waitUntil).toHaveBeenCalledOnce();
+    await Promise.resolve();
+    expect(clerkMocks.dispose).toHaveBeenCalledOnce();
+    clerkCleanup.resolve();
     await vi.mocked(ctx.waitUntil).mock.calls[0][0];
   });
 
@@ -315,7 +336,9 @@ describe("Cloudflare Access RPC session deadline", () => {
     const now = Date.UTC(2026, 0, 1);
     vi.useFakeTimers();
     vi.setSystemTime(now);
-    const { env, publicApi, registry, verifyClerk } = setup(now + 60_000);
+    const { env, publicApi, registry, verifyClerk } = setup(
+      now + 60_000, "member@example.com", false,
+    );
     const analytics = { send: vi.fn().mockResolvedValue(undefined) };
     env.PRODUCT_ANALYTICS = analytics as never;
     registry.resolveClerkIdentity.mockResolvedValue({

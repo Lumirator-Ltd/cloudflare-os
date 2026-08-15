@@ -13,8 +13,10 @@ import { canonicalizeVerifiedEmail, IdentityRegistry } from "./identity-registry
 import { verifyClerkIdentity } from "./clerk-auth.js";
 import { createClerkSession } from "./clerk-session.js";
 import {
+  CURRENT_GATEKEEPER_SESSION_REQUIRED,
   CURRENT_IDENTITY_AUTHORITY_REQUIRED,
   assertCurrentIdentityAuthority,
+  startGatekeeperSessionWatchdog,
   startIdentityAuthorityWatchdog,
   type VerifiedAuthorityContext,
 } from "./identity-authority.js";
@@ -26,7 +28,12 @@ import { LanguageModelGatekeeper } from "./ai-models";
 import { getAiGatewayConfig } from "./ai-gateway.js";
 import { AdminSettings, AdminApiImpl } from "./admin-settings.js";
 import { BlueprintKvRecord, buildBlueprintArchiveStream, sanitizeBlueprintOutput, listFeaturedBlueprintsFromKv, parseBlueprintArchive, randomBlueprintId, readBlueprintContent, readBlueprintKvRecord } from "./blueprint-archive.js";
-import { GatekeeperConnectCallbackImpl, normalizeUsername, UserDurableObject } from "./user";
+import {
+  GatekeeperConnectCallbackImpl,
+  normalizeUsername,
+  UserDurableObject,
+  type RegistrySessionAuthentication,
+} from "./user";
 import { OverseerDurableObject, GatekeeperLoopback, CodeModeTailLoopback, AgentSpawnerGatekeeper, GatekeeperHookLoopback, GadgetTailLoopback, AgentSelfLoopback, TransientStubLoopback } from "./overseer";
 import { ExternalMessageGateway } from "./external-message-gateway";
 import { RpcStub as NativeRpcStub } from "cloudflare:workers";
@@ -48,7 +55,18 @@ const logger = createWorkshopLogger("workshop.server");
 type PublicApiCleanup = {
   run(): Promise<void>;
   failureMessage: string;
-  failureEvent: "clerk.session.dispose.failed" | "identity.session.dispose.failed";
+  failureEvent:
+    | "clerk.session.dispose.failed"
+    | "identity.session.dispose.failed"
+    | "gatekeeper.session.dispose.failed";
+};
+
+type GatekeeperPublicApiSession = {
+  user: DurableObjectStub<UserDurableObject>;
+  token: string;
+  subscriberId: string;
+  authentication: RegistrySessionAuthentication;
+  watchdog: { dispose(): void };
 };
 
 // Set once we've asked the AdminSettings DO to install the bundled format blueprints (see the
@@ -706,6 +724,8 @@ class LoginAttemptImpl extends RpcTarget implements LoginAttempt {
 export class PublicApiImpl extends RpcTarget implements PublicApi {
   users: DurableObjectNamespace<UserDurableObject>;
   #clerkSession: "authenticating" | { dispose(): Promise<void> } | undefined;
+  #gatekeeperSession: "authenticating" | "loggedOut" | GatekeeperPublicApiSession | undefined;
+  #gatekeeperLogout: Promise<void> | undefined;
   #identitySessions = new Map<string, { internalUserId: string; subscriberId: string }>();
   #authorityWatchdogs = new Map<string, { dispose(): void }>();
   #accessDeadline: ReturnType<typeof setTimeout> | undefined;
@@ -736,6 +756,7 @@ export class PublicApiImpl extends RpcTarget implements PublicApi {
     this.#gatekeeperDeadline = undefined;
     const cleanup = [
       ...this.#takeClerkSessionCleanup(),
+      ...this.#takeGatekeeperSessionCleanup(),
       ...this.#takeIdentitySessionCleanup(),
     ];
     for (const watchdog of this.#authorityWatchdogs.values()) watchdog.dispose();
@@ -822,6 +843,21 @@ export class PublicApiImpl extends RpcTarget implements PublicApi {
     }];
   }
 
+  #takeGatekeeperSessionCleanup(): PublicApiCleanup[] {
+    const session = this.#gatekeeperSession;
+    if (!session || session === "authenticating" || session === "loggedOut") {
+      if (session === "authenticating") this.#gatekeeperSession = undefined;
+      return [];
+    }
+    this.#gatekeeperSession = undefined;
+    session.watchdog.dispose();
+    return [{
+      run: () => session.user.unregisterGatekeeperSession(session.token, session.subscriberId),
+      failureMessage: "failed to dispose Gatekeeper session",
+      failureEvent: "gatekeeper.session.dispose.failed",
+    }];
+  }
+
   #takeIdentitySessionCleanup(): PublicApiCleanup[] {
     const sessions = [...this.#identitySessions.values()];
     this.#identitySessions.clear();
@@ -857,6 +893,40 @@ export class PublicApiImpl extends RpcTarget implements PublicApi {
       throw new Error("This API socket is closed.");
     }
     this.#identitySessions.set(subscriberId, { internalUserId, subscriberId });
+  }
+
+  #abortGatekeeperSession(reason = new Error(CURRENT_GATEKEEPER_SESSION_REQUIRED)): void {
+    if (!this.abortSignal.aborted) this.abortSession(reason);
+  }
+
+  async #registerGatekeeperSession(
+      user: DurableObjectStub<UserDurableObject>,
+      token: string,
+      authentication: RegistrySessionAuthentication): Promise<void> {
+    const subscriberId = crypto.randomUUID();
+    try {
+      await user.registerGatekeeperSession(
+        token,
+        authentication,
+        subscriberId,
+        async () => this.#abortGatekeeperSession(),
+      );
+    } catch {
+      const error = new Error(CURRENT_GATEKEEPER_SESSION_REQUIRED);
+      this.#abortGatekeeperSession(error);
+      throw error;
+    }
+
+    const watchdog = startGatekeeperSessionWatchdog(
+      () => user.assertGatekeeperSession(token, authentication),
+      reason => this.#abortGatekeeperSession(reason),
+    );
+    if (this.abortSignal.aborted || this.#gatekeeperSession !== "authenticating") {
+      watchdog.dispose();
+      await user.unregisterGatekeeperSession(token, subscriberId);
+      throw new Error("This API socket is closed.");
+    }
+    this.#gatekeeperSession = { user, token, authentication, subscriberId, watchdog };
   }
 
   #startAuthorityWatchdog(
@@ -903,6 +973,26 @@ export class PublicApiImpl extends RpcTarget implements PublicApi {
   }
 
   async authenticate(token: string): Promise<AuthenticatedApi> {
+    if (this.accessIdentity) {
+      throw new Error("This Cloudflare Access socket cannot authenticate a Gatekeeper session.");
+    }
+    if (this.#clerkSession !== undefined) {
+      throw new Error("This API socket is already authenticating or authenticated with Clerk.");
+    }
+    if (this.#gatekeeperSession !== undefined) {
+      throw new Error("This API socket is already authenticating or authenticated with Gatekeeper.");
+    }
+    if (this.abortSignal.aborted) throw new Error("This API socket is closed.");
+    this.#gatekeeperSession = "authenticating";
+    try {
+      return await this.#authenticateGatekeeperToken(token);
+    } catch (error) {
+      if (this.#gatekeeperSession === "authenticating") this.#gatekeeperSession = undefined;
+      throw error;
+    }
+  }
+
+  async #authenticateGatekeeperToken(token: string): Promise<AuthenticatedApi> {
     let split = token.split(':');
     if (split.length !== 2) {
       throw createAuthError(AUTH_ERROR_CODES.invalidSessionToken);
@@ -956,8 +1046,9 @@ export class PublicApiImpl extends RpcTarget implements PublicApi {
       return rejectStaleSession(error);
     }
 
-    if (authority) {
+    if (authority && sessionAuthentication) {
       await this.#registerIdentitySession(internalUserId, authority);
+      await this.#registerGatekeeperSession(user, split[1], sessionAuthentication);
       this.#startAuthorityWatchdog(internalUserId, authority);
       if (this.#gatekeeperExpired || !this.#gatekeeperExpiresAt ||
           this.#gatekeeperExpiresAt.getTime() <= Date.now() || this.abortSignal.aborted) {
@@ -967,6 +1058,9 @@ export class PublicApiImpl extends RpcTarget implements PublicApi {
         }
         return rejectStaleSession(new Error(GATEKEEPER_SESSION_EXPIRED));
       }
+    } else if (this.#gatekeeperSession === "authenticating") {
+      // Legacy local-password sessions do not own Gatekeeper token revocation state.
+      this.#gatekeeperSession = undefined;
     }
 
     recordAnalytics(this.ctx, this.env, {
@@ -979,7 +1073,37 @@ export class PublicApiImpl extends RpcTarget implements PublicApi {
       (id, currentAuthority) => this.#startAuthorityWatchdog(id, currentAuthority));
   }
 
+  async logoutGatekeeperSession(): Promise<void> {
+    if (this.#gatekeeperLogout) return await this.#gatekeeperLogout;
+    const session = this.#gatekeeperSession;
+    if (session === "loggedOut") return;
+    if (!session || session === "authenticating") {
+      throw new Error("This API socket is not authenticated with a Gatekeeper session.");
+    }
+
+    const logout = (async () => {
+      await session.user.revokeGatekeeperSession(session.token);
+      if (this.#gatekeeperSession === session) {
+        this.#gatekeeperSession = "loggedOut";
+        session.watchdog.dispose();
+      }
+      this.#abortGatekeeperSession();
+    })();
+    this.#gatekeeperLogout = logout;
+    try {
+      await logout;
+    } finally {
+      if (this.#gatekeeperSession !== "loggedOut") this.#gatekeeperLogout = undefined;
+    }
+  }
+
   async authenticateWithClerk(token: string): Promise<ClerkAuthentication> {
+    if (this.#gatekeeperSession !== undefined) {
+      throw new Error("This API socket is already authenticating or authenticated with Gatekeeper.");
+    }
+    if (this.accessIdentity) {
+      throw new Error("This Cloudflare Access socket cannot authenticate with Clerk.");
+    }
     if (this.#clerkSession !== undefined) {
       throw new Error("This API socket is already authenticated with Clerk.");
     }
@@ -1051,6 +1175,12 @@ export class PublicApiImpl extends RpcTarget implements PublicApi {
   }
 
   async authenticateFromCfAccess(): Promise<AuthenticatedApi> {
+    if (this.#gatekeeperSession !== undefined) {
+      throw new Error("This API socket is already authenticating or authenticated with Gatekeeper.");
+    }
+    if (this.#clerkSession !== undefined) {
+      throw new Error("This API socket is already authenticating or authenticated with Clerk.");
+    }
     const accessIdentity = this.#requireCurrentAccessIdentity();
 
     // The handshake verified every value in this context. Apply deployment signup policy at this

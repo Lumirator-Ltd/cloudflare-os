@@ -37,6 +37,9 @@ describe("registry-backed Gatekeeper graph authority", () => {
         expiresAt: new Date(Date.now() + 60 * 60_000),
         ...authority,
       }),
+      registerGatekeeperSession: vi.fn().mockResolvedValue(undefined),
+      unregisterGatekeeperSession: vi.fn().mockResolvedValue(undefined),
+      assertGatekeeperSession: vi.fn().mockResolvedValue(undefined),
       revokeGatekeeperSession: vi.fn().mockResolvedValue(undefined),
       whoami: vi.fn(async () => {
         if (graphAborted) throw new Error("capability graph aborted");
@@ -83,7 +86,7 @@ describe("registry-backed Gatekeeper graph authority", () => {
       const timersBeforeAuthentication = vi.getTimerCount();
       const api = await publicApi.authenticate(`${internalUserId}:secret-token`);
       expect(invalidationSubscriber).toEqual(expect.any(Function));
-      expect(vi.getTimerCount()).toBe(timersBeforeAuthentication + 3);
+      expect(vi.getTimerCount()).toBe(timersBeforeAuthentication + 5);
 
       // Model a registry restart dropping its ephemeral callback without changing durable state.
       invalidationSubscriber = undefined;
@@ -125,6 +128,9 @@ describe("registry-backed Gatekeeper graph authority", () => {
         kind: "gatekeeper", provider: "test", subject: "stable-provider-subject",
         expiresAt, ...authority,
       }),
+      registerGatekeeperSession: vi.fn().mockResolvedValue(undefined),
+      unregisterGatekeeperSession: vi.fn().mockResolvedValue(undefined),
+      assertGatekeeperSession: vi.fn().mockResolvedValue(undefined),
       revokeGatekeeperSession: vi.fn().mockResolvedValue(undefined),
       whoami: vi.fn(async () => {
         if (graphAborted) throw new Error("capability graph aborted");

@@ -108,6 +108,40 @@ describe("Cloudflare Gatekeeper sign-in", () => {
     expect((await returnedApi.whoami()).id).toBe(internalUserId);
   });
 
+  it("revokes one local bearer across sibling sockets without affecting another user", async () => {
+    const ownerEmail = `logout-owner-${crypto.randomUUID()}@example.com`;
+    await setLoginIdentity(`logout-owner-subject-${crypto.randomUUID()}`, ownerEmail);
+    const owner = await login(CLOUDFLARE_VENDOR_ID);
+    using firstPublic = owner.publicApi;
+    using firstApi = await firstPublic.authenticate(owner.token);
+    using siblingPublic = connect(harness.url) as RpcStub<PublicApi>;
+    using siblingApi = await siblingPublic.authenticate(owner.token);
+
+    const otherEmail = `logout-other-${crypto.randomUUID()}@example.com`;
+    await setLoginIdentity(`logout-other-subject-${crypto.randomUUID()}`, otherEmail);
+    const other = await login(CLOUDFLARE_VENDOR_ID);
+    using otherPublic = other.publicApi;
+    using otherApi = await otherPublic.authenticate(other.token);
+
+    using unauthenticated = connect(harness.url) as RpcStub<PublicApi>;
+    await expect(unauthenticated.logoutGatekeeperSession()).rejects.toThrow(/not authenticated/i);
+    await expect(unauthenticated.getServerConfig()).resolves.toBeDefined();
+
+    let logoutError: unknown;
+    try {
+      await firstPublic.logoutGatekeeperSession();
+    } catch (error) {
+      logoutError = error;
+    }
+    expect(logoutError).toBeInstanceOf(Error);
+    await expect(firstApi.whoami()).rejects.toThrow();
+    await expect(siblingApi.whoami()).rejects.toThrow();
+    await expect(otherApi.whoami()).resolves.toMatchObject({ name: otherEmail.split("@")[0] });
+
+    using replayPublic = connect(harness.url) as RpcStub<PublicApi>;
+    await expect(replayPublic.authenticate(owner.token)).rejects.toThrow(/invalid session token/i);
+  });
+
   it("breaks a real retained capability graph at the provider's earlier expiry", async () => {
     const expiresAt = new Date(Date.now() + 1_000);
     await setLoginIdentity(
