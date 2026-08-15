@@ -40,16 +40,18 @@ the one-hour maximum. Expired and legacy subjectless/unbounded records are rejec
 the complete capability graph is aborted at the retained session deadline.
 
 Same-origin `POST /api/gatekeeper-session/logout` revokes only the local bearer supplied in its
-strict, bounded `application/json` body (`{ "token": "<opaque-internal-id>:<secret>" }`). A 204 is
-returned only after the User DO durably deletes that exact token and finishes notifying every live
-capability graph authenticated with it, including the requesting browser's graph. A syntactically
-valid missing or already-revoked bearer is idempotently acknowledged with the same 204 so the
-endpoint does not disclose token existence; malformed requests are rejected before Durable Object
-lookup. Each graph also polls the exact durable token behind an independent absolute 30-second
-deadline, so a User DO restart or lost callback cannot preserve revoked authority beyond that bound.
-Socket disposal unregisters its ephemeral subscriber but does not revoke the token, so closing a tab
-is not logout. Logout is deployment-local: the sign-in grant is transient and never retained, so
-there is no provider OAuth credential to revoke.
+strict, bounded `application/json` body (`{ "token": "<opaque-internal-id>:<secret>" }`). A 204
+confirms that the User DO durably deleted that exact token, so bearer replay fails, and finished every
+live subscriber invalidation known to that User DO instance, including the requesting browser's graph
+when its subscriber is still registered there. A syntactically valid missing or already-revoked
+bearer is idempotently acknowledged with the same 204 so the endpoint does not disclose token
+existence; malformed requests are rejected before Durable Object lookup. Subscribers are ephemeral:
+a User DO restart can lose them before revocation, so a pre-existing graph is not guaranteed closed
+at 204 in that case. Each graph also polls the exact durable token behind an independent absolute
+30-second deadline and closes within that bound after durable revocation. Socket disposal unregisters
+its ephemeral subscriber but does not revoke the token, so closing a tab is not logout. Logout is
+deployment-local: the sign-in grant is transient and never retained, so there is no provider OAuth
+credential to revoke.
 
 The strict stable-subject cutover rejects legacy subjectless Gatekeeper sessions instead of upgrading
 them by email. This release assumes a greenfield deployment with no existing users. Any deployment

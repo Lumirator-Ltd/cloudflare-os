@@ -34,10 +34,12 @@ export const SERVICE_SALT = new Uint8Array([
 /**
  * Same-origin POST endpoint for idempotently revoking one local Gatekeeper bearer.
  *
- * Send an exact `application/json` body shaped as `{ token: string }`. A 204 response means durable
- * deletion and live-session invalidation have completed; it intentionally does not distinguish an
- * already-revoked, otherwise missing, or newly revoked well-formed bearer. This affects only the
- * deployment-local Workshop session because the transient provider OAuth grant is not retained.
+ * Send an exact `application/json` body shaped as `{ token: string }`. A 204 confirms that the
+ * bearer is durably deleted, so replay fails, and that every live subscriber known to the current
+ * User Durable Object instance has finished invalidating. A restart loses ephemeral subscribers;
+ * any such graph closes through its token watchdog within 30 seconds rather than necessarily before
+ * the 204. The response intentionally does not distinguish an already-revoked, otherwise missing,
+ * or newly revoked well-formed bearer. This affects only the deployment-local Workshop session.
  */
 export const GATEKEEPER_SESSION_LOGOUT_PATH = "/api/gatekeeper-session/logout";
 

@@ -12,6 +12,7 @@ import {
 import type { SupportedResource } from "@gadgets/workshop-shared/gatekeeper";
 import type { ChatGatewayRpcTarget } from "@gadgets/workshop-shared/external-message-gateway";
 import { describe, expect, it, vi } from "vitest";
+import { GATEKEEPER_SESSION_WATCHDOG_INTERVAL_MS } from "../src/identity-authority.js";
 import {
   GATEKEEPER_SESSION_MAX_AGE_MS,
   type UserDurableObject,
@@ -247,6 +248,54 @@ describe("stable human application identities", () => {
     });
   });
 
+  it("durably acknowledges revocation after restart before the lost graph's watchdog closes it",
+      async () => {
+    const owner = await registryUser("logout-restart");
+    const token = await owner.user.createGatekeeperSession({
+      canonicalVerifiedEmail: owner.identity.canonicalVerifiedEmail,
+      identityVersion: owner.identity.identityVersion,
+    }, "test", "logout-restart-subject");
+    using publicApi = await connect();
+    using api = await publicApi.authenticate(`${owner.identity.internalUserId}:${token}`);
+    const broken = Promise.withResolvers<void>();
+    let graphBroken = false;
+    api.onRpcBroken(() => {
+      graphBroken = true;
+      broken.resolve();
+    });
+
+    await abortAllDurableObjects();
+
+    const response = await logoutGatekeeperSession(
+      `${owner.identity.internalUserId}:${token}`,
+    );
+    expect(response.status).toBe(204);
+    const restartedUser = exports.UserDurableObject.getByName(owner.identity.internalUserId);
+    expect(await storedSession(restartedUser, token)).toBeUndefined();
+    await runInDurableObject(restartedUser, async (instance: UserDurableObject) => {
+      await expect(instance.authenticate(token)).rejects.toThrow(/invalid session token/i);
+    });
+
+    // The restarted User DO never knew this graph. The 204 therefore cannot promise its immediate
+    // closure; the graph's independent durable-token watchdog supplies the documented hard bound.
+    expect(graphBroken).toBe(false);
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await expect(Promise.race([
+        broken.promise.then(() => "broken"),
+        new Promise(resolve => {
+          timeout = setTimeout(
+            () => resolve("watchdog exceeded bound"),
+            GATEKEEPER_SESSION_WATCHDOG_INTERVAL_MS,
+          );
+        }),
+      ])).resolves.toBe("broken");
+    } finally {
+      if (timeout !== undefined) clearTimeout(timeout);
+    }
+    expect(graphBroken).toBe(true);
+  }, GATEKEEPER_SESSION_WATCHDOG_INTERVAL_MS + 5_000);
+
   it("rejects invalid Gatekeeper logout HTTP requests without reflecting the bearer", async () => {
     const owner = await registryUser("logout-validation");
     const token = await owner.user.createGatekeeperSession({
@@ -458,6 +507,88 @@ describe("stable human application identities", () => {
     });
   });
 
+  it("coalesces concurrent revocations by token while other tokens remain independent",
+      async () => {
+    const { identity, user } = await registryUser("concurrent-token-revocation");
+    const authority = {
+      canonicalVerifiedEmail: identity.canonicalVerifiedEmail,
+      identityVersion: identity.identityVersion,
+    };
+    const blockedToken = await user.createGatekeeperSession(
+      authority, "test", "concurrent-token-revocation-blocked");
+    const independentToken = await user.createGatekeeperSession(
+      authority, "test", "concurrent-token-revocation-independent");
+    const authentication = await user.authenticate(blockedToken);
+    if (!authentication) throw new Error("expected Gatekeeper session authority");
+    const blockedTokenId = await sessionTokenId(blockedToken);
+    const independentTokenId = await sessionTokenId(independentToken);
+    const release = Promise.withResolvers<void>();
+
+    await runInDurableObject(user, async (instance: UserDurableObject) => {
+      const callback = Object.assign(async () => { await release.promise; }, {
+        dup() { return callback; },
+        [Symbol.dispose]() {},
+      });
+      await instance.registerGatekeeperSession(
+        blockedToken, authentication, "blocked", callback as never,
+      );
+      const inspected = instance as unknown as {
+        storage: { sessions: { delete(id: string): boolean } };
+      };
+      const deleteSession = vi.spyOn(inspected.storage.sessions, "delete");
+      const settled: string[] = [];
+
+      const first = instance.revokeGatekeeperSession(blockedToken)
+        .then(() => { settled.push("first"); });
+      const duplicate = instance.revokeGatekeeperSession(blockedToken)
+        .then(() => { settled.push("duplicate"); });
+      const independent = instance.revokeGatekeeperSession(independentToken)
+        .then(() => { settled.push("independent"); });
+
+      await vi.waitFor(() => expect(settled).toContain("independent"));
+      expect(settled).toEqual(["independent"]);
+      expect(deleteSession.mock.calls.filter(([id]) => id === blockedTokenId)).toHaveLength(1);
+      expect(deleteSession.mock.calls.filter(([id]) => id === independentTokenId)).toHaveLength(1);
+
+      release.resolve();
+      await Promise.all([first, duplicate, independent]);
+      expect(settled.toSorted()).toEqual(["duplicate", "first", "independent"]);
+    });
+  });
+
+  it("shares revocation failures and removes the coalescing entry for retry", async () => {
+    const { identity, user } = await registryUser("failed-concurrent-token-revocation");
+    const token = await user.createGatekeeperSession({
+      canonicalVerifiedEmail: identity.canonicalVerifiedEmail,
+      identityVersion: identity.identityVersion,
+    }, "test", "failed-concurrent-token-revocation-subject");
+    const failure = new Error("durable delete failed");
+
+    await runInDurableObject(user, async (instance: UserDurableObject) => {
+      const inspected = instance as unknown as {
+        storage: { sessions: { delete(id: string): boolean } };
+      };
+      const deleteSession = vi.spyOn(inspected.storage.sessions, "delete");
+      deleteSession.mockImplementationOnce(() => { throw failure; });
+
+      const outcomes = await Promise.allSettled([
+        instance.revokeGatekeeperSession(token),
+        instance.revokeGatekeeperSession(token),
+      ]);
+      expect(outcomes).toEqual([
+        { status: "rejected", reason: failure },
+        { status: "rejected", reason: failure },
+      ]);
+      expect(deleteSession).toHaveBeenCalledOnce();
+
+      await expect(instance.revokeGatekeeperSession(token)).resolves.toBeUndefined();
+      expect(deleteSession).toHaveBeenCalledTimes(2);
+    });
+    await runInDurableObject(user, async (instance: UserDurableObject) => {
+      await expect(instance.authenticate(token)).rejects.toThrow(/invalid session token/i);
+    });
+  });
+
   it("includes the caller while awaiting every invalidation after durable revocation",
       async () => {
     const { identity, user } = await registryUser("revoked-token-excluded-caller");
@@ -528,12 +659,12 @@ describe("stable human application identities", () => {
         [Symbol.dispose]() {},
       });
       const revocation = instance.revokeGatekeeperSession(token);
-      const registration = instance.registerGatekeeperSession(
+      const registration = expect(instance.registerGatekeeperSession(
         token, authentication, "racing", callback as never,
-      );
+      )).rejects.toThrow(/session token/i);
 
       await revocation;
-      await expect(registration).rejects.toThrow(/session token/i);
+      await registration;
     });
     expect(invalidations).toBe(0);
   });

@@ -96,8 +96,10 @@ function parseBearer(body: string): { internalUserId: string; secret: string } {
  * Handles same-origin local Gatekeeper bearer revocation independently of WebSocket RPC.
  *
  * A syntactically valid bearer is idempotent: missing and already-revoked records return 204 just
- * like a live record, without revealing token existence. The response is sent only after durable
- * deletion and every live subscriber invalidation have completed.
+ * like a live record, without revealing token existence. The response confirms durable deletion
+ * (and therefore failed replay) plus completion of every live invalidation known to the current User
+ * DO instance. If a restart lost an ephemeral subscriber, its token watchdog closes that graph
+ * within 30 seconds rather than necessarily before this response.
  */
 export async function handleGatekeeperSessionLogoutRequest(
     request: Request,

@@ -307,6 +307,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   private adminSettings: DurableObjectNamespace<AdminSettings>;
   private gatekeeperSessions =
     new Map<string, Map<string, NativeRpcStub<GatekeeperSessionInvalidator>>>();
+  private gatekeeperSessionRevocations = new Map<string, Promise<void>>();
 
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
@@ -573,12 +574,13 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   /**
-   * Revokes one local Gatekeeper bearer token and invalidates all graphs authenticated with it.
+   * Revokes one local Gatekeeper bearer token and invalidates its known live graphs.
    *
    * This revokes only the deployment-local Workshop session. The transient provider sign-in grant
    * is not retained, so there is no provider OAuth credential to revoke here. Missing tokens are
-   * harmless. Durable deletion occurs before every subscriber, including the requesting browser's
-   * graph, is notified; completion therefore guarantees that token replay and live graphs fail.
+   * harmless. Exact-token concurrent calls share durable deletion and all invalidations registered
+   * on this User DO instance. A restart loses those ephemeral subscribers, whose independent token
+   * watchdogs close their graphs within 30 seconds; durable deletion prevents replay at completion.
    */
   async revokeGatekeeperSession(token: string): Promise<void> {
     let tokenId: string;
@@ -587,6 +589,15 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     } catch {
       return;
     }
+    const inFlight = this.gatekeeperSessionRevocations.get(tokenId);
+    if (inFlight) return inFlight;
+    const revocation = this.#revokeGatekeeperSession(tokenId)
+      .finally(() => { this.gatekeeperSessionRevocations.delete(tokenId); });
+    this.gatekeeperSessionRevocations.set(tokenId, revocation);
+    return revocation;
+  }
+
+  async #revokeGatekeeperSession(tokenId: string): Promise<void> {
     this.storage.sessions.delete(tokenId);
     const sessions = this.gatekeeperSessions.get(tokenId);
     if (!sessions) return;
@@ -595,7 +606,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     for (const subscriber of sessions.values()) {
       invalidations.push(this.#invalidateGatekeeperSession(subscriber));
     }
-    await Promise.all(invalidations);
+    await Promise.allSettled(invalidations);
   }
 
   async #invalidateGatekeeperSession(
