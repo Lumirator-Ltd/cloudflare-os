@@ -45,6 +45,12 @@ import { armAbsoluteDeadline, type AbsoluteDeadline } from "./absolute-deadline.
 
 const logger = createWorkshopLogger("workshop.server");
 
+type PublicApiCleanup = {
+  run(): Promise<void>;
+  failureMessage: string;
+  failureEvent: "clerk.session.dispose.failed" | "identity.session.dispose.failed";
+};
+
 // Set once we've asked the AdminSettings DO to install the bundled format blueprints (see the
 // fetch handler), so later requests skip the call. The DO holds the real answer.
 let formatBlueprintInstallStarted = false;
@@ -728,10 +734,28 @@ export class PublicApiImpl extends RpcTarget implements PublicApi {
     this.#accessDeadline = undefined;
     this.#gatekeeperDeadline?.dispose();
     this.#gatekeeperDeadline = undefined;
-    this.#disposeClerkSession();
-    this.#disposeIdentitySessions();
+    const cleanup = [
+      ...this.#takeClerkSessionCleanup(),
+      ...this.#takeIdentitySessionCleanup(),
+    ];
     for (const watchdog of this.#authorityWatchdogs.values()) watchdog.dispose();
     this.#authorityWatchdogs.clear();
+
+    if (cleanup.length > 0) {
+      this.ctx.waitUntil(Promise.allSettled(
+        cleanup.map(operation => Promise.resolve().then(() => operation.run())),
+      ).then(results => {
+        for (const [index, result] of results.entries()) {
+          if (result.status === "rejected") {
+            const operation = cleanup[index];
+            logger.warn(operation.failureMessage, {
+              event: operation.failureEvent,
+              error: result.reason,
+            });
+          }
+        }
+      }));
+    }
   }
 
   #armAccessDeadline(): void {
@@ -787,29 +811,28 @@ export class PublicApiImpl extends RpcTarget implements PublicApi {
     });
   }
 
-  #disposeClerkSession(): void {
+  #takeClerkSessionCleanup(): PublicApiCleanup[] {
     const session = this.#clerkSession;
     this.#clerkSession = undefined;
-    if (!session || session === "authenticating") return;
-    void session.dispose().catch(error => {
-      logger.warn("failed to dispose Clerk session", {
-        event: "clerk.session.dispose.failed", error,
-      });
-    });
+    if (!session || session === "authenticating") return [];
+    return [{
+      run: () => session.dispose(),
+      failureMessage: "failed to dispose Clerk session",
+      failureEvent: "clerk.session.dispose.failed",
+    }];
   }
 
-  #disposeIdentitySessions(): void {
+  #takeIdentitySessionCleanup(): PublicApiCleanup[] {
     const sessions = [...this.#identitySessions.values()];
     this.#identitySessions.clear();
     const registry = this.ctx.exports.IdentityRegistry.getByName("");
-    for (const session of sessions) {
-      void registry.unregisterIdentitySession(session.internalUserId, session.subscriberId)
-        .catch(error => {
-          logger.warn("failed to dispose identity session", {
-            event: "identity.session.dispose.failed", error,
-          });
-        });
-    }
+    return sessions.map(session => ({
+      run: () => registry.unregisterIdentitySession(
+        session.internalUserId, session.subscriberId,
+      ),
+      failureMessage: "failed to dispose identity session",
+      failureEvent: "identity.session.dispose.failed",
+    }));
   }
 
   async #registerIdentitySession(

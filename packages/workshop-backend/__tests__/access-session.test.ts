@@ -3,11 +3,22 @@ import type { VerifiedCfAccessIdentity } from "../src/access.js";
 import type { IdentityState } from "../src/identity-registry.js";
 import { PublicApiImpl } from "../src/server.js";
 
+const clerkMocks = vi.hoisted(() => ({
+  dispose: vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
+}));
+const loggerMocks = vi.hoisted(() => ({
+  warn: vi.fn(),
+}));
+
 vi.mock("../src/clerk-session.js", () => ({
   createClerkSession: vi.fn(async () => ({
     control: {},
-    dispose: vi.fn().mockResolvedValue(undefined),
+    dispose: clerkMocks.dispose,
   })),
+}));
+vi.mock("../src/observability.js", async importOriginal => ({
+  ...await importOriginal<typeof import("../src/observability.js")>(),
+  createWorkshopLogger: () => loggerMocks,
 }));
 
 const INTERNAL_USER_ID = "stable-access-user";
@@ -85,11 +96,70 @@ function setup(expiresAt: number, email = "member@example.com") {
     verifyClerk as never,
     accessIdentity(expiresAt, email),
   );
-  return { abortController, abortSession, env, publicApi, registry, verifyClerk };
+  return { abortController, abortSession, ctx, env, publicApi, registry, verifyClerk };
 }
 
 afterEach(() => {
+  clerkMocks.dispose.mockReset().mockResolvedValue(undefined);
+  loggerMocks.warn.mockReset();
   vi.useRealTimers();
+});
+
+describe("PublicApi asynchronous cleanup", () => {
+  it("tracks Clerk disposal and every identity unregister exactly once", async () => {
+    const now = Date.UTC(2026, 0, 1);
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { ctx, publicApi, registry, verifyClerk } = setup(now + 60_000);
+    const clerkCleanup = Promise.withResolvers<void>();
+    const registryCleanups = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+    clerkMocks.dispose.mockImplementation(() => clerkCleanup.promise);
+    registry.unregisterIdentitySession
+      .mockImplementationOnce(() => registryCleanups[0].promise)
+      .mockImplementationOnce(() => registryCleanups[1].promise);
+    verifyClerk.mockResolvedValue({
+      subject: "user_clerk",
+      email: "member@example.com",
+      expiresAt: new Date(now + 60_000),
+    });
+
+    await publicApi.authenticateFromCfAccess();
+    await publicApi.authenticateFromCfAccess();
+    await publicApi.authenticateWithClerk("signed-token");
+    publicApi[Symbol.dispose]();
+    publicApi[Symbol.dispose]();
+
+    expect(ctx.waitUntil).toHaveBeenCalledOnce();
+    await Promise.resolve();
+    expect(clerkMocks.dispose).toHaveBeenCalledOnce();
+    expect(registry.unregisterIdentitySession).toHaveBeenCalledTimes(2);
+    expect(registry.unregisterIdentitySession.mock.calls).toEqual([
+      [INTERNAL_USER_ID, expect.any(String)],
+      [INTERNAL_USER_ID, expect.any(String)],
+    ]);
+    expect(registry.unregisterIdentitySession.mock.calls[0][1])
+      .not.toBe(registry.unregisterIdentitySession.mock.calls[1][1]);
+
+    clerkCleanup.resolve();
+    for (const cleanup of registryCleanups) cleanup.resolve();
+    await vi.mocked(ctx.waitUntil).mock.calls[0][0];
+  });
+
+  it("logs cleanup rejections without rejecting the tracked work", async () => {
+    const now = Date.UTC(2026, 0, 1);
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { ctx, publicApi, registry } = setup(now + 60_000);
+    registry.unregisterIdentitySession.mockRejectedValueOnce(new Error("registry unavailable"));
+    await publicApi.authenticateFromCfAccess();
+
+    expect(() => publicApi[Symbol.dispose]()).not.toThrow();
+    await expect(vi.mocked(ctx.waitUntil).mock.calls[0][0]).resolves.toBeUndefined();
+    expect(loggerMocks.warn).toHaveBeenCalledWith("failed to dispose identity session", {
+      event: "identity.session.dispose.failed",
+      error: expect.objectContaining({ message: "registry unavailable" }),
+    });
+  });
 });
 
 describe("Cloudflare Access RPC session deadline", () => {

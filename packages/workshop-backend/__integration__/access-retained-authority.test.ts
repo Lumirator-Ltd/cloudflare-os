@@ -1,10 +1,17 @@
-import { abortAllDurableObjects, env } from "cloudflare:test";
+import {
+  abortAllDurableObjects,
+  createExecutionContext,
+  env,
+  runInDurableObject,
+  waitOnExecutionContext,
+} from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
-import { newWebSocketRpcSession, type RpcStub } from "capnweb";
+import { newHttpBatchRpcSession, newWebSocketRpcSession, type RpcStub } from "capnweb";
 import type { AdminApi, AuthenticatedApi, PublicApi } from "@gadgets/workshop-shared/api";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { PublicApiImpl } from "../src/server.js";
+import { IdentityRegistry } from "../src/identity-registry.js";
+import worker, { PublicApiImpl } from "../src/server.js";
 
 const ACCESS_ISSUER = "https://retained-authority.cloudflareaccess.test";
 const ACCESS_AUDIENCE = "retained-authority-audience";
@@ -105,33 +112,58 @@ describe("retained Cloudflare Access authority", () => {
     expect(response.webSocket).toBeNull();
   });
 
-  it("releases the Access PublicApi and timers after an HTTP batch completes", async () => {
+  it("drains Access HTTP batch cleanup before releasing its registry subscriber", async () => {
     const email = `access-batch-${crypto.randomUUID()}@example.com`;
     const mutableEnv = env as Cloudflare.Env;
     mutableEnv.CF_ACCESS_AUD = ACCESS_AUDIENCE;
     mutableEnv.CF_ACCESS_ISS = ACCESS_ISSUER;
     await exports.AdminSettings.getByName("").updateAdminConfig({ signupsEnabled: true });
 
-    vi.spyOn(globalThis, "fetch").mockImplementation(async input => {
-      const request = new Request(input);
+    // Keep unrelated one-time blueprint installation work out of the execution context under test.
+    const warmupContext = createExecutionContext();
+    await worker.fetch(new Request("https://workshop.invalid/api", {
+      headers: { Origin: "https://workshop.invalid" },
+    }), mutableEnv, warmupContext);
+    await waitOnExecutionContext(warmupContext);
+
+    const register = vi.spyOn(IdentityRegistry.prototype, "registerIdentitySession");
+    const dispose = vi.spyOn(PublicApiImpl.prototype, Symbol.dispose);
+    const context = createExecutionContext();
+    let batchResponse: Response | undefined;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const request = new Request(input, init);
       if (request.url === `${ACCESS_ISSUER}/cdn-cgi/access/certs`) {
         return Response.json({ keys: [publicJwk] });
+      }
+      if (request.url === "https://workshop.invalid/api") {
+        batchResponse = await worker.fetch(request, mutableEnv, context);
+        return batchResponse;
       }
       throw new Error(`Unexpected network request: ${request.url}`);
     });
 
-    const dispose = vi.spyOn(PublicApiImpl.prototype, Symbol.dispose);
-    const response = await exports.default.fetch(new Request("https://workshop.invalid/api", {
-      method: "POST",
-      headers: {
-        Origin: "https://workshop.invalid",
-        "cf-access-jwt-assertion": await accessToken(email),
+    using publicApi = newHttpBatchRpcSession<PublicApi>(new Request(
+      "https://workshop.invalid/api",
+      {
+        headers: {
+          Origin: "https://workshop.invalid",
+          "cf-access-jwt-assertion": await accessToken(email),
+        },
       },
-      body: "",
-    }));
-
-    expect(response.status).toBe(200);
+    ));
+    await expect(publicApi.authenticateFromCfAccess().whoami())
+      .resolves.toMatchObject({ id: expect.any(String) });
+    expect(batchResponse?.status).toBe(200);
+    expect(register).toHaveBeenCalledOnce();
     expect(dispose).toHaveBeenCalledOnce();
+
+    await waitOnExecutionContext(context);
+    await runInDurableObject(exports.IdentityRegistry.getByName(""), instance => {
+      const inspected = instance as unknown as {
+        identitySessions: Map<string, Map<string, unknown>>;
+      };
+      expect(inspected.identitySessions.size).toBe(0);
+    });
   });
 
   it("breaks a real WebSocket graph and retained descendants at the signed JWT expiry", async () => {
