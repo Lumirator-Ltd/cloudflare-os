@@ -39,6 +39,11 @@ future credential expiry and a fixed one-hour local maximum. Missing or stale pr
 the one-hour maximum. Expired and legacy subjectless/unbounded records are rejected and removed, and
 the complete capability graph is aborted at the retained session deadline.
 
+The strict stable-subject cutover rejects legacy subjectless Gatekeeper sessions instead of upgrading
+them by email. This release assumes a greenfield deployment with no existing users. Any deployment
+that previously enabled Gatekeeper sign-in must ship a separate proof-based migration or operator
+recovery flow before adopting this cutover.
+
 Cloudflare Access WebSocket capability graphs have both one non-refreshable absolute deadline at the
 assertion's verified `exp` and exact registry-authority invalidation. The browser must reconnect with
 a fresh assertion after expiry.
