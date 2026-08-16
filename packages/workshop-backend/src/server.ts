@@ -1,5 +1,6 @@
 import { RpcStub, RpcTarget, newWorkersRpcResponse } from "capnweb";
 import { validateRpc } from "capnweb-validate";
+import { createLogger } from "@gadgets/backend-utils/logger";
 import type { JWTPayload } from "jose";
 import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES } from '@gadgets/workshop-shared/api';
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
@@ -10,6 +11,7 @@ import { getUsageInfo } from "./ai-gateway-billing/limits/usage-checker.js";
 import { listConnectedAccounts, selectAccount } from "./ai-gateway-billing/cloudflare/connection-service.js";
 import { PendingLogin, LoginConnectCallbackImpl } from "./auth/login-flow.js";
 import { deploymentOutputForBlueprint, listFormatOffers, readAdminConfig } from "./admin-config.js";
+import { initialAdminConfigDigest, parseInitialAdminConfig } from "./admin-bootstrap.js";
 
 // Re-export the optional-feature Durable Objects + entrypoints so they can be bound in wrangler.
 export { PendingLogin, LoginConnectCallbackImpl };
@@ -30,6 +32,47 @@ import { serveSiteLogo, SITE_LOGO_PATH } from "./site-logo.js";
 import { createWorkshopLogger } from "./observability";
 
 const logger = createWorkshopLogger("workshop.server");
+type AdminBootstrapLogFields = {
+  errorCode: "ADMIN_BOOTSTRAP_FAILED";
+  digestPrefix: string;
+};
+const bootstrapLogger = createLogger<AdminBootstrapLogFields>({
+  component: "workshop.server.bootstrap",
+});
+function adminBootstrapMaintenanceResponse(): Response {
+  return new Response("Deployment initialization pending.\n", {
+    status: 503,
+    headers: {"content-type": "text/plain; charset=utf-8"},
+  });
+}
+
+async function adminBootstrapDigestPrefix(value: unknown): Promise<string> {
+  let initial = parseInitialAdminConfig(value);
+  if (initial) return (await initialAdminConfigDigest(initial)).slice(0, 12);
+
+  let serialized = JSON.stringify(value) ?? "undefined";
+  let digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(serialized));
+  return new Uint8Array(digest).toHex().slice(0, 12);
+}
+
+async function ensureAdminBootstrap(env: Env, ctx: ExecutionContext): Promise<Response | null> {
+  let initial = env.INITIAL_ADMIN_CONFIG;
+  if (initial === undefined) return null;
+
+  let digestPrefix = "unavailable";
+  try {
+    digestPrefix = await adminBootstrapDigestPrefix(initial);
+    await ctx.exports.AdminSettings.getByName("").ensureInitialAdminConfig(initial);
+    return null;
+  } catch {
+    bootstrapLogger.error("deployment admin bootstrap failed", {
+      event: "admin.bootstrap.failed",
+      errorCode: "ADMIN_BOOTSTRAP_FAILED",
+      digestPrefix,
+    });
+    return adminBootstrapMaintenanceResponse();
+  }
+}
 
 // Set once we've asked the AdminSettings DO to install the bundled format blueprints (see the
 // fetch handler), so later requests skip the call. The DO holds the real answer.
@@ -780,6 +823,9 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
 
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext) {
+    let maintenanceResponse = await ensureAdminBootstrap(env, ctx);
+    if (maintenanceResponse) return maintenanceResponse;
+
     let url = new URL(req.url);
 
     if (url.pathname === SITE_LOGO_PATH) {
