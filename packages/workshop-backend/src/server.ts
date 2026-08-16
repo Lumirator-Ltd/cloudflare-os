@@ -10,6 +10,7 @@ import { getUsageInfo } from "./ai-gateway-billing/limits/usage-checker.js";
 import { listConnectedAccounts, selectAccount } from "./ai-gateway-billing/cloudflare/connection-service.js";
 import { PendingLogin, LoginConnectCallbackImpl } from "./auth/login-flow.js";
 import { deploymentOutputForBlueprint, listFormatOffers, readAdminConfig } from "./admin-config.js";
+import { assertAdminBootstrap } from "./admin-bootstrap-gate.js";
 
 // Re-export the optional-feature Durable Objects + entrypoints so they can be bound in wrangler.
 export { PendingLogin, LoginConnectCallbackImpl };
@@ -31,6 +32,12 @@ import { createWorkshopLogger } from "./observability";
 import { wrapDoStubForTelemetry } from "./do-telemetry";
 
 const logger = createWorkshopLogger("workshop.server");
+function adminBootstrapMaintenanceResponse(): Response {
+  return new Response("Deployment initialization pending.\n", {
+    status: 503,
+    headers: {"content-type": "text/plain; charset=utf-8"},
+  });
+}
 
 // Set once we've asked the AdminSettings DO to install the bundled format blueprints (see the
 // fetch handler), so later requests skip the call. The DO holds the real answer.
@@ -788,6 +795,12 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
 
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext) {
+    try {
+      await assertAdminBootstrap(env, ctx);
+    } catch {
+      return adminBootstrapMaintenanceResponse();
+    }
+
     let url = new URL(req.url);
 
     if (url.pathname === SITE_LOGO_PATH) {
