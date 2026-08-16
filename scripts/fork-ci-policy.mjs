@@ -29,22 +29,42 @@ const POLICY_ACTIVITY_TYPES = [
   "synchronize",
   "reopened",
   "ready_for_review",
+  "edited",
 ];
 const CHECKOUT_ACTION = "actions/checkout";
 const POLICY_BASE_SHA = "${{ github.event.pull_request.base.sha }}";
 const POLICY_PR_NUMBER = "${{ github.event.pull_request.number }}";
+const POLICY_HEAD_SHA = "${{ github.event.pull_request.head.sha }}";
 const POLICY_CONCURRENCY = "${{ github.workflow }}-${{ github.event.pull_request.number }}";
-const POLICY_FETCH =
-  'git fetch --no-tags origin "refs/pull/${PR_NUMBER}/head:refs/remotes/policy/pr-head"';
-const POLICY_TEST = "node --test scripts/fork-ci-policy.test.js";
-const POLICY_CHECK =
-  "node scripts/fork-ci-policy.mjs --revision refs/remotes/policy/pr-head --base-revision HEAD";
-const POLICY_NUMBER_CHECK = [
+const POLICY_INPUT_CHECK = [
   'if ! [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]; then',
-  'echo "Invalid pull request number" >&2',
+  'echo "Invalid pull request event" >&2',
+  "exit 1",
+  "fi",
+  'if ! [[ "$HEAD_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then',
+  'echo "Invalid pull request event" >&2',
   "exit 1",
   "fi",
 ].join("\n");
+const POLICY_FETCH = [
+  'if ! git fetch --no-tags origin "refs/pull/${PR_NUMBER}/head:refs/remotes/policy/pr-head" >/dev/null 2>&1; then',
+  'echo "Pull request head validation failed" >&2',
+  "exit 1",
+  "fi",
+].join("\n");
+const POLICY_HEAD_CHECK = [
+  'fetched_head="$(git rev-parse --verify \'refs/remotes/policy/pr-head^{commit}\' 2>/dev/null)" || {',
+  'echo "Pull request head validation failed" >&2',
+  "exit 1",
+  "}",
+  'if [[ "$fetched_head" != "$HEAD_SHA" ]]; then',
+  'echo "Pull request head validation failed" >&2',
+  "exit 1",
+  "fi",
+].join("\n");
+const POLICY_TEST = "node --test scripts/fork-ci-policy.test.js";
+const POLICY_CHECK =
+  'node scripts/fork-ci-policy.mjs --revision "$HEAD_SHA" --base-revision HEAD';
 const GENERIC_REVISION_DIAGNOSTIC = "pull request policy validation failed";
 const GIT_OPTIONS = {
   encoding: "utf8",
@@ -243,6 +263,26 @@ function validatePolicyTriggers(lines, filePath, diagnostics) {
   const trigger = events[0];
   const triggerEnd = blockEnd(lines, trigger.index, trigger.indent);
   const triggerKeys = directKeys(lines, trigger.index, triggerEnd, trigger.indent);
+  const branches = triggerKeys.find(({ key }) => key === "branches");
+  const branchNames = branches?.value === ""
+    ? listValues(
+        lines,
+        branches.index,
+        Math.min(blockEnd(lines, branches.index, branches.indent), triggerEnd),
+        branches.indent,
+      )
+    : [];
+  if (
+    triggerKeys.length !== 2 ||
+    !branches ||
+    branchNames.length !== 1 ||
+    branchNames[0] !== "main"
+  ) {
+    diagnostics.push(
+      diagnostic(filePath, trigger.index + 1, "branches must be exactly main"),
+    );
+  }
+
   const types = triggerKeys.find(({ key }) => key === "types");
   const activityTypes = types?.value === ""
     ? listValues(
@@ -253,7 +293,7 @@ function validatePolicyTriggers(lines, filePath, diagnostics) {
       )
     : [];
   if (
-    triggerKeys.length !== 1 ||
+    triggerKeys.length !== 2 ||
     !types ||
     activityTypes.length !== POLICY_ACTIVITY_TYPES.length ||
     activityTypes.some((value, index) => value !== POLICY_ACTIVITY_TYPES[index])
@@ -464,11 +504,13 @@ function validatePolicyStructure(lines, filePath, diagnostics) {
     ? directKeys(lines, env.index, blockEnd(lines, env.index, env.indent), env.indent)
     : [];
   if (
-    envKeys.length !== 1 ||
+    envKeys.length !== 2 ||
     envKeys[0].key !== "PR_NUMBER" ||
-    unquote(envKeys[0].value) !== POLICY_PR_NUMBER
+    unquote(envKeys[0].value) !== POLICY_PR_NUMBER ||
+    envKeys[1].key !== "HEAD_SHA" ||
+    unquote(envKeys[1].value) !== POLICY_HEAD_SHA
   ) {
-    diagnostics.push(diagnostic(filePath, policyJob.index + 1, "policy PR number source is invalid"));
+    diagnostics.push(diagnostic(filePath, policyJob.index + 1, "policy event sources are invalid"));
   }
 
   validatePolicyCommands(lines, filePath, diagnostics);
@@ -493,7 +535,13 @@ function validatePolicyCommands(lines, filePath, diagnostics) {
       commands.push(runCommand(lines, index));
     }
   }
-  const expected = [POLICY_NUMBER_CHECK, POLICY_FETCH, POLICY_TEST, POLICY_CHECK];
+  const expected = [
+    POLICY_INPUT_CHECK,
+    POLICY_FETCH,
+    POLICY_HEAD_CHECK,
+    POLICY_TEST,
+    POLICY_CHECK,
+  ];
   if (
     commands.length !== expected.length ||
     commands.some((command, index) => command !== expected[index])

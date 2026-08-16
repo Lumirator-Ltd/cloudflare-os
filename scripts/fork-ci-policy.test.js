@@ -57,11 +57,14 @@ const ACCEPTED_POLICY = `name: Policy
 
 on:
   pull_request_target:
+    branches:
+      - main
     types:
       - opened
       - synchronize
       - reopened
       - ready_for_review
+      - edited
 
 permissions:
   contents: read
@@ -77,6 +80,7 @@ jobs:
     timeout-minutes: 5
     env:
       PR_NUMBER: \${{ github.event.pull_request.number }}
+      HEAD_SHA: \${{ github.event.pull_request.head.sha }}
     steps:
       - name: Check out trusted base
         uses: actions/checkout@${SHA}
@@ -84,21 +88,40 @@ jobs:
           ref: \${{ github.event.pull_request.base.sha }}
           persist-credentials: false
 
-      - name: Validate pull request number
+      - name: Validate event inputs
         run: |
           if ! [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
-            echo "Invalid pull request number" >&2
+            echo "Invalid pull request event" >&2
+            exit 1
+          fi
+          if ! [[ "$HEAD_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "Invalid pull request event" >&2
             exit 1
           fi
 
       - name: Fetch candidate as Git data
-        run: git fetch --no-tags origin "refs/pull/\${PR_NUMBER}/head:refs/remotes/policy/pr-head"
+        run: |
+          if ! git fetch --no-tags origin "refs/pull/\${PR_NUMBER}/head:refs/remotes/policy/pr-head" >/dev/null 2>&1; then
+            echo "Pull request head validation failed" >&2
+            exit 1
+          fi
+
+      - name: Bind candidate to event head
+        run: |
+          fetched_head="$(git rev-parse --verify 'refs/remotes/policy/pr-head^{commit}' 2>/dev/null)" || {
+            echo "Pull request head validation failed" >&2
+            exit 1
+          }
+          if [[ "$fetched_head" != "$HEAD_SHA" ]]; then
+            echo "Pull request head validation failed" >&2
+            exit 1
+          fi
 
       - name: Test trusted policy
         run: node --test scripts/fork-ci-policy.test.js
 
       - name: Check candidate policy
-        run: node scripts/fork-ci-policy.mjs --revision refs/remotes/policy/pr-head --base-revision HEAD
+        run: node scripts/fork-ci-policy.mjs --revision "$HEAD_SHA" --base-revision HEAD
 `;
 
 function validate(text, filePath = CI_PATH) {
@@ -190,6 +213,132 @@ async function runPolicyCli(args, env = process.env) {
   });
 }
 
+function workflowRunCommands(text) {
+  const lines = text.split(/\r?\n/);
+  const commands = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const match = lines[index].match(/^\s+run:\s*(.*)$/);
+    if (!match) continue;
+    if (match[1] !== "|") {
+      commands.push(match[1]);
+      continue;
+    }
+
+    const indent = lines[index].match(/^ */)[0].length;
+    const commandLines = [];
+    while (index + 1 < lines.length) {
+      const next = lines[index + 1];
+      if (next.trim() && next.match(/^ */)[0].length <= indent) break;
+      index += 1;
+      commandLines.push(next);
+    }
+    const commandIndent = Math.min(
+      ...commandLines.filter((line) => line.trim()).map((line) => line.match(/^ */)[0].length),
+    );
+    commands.push(commandLines.map((line) => line.slice(commandIndent)).join("\n"));
+  }
+  return commands;
+}
+
+async function runShell(command, repository, env) {
+  return await new Promise((resolve, reject) => {
+    const child = spawn("/bin/bash", ["-c", command], {
+      cwd: repository,
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.on("error", reject);
+    child.on("close", (code) => resolve({ code, stdout, stderr }));
+  });
+}
+
+async function runRepositoryPolicy(repository, env) {
+  const workflow = await readFile(
+    path.resolve(import.meta.dirname, "..", ".github/workflows/policy.yml"),
+    "utf8",
+  );
+  let stdout = "";
+  let stderr = "";
+  for (const command of workflowRunCommands(workflow)) {
+    const result = await runShell(command, repository, env);
+    stdout += result.stdout;
+    stderr += result.stderr;
+    if (result.code !== 0) return { code: result.code, stdout, stderr };
+  }
+  return { code: 0, stdout, stderr };
+}
+
+async function withPolicyExecutionFixture(callback) {
+  const repository = await mkdtemp(path.join(tmpdir(), "fork-ci-policy-execution-"));
+  const checkerLog = path.join(repository, "checker-log.json");
+  try {
+    await git(repository, "init", "--quiet");
+    await git(repository, "config", "user.email", "policy@example.invalid");
+    await git(repository, "config", "user.name", "Policy Test");
+    await writeRepositoryFile(
+      repository,
+      "scripts/fork-ci-policy.mjs",
+      'import { writeFileSync } from "node:fs";\nwriteFileSync(process.env.CHECKER_LOG, JSON.stringify(process.argv.slice(2)));\n',
+    );
+    await writeRepositoryFile(
+      repository,
+      "scripts/fork-ci-policy.test.js",
+      'const test = require("node:test");\ntest("trusted policy", () => {});\n',
+    );
+    await writeRepositoryFile(repository, "src/value.js", "export const value = 1;\n");
+    await git(repository, "add", "--all");
+    await git(repository, "commit", "--quiet", "-m", "base");
+    const baseRevision = await git(repository, "rev-parse", "HEAD");
+    await writeRepositoryFile(repository, "src/value.js", "export const value = 2;\n");
+    await git(repository, "add", "--all");
+    await git(repository, "commit", "--quiet", "-m", "event head");
+    const eventHead = await git(repository, "rev-parse", "HEAD");
+    await git(repository, "remote", "add", "origin", repository);
+
+    await callback({
+      repository,
+      checkerLog,
+      baseRevision,
+      eventHead,
+      async movePullRef(contents = "export const value = 'moved';\n") {
+        await writeRepositoryFile(repository, "src/value.js", contents);
+        await git(repository, "add", "--all");
+        await git(repository, "commit", "--quiet", "-m", "moved head");
+        const movedHead = await git(repository, "rev-parse", "HEAD");
+        await git(repository, "update-ref", "refs/pull/17/head", movedHead);
+        await git(repository, "checkout", "--quiet", "--detach", baseRevision);
+        return movedHead;
+      },
+      async useEventHead() {
+        await git(repository, "update-ref", "refs/pull/17/head", eventHead);
+        await git(repository, "checkout", "--quiet", "--detach", baseRevision);
+      },
+      env(headSha) {
+        const values = {
+          ...process.env,
+          PR_NUMBER: "17",
+          CHECKER_LOG: checkerLog,
+        };
+        if (headSha !== undefined) values.HEAD_SHA = headSha;
+        else delete values.HEAD_SHA;
+        return values;
+      },
+    });
+  } finally {
+    await rm(repository, { recursive: true, force: true });
+  }
+}
+
 test("a one-workflow directory fails because policy.yml is missing", async () => {
   await withWorkflowDirectory({ "ci.yml": ACCEPTED_CI }, async (directory) => {
     assert.deepEqual(await policy.validateWorkflowDirectory(directory), [
@@ -251,7 +400,7 @@ test("ci.yml requires only pull_request and push to main", async (t) => {
   });
 });
 
-test("policy.yml rejects every other trigger and activity contract", async (t) => {
+test("policy.yml requires only pull_request_target to main with exact activities", async (t) => {
   await t.test("rejects another trigger", () => {
     const workflow = ACCEPTED_POLICY.replace(
       "  pull_request_target:\n",
@@ -263,7 +412,42 @@ test("policy.yml rejects every other trigger and activity contract", async (t) =
     );
   });
 
-  await t.test("rejects a missing activity", () => {
+  await t.test("rejects a missing main branch filter", () => {
+    const workflow = ACCEPTED_POLICY.replace("    branches:\n      - main\n", "");
+    assert.match(
+      validate(workflow, POLICY_PATH).join("\n"),
+      /branches must be exactly main/,
+    );
+  });
+
+  await t.test("rejects an alternate base branch", () => {
+    const workflow = ACCEPTED_POLICY.replace("      - main", "      - release");
+    assert.match(
+      validate(workflow, POLICY_PATH).join("\n"),
+      /branches must be exactly main/,
+    );
+  });
+
+  await t.test("rejects an extra base branch", () => {
+    const workflow = ACCEPTED_POLICY.replace(
+      "      - main",
+      "      - main\n      - release",
+    );
+    assert.match(
+      validate(workflow, POLICY_PATH).join("\n"),
+      /branches must be exactly main/,
+    );
+  });
+
+  await t.test("requires edited", () => {
+    const workflow = ACCEPTED_POLICY.replace("      - edited\n", "");
+    assert.match(
+      validate(workflow, POLICY_PATH).join("\n"),
+      /activity types must be exactly/,
+    );
+  });
+
+  await t.test("rejects another missing activity", () => {
     const workflow = ACCEPTED_POLICY.replace("      - ready_for_review\n", "");
     assert.match(
       validate(workflow, POLICY_PATH).join("\n"),
@@ -273,8 +457,8 @@ test("policy.yml rejects every other trigger and activity contract", async (t) =
 
   await t.test("rejects an extra activity", () => {
     const workflow = ACCEPTED_POLICY.replace(
-      "      - ready_for_review",
-      "      - ready_for_review\n      - closed",
+      "      - edited",
+      "      - edited\n      - closed",
     );
     assert.match(
       validate(workflow, POLICY_PATH).join("\n"),
@@ -306,8 +490,8 @@ test("policy workflow rejects untrusted execution capabilities", async (t) => {
   const cases = [
     [
       "candidate checkout command",
-      "run: git fetch --no-tags origin",
-      "run: git checkout refs/remotes/policy/pr-head",
+      "if ! git fetch --no-tags origin",
+      "git checkout refs/remotes/policy/pr-head",
     ],
     [
       "local action",
@@ -372,23 +556,31 @@ test("policy workflow rejects untrusted execution capabilities", async (t) => {
   }
 });
 
-test("policy workflow requires the trusted fetch and checker sequence", async (t) => {
+test("policy workflow requires the trusted fetch, binding, and checker sequence", async (t) => {
   const cases = [
+    ["event head source", "HEAD_SHA: ${{ github.event.pull_request.head.sha }}", "HEAD_SHA: HEAD"],
     ["numeric PR validation", '[[ "$PR_NUMBER" =~ ^[0-9]+$ ]]', "true"],
+    ["exact head SHA validation", '[[ "$HEAD_SHA" =~ ^[0-9a-fA-F]{40}$ ]]', "true"],
     [
       "quoted pull-ref fetch",
       '"refs/pull/${PR_NUMBER}/head:refs/remotes/policy/pr-head"',
       "refs/pull/${PR_NUMBER}/head:refs/remotes/policy/pr-head",
     ],
     [
+      "fetched commit resolution",
+      "git rev-parse --verify 'refs/remotes/policy/pr-head^{commit}'",
+      "git rev-parse --verify refs/remotes/policy/pr-head",
+    ],
+    ["exact event head equality", '[[ "$fetched_head" != "$HEAD_SHA" ]]', "false"],
+    [
       "trusted base test",
       "node --test scripts/fork-ci-policy.test.js",
       "node --test scripts/other.test.js",
     ],
     [
-      "revision checker invocation",
+      "quoted event head checker invocation",
+      'node scripts/fork-ci-policy.mjs --revision "$HEAD_SHA" --base-revision HEAD',
       "node scripts/fork-ci-policy.mjs --revision refs/remotes/policy/pr-head --base-revision HEAD",
-      "node scripts/fork-ci-policy.mjs",
     ],
   ];
 
@@ -401,6 +593,90 @@ test("policy workflow requires the trusted fetch and checker sequence", async (t
       assert.notDeepEqual(diagnostics, []);
     });
   }
+});
+
+test("trusted policy rejects missing and malformed HEAD_SHA before candidate inspection", async (t) => {
+  for (const [name, headSha] of [
+    ["missing", undefined],
+    ["malformed", "canary-malformed-head-sha"],
+  ]) {
+    await t.test(name, async () => {
+      await withPolicyExecutionFixture(async (fixture) => {
+        await fixture.useEventHead();
+        const result = await runRepositoryPolicy(fixture.repository, fixture.env(headSha));
+        assert.notEqual(result.code, 0);
+        await assert.rejects(access(fixture.checkerLog), { code: "ENOENT" });
+      });
+    });
+  }
+});
+
+test("trusted policy rejects a moved pull ref before candidate inspection", async () => {
+  await withPolicyExecutionFixture(async (fixture) => {
+    await fixture.movePullRef();
+    const result = await runRepositoryPolicy(
+      fixture.repository,
+      fixture.env(fixture.eventHead),
+    );
+    assert.notEqual(result.code, 0);
+    await assert.rejects(access(fixture.checkerLog), { code: "ENOENT" });
+  });
+});
+
+test("trusted policy accepts a fetched ref matching the event head", async () => {
+  await withPolicyExecutionFixture(async (fixture) => {
+    await fixture.useEventHead();
+    const result = await runRepositoryPolicy(
+      fixture.repository,
+      fixture.env(fixture.eventHead),
+    );
+    assert.equal(result.code, 0, result.stderr);
+  });
+});
+
+test("trusted policy invokes the checker with the quoted event head", async () => {
+  await withPolicyExecutionFixture(async (fixture) => {
+    await fixture.useEventHead();
+    const result = await runRepositoryPolicy(
+      fixture.repository,
+      fixture.env(fixture.eventHead),
+    );
+    assert.equal(result.code, 0, result.stderr);
+    assert.deepEqual(JSON.parse(await readFile(fixture.checkerLog, "utf8")), [
+      "--revision",
+      fixture.eventHead,
+      "--base-revision",
+      "HEAD",
+    ]);
+  });
+});
+
+test("trusted policy shell diagnostics do not disclose canary values", async () => {
+  const canaryRef = "canary-malformed-ref-value";
+  const canaryContent = "canary-candidate-content-value";
+  const canaryEnvironment = "canary-environment-value";
+  await withPolicyExecutionFixture(async (fixture) => {
+    await fixture.movePullRef(`${canaryContent}\n`);
+    const mismatch = await runRepositoryPolicy(fixture.repository, {
+      ...fixture.env(fixture.eventHead),
+      POLICY_CANARY: canaryEnvironment,
+    });
+    const malformed = await runRepositoryPolicy(fixture.repository, {
+      ...fixture.env(canaryRef),
+      POLICY_CANARY: canaryEnvironment,
+    });
+    assert.notEqual(mismatch.code, 0);
+    assert.notEqual(malformed.code, 0);
+    const output = `${mismatch.stdout}${mismatch.stderr}${malformed.stdout}${malformed.stderr}`;
+    for (const canary of [
+      fixture.eventHead,
+      canaryRef,
+      canaryContent,
+      canaryEnvironment,
+    ]) {
+      assert.equal(output.includes(canary), false);
+    }
+  });
 });
 
 test("both workflows require exactly contents read and pinned non-local actions", async (t) => {
