@@ -21,6 +21,7 @@ type AdminBootstrapMarker = {
   tenantId: string;
   schemaVersion: 1;
   digest: string;
+  status: "pending" | "complete";
 };
 
 function makeAdminSettingsStorage(storage: DurableObjectStorage) {
@@ -310,37 +311,63 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
       throw new Error("Invalid initial admin configuration.");
     }
     let digest = await initialAdminConfigDigest(initial);
+    let expectedConfig = {...DEFAULT_ADMIN_CONFIG, ...toAdminConfigPatch(initial)};
+    let expectedConfigSerialized = serializeAdminConfig(expectedConfig);
 
     await this.#serializeAdminConfigMutation(async () => {
-      let marker = this.storage.adminBootstrapMarker.get();
-      if (marker) {
-        if (marker.tenantId !== initial.tenantId) {
+      let priorConfig = this.#config();
+      let priorMarker = this.storage.adminBootstrapMarker.get();
+      let pendingMarker: AdminBootstrapMarker = {
+        tenantId: initial.tenantId,
+        schemaVersion: initial.schemaVersion,
+        digest,
+        status: "pending",
+      };
+
+      if (priorMarker) {
+        if (priorMarker.tenantId !== initial.tenantId) {
           throw new Error("Admin settings are already initialized for a different tenant.");
         }
-        if (marker.schemaVersion !== initial.schemaVersion || marker.digest !== digest) {
+        if (priorMarker.schemaVersion !== initial.schemaVersion || priorMarker.digest !== digest) {
           throw new Error("Admin settings are already initialized with a different configuration.");
         }
-        return;
-      }
-
-      let current = this.#config();
-      if (serializeAdminConfig(current) !== serializeAdminConfig(DEFAULT_ADMIN_CONFIG)) {
-        throw new Error("Admin settings contain unmarked non-default configuration.");
-      }
-
-      let next = {...current, ...toAdminConfigPatch(initial)};
-      this.storage.adminConfig.put(next);
-      try {
-        await this.env.BLUEPRINTS.put(ADMIN_CONFIG_KEY, serializeAdminConfig(next));
-        this.storage.adminBootstrapMarker.put({
-          tenantId: initial.tenantId,
-          schemaVersion: initial.schemaVersion,
-          digest,
+        if (priorMarker.status === "complete") return;
+        if (priorMarker.status !== "pending"
+            || serializeAdminConfig(priorConfig) !== expectedConfigSerialized) {
+          throw new Error("Pending admin settings initialization is inconsistent.");
+        }
+      } else {
+        if (serializeAdminConfig(priorConfig) !== serializeAdminConfig(DEFAULT_ADMIN_CONFIG)) {
+          throw new Error("Admin settings contain unmarked non-default configuration.");
+        }
+        this.storage.transaction(() => {
+          this.storage.adminConfig.put(expectedConfig);
+          this.storage.adminBootstrapMarker.put(pendingMarker);
         });
+      }
+
+      try {
+        await this.env.BLUEPRINTS.put(ADMIN_CONFIG_KEY, expectedConfigSerialized);
       } catch (error) {
-        this.storage.adminConfig.put(current);
+        this.storage.transaction(() => {
+          this.storage.adminConfig.put(priorConfig);
+          this.storage.adminBootstrapMarker.put(priorMarker);
+        });
         throw error;
       }
+
+      this.storage.transaction(() => {
+        let marker = this.storage.adminBootstrapMarker.get();
+        if (!marker
+            || marker.tenantId !== pendingMarker.tenantId
+            || marker.schemaVersion !== pendingMarker.schemaVersion
+            || marker.digest !== pendingMarker.digest
+            || marker.status !== "pending"
+            || serializeAdminConfig(this.#config()) !== expectedConfigSerialized) {
+          throw new Error("Pending admin settings initialization is inconsistent.");
+        }
+        this.storage.adminBootstrapMarker.put({...pendingMarker, status: "complete"});
+      });
     });
   }
 
