@@ -181,6 +181,41 @@ Or, for more sophisticated deployment, with your gatekeepers and potentially cod
 
 https://github.com/cloudflare/cloudflare-os-starter
 
+#### Optional first-run admin configuration
+
+Deployments may provide an `INITIAL_ADMIN_CONFIG` binding to initialize a restricted set of admin
+settings. Omitting it preserves the existing behavior. The binding value must be an object with
+exactly this closed V1 shape (missing or additional properties are rejected):
+
+```ts
+{
+  tenantId: string,        // 1–128 characters; stable for the deployment
+  schemaVersion: 1,
+  config: {
+    siteName: string,      // 0–40 characters
+    accentColor: string,   // #RGB or #RRGGBB
+    contextGatekeeper: "disabled" | "optional" | "enabled",
+    customGatekeeper: "disabled" | "optional" | "enabled",
+  },
+}
+```
+
+On genuinely fresh, default admin storage, this payload authoritatively sets those four values once.
+The tenant ID is immutable, and a stored SHA-256 digest covers the canonical V1 payload (property
+order does not matter). A later binding with a different tenant ID or canonical digest fails closed.
+Genuinely unmarked, non-default admin configuration also fails closed and is never adopted or
+overwritten. An interrupted `pending` initialization resumes only when its tenant, version, digest,
+and authoritative configuration all match; inconsistent state fails closed.
+
+All normal HTTP traffic and `ExternalMessageGateway` submissions await this initialization. On
+failure, HTTP receives a sanitized `503` maintenance response and the gateway rejects with the same
+generic maintenance error; underlying errors and payload values are not exposed. After bootstrap
+completes, administrators may change settings through `/admin`; those later changes are allowed and
+are not reconciled back to the bootstrap payload.
+
+This binding is deployment configuration, not a secret channel. Never put administrators, email
+addresses, secrets, agent instructions, connectors, formats, or arbitrary Gatekeeper IDs in it.
+
 ### Run locally
 
 To quickly run Cloudflare OS locally, [install pnpm](https://pnpm.io/), then do:
