@@ -59,6 +59,11 @@ test("accepts the single safe CI workflow", () => {
   assert.deepEqual(validate(ACCEPTED_WORKFLOW), []);
 });
 
+test("repository workflow directory satisfies the fork CI policy", async () => {
+  const directory = path.resolve(import.meta.dirname, "..", ".github/workflows");
+  assert.deepEqual(await validateWorkflowDirectory(directory), []);
+});
+
 test("only .github/workflows/ci.yml is allowed", async () => {
   await withWorkflowDirectory(
     { "ci.yml": ACCEPTED_WORKFLOW, "extra.yaml": ACCEPTED_WORKFLOW },
