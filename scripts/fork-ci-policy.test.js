@@ -226,6 +226,40 @@ test("rejects privileged credentials and credential persistence", async (t) => {
   }
 });
 
+test("rejects GitHub expressions referencing secrets", async (t) => {
+  const cases = [
+    ["single-quoted bracket notation", "${{ secrets['SINGLE_QUOTED_NAME'] }}"],
+    ["double-quoted bracket notation", '${{ secrets["DOUBLE_QUOTED_NAME"] }}'],
+    ["expression whitespace", "${{  secrets  [  'SPACED_NAME'  ]  }}"],
+    ["nested secret reference", "${{ format('{0}', secrets['NESTED_NAME']) }}"],
+    ["whole secrets context", "${{ toJSON(secrets) }}"],
+  ];
+
+  for (const [name, expression] of cases) {
+    await t.test(name, () => {
+      const workflow = ACCEPTED_WORKFLOW.replace(
+        "      - run: node --test",
+        `      - env:\n          VALUE: ${expression}\n        run: node --test`,
+      );
+      const secretLine =
+        workflow.split("\n").findIndex((line) => line.includes("VALUE:")) + 1;
+
+      assert.deepEqual(validate(workflow), [
+        `${WORKFLOW_PATH}:${secretLine}: secret expressions are not allowed`,
+      ]);
+    });
+  }
+});
+
+test("accepts prose and comments containing the word secrets", () => {
+  const workflow = ACCEPTED_WORKFLOW.replace(
+    "      - run: node --test",
+    '      # secrets are unavailable\n      - name: Explain secrets policy\n        run: echo "no secrets here"',
+  );
+
+  assert.deepEqual(validate(workflow), []);
+});
+
 test("requires non-local actions to use a 40-character hexadecimal SHA", async (t) => {
   for (const reference of [
     "actions/setup-node@v4",

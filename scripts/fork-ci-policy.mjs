@@ -286,7 +286,10 @@ function validateUses(lines, filePath, diagnostics) {
 function validateSensitiveValues(lines, filePath, diagnostics) {
   const checks = [
     [/\bid-token\s*:\s*["']?write["']?\b/i, "id-token: write is not allowed"],
-    [/\$\{\{\s*secrets\.[^}]+}}/i, "secret expressions are not allowed"],
+    [
+      /\$\{\{(?:(?!}}).)*\bsecrets\b(?:(?!}}).)*}}/i,
+      "secret expressions are not allowed",
+    ],
     [
       /\b(?:CLOUDFLARE|CF)_[A-Z0-9_]*(?:TOKEN|KEY|SECRET|ACCOUNT_ID|EMAIL)\b/i,
       "Cloudflare credential names are not allowed",
