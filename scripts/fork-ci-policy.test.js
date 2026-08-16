@@ -1,17 +1,33 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { execFile as execFileCallback, spawn } from "node:child_process";
+import {
+  access,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import test from "node:test";
 
-import {
-  validateWorkflowDirectory,
-  validateWorkflowText,
-} from "./fork-ci-policy.mjs";
+import * as policy from "./fork-ci-policy.mjs";
 
+const execFile = promisify(execFileCallback);
 const SHA = "0123456789abcdef0123456789abcdef01234567";
-const WORKFLOW_PATH = ".github/workflows/ci.yml";
-const ACCEPTED_WORKFLOW = `name: CI
+const CI_PATH = ".github/workflows/ci.yml";
+const POLICY_PATH = ".github/workflows/policy.yml";
+const SCRIPT_PATH = path.resolve(import.meta.dirname, "fork-ci-policy.mjs");
+const PROTECTED_PATHS = [
+  CI_PATH,
+  POLICY_PATH,
+  "scripts/fork-ci-policy.mjs",
+  "scripts/fork-ci-policy.test.js",
+];
+
+const ACCEPTED_CI = `name: CI
 
 on:
   push:
@@ -23,8 +39,10 @@ permissions:
   contents: read
 
 jobs:
-  test:
+  lint-and-build:
+    name: Lint and build
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Check out repository
         uses: actions/checkout@${SHA}
@@ -32,17 +50,63 @@ jobs:
           persist-credentials: false
       - name: Use a pinned action
         uses: example/action@${SHA.toUpperCase()}
-      - name: Use a local action
-        uses: ./.github/actions/example
-      - run: node --test
+      - run: node scripts/example.mjs
 `;
 
-function validate(text) {
-  return validateWorkflowText(text, WORKFLOW_PATH);
+const ACCEPTED_POLICY = `name: Policy
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+
+permissions:
+  contents: read
+
+concurrency:
+  group: \${{ github.workflow }}-\${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  policy:
+    name: Policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      PR_NUMBER: \${{ github.event.pull_request.number }}
+    steps:
+      - name: Check out trusted base
+        uses: actions/checkout@${SHA}
+        with:
+          ref: \${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+
+      - name: Validate pull request number
+        run: |
+          if ! [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
+            echo "Invalid pull request number" >&2
+            exit 1
+          fi
+
+      - name: Fetch candidate as Git data
+        run: git fetch --no-tags origin "refs/pull/\${PR_NUMBER}/head:refs/remotes/policy/pr-head"
+
+      - name: Test trusted policy
+        run: node --test scripts/fork-ci-policy.test.js
+
+      - name: Check candidate policy
+        run: node scripts/fork-ci-policy.mjs --revision refs/remotes/policy/pr-head --base-revision HEAD
+`;
+
+function validate(text, filePath = CI_PATH) {
+  return policy.validateWorkflowText(text, filePath);
 }
 
 async function withWorkflowDirectory(files, callback) {
-  const directory = await mkdtemp(path.join(tmpdir(), "fork-ci-policy-"));
+  const directory = await mkdtemp(path.join(tmpdir(), "fork-ci-policy-workflows-"));
   try {
     await Promise.all(
       Object.entries(files).map(([name, contents]) =>
@@ -55,269 +119,499 @@ async function withWorkflowDirectory(files, callback) {
   }
 }
 
-test("accepts the single safe CI workflow", () => {
-  assert.deepEqual(validate(ACCEPTED_WORKFLOW), []);
-});
+async function git(repository, ...args) {
+  const { stdout } = await execFile("git", ["-C", repository, ...args], {
+    encoding: "utf8",
+  });
+  return stdout.trim();
+}
 
-test("repository workflow directory satisfies the fork CI policy", async () => {
-  const directory = path.resolve(import.meta.dirname, "..", ".github/workflows");
-  assert.deepEqual(await validateWorkflowDirectory(directory), []);
-});
+async function writeRepositoryFile(repository, filePath, contents) {
+  const absolutePath = path.join(repository, filePath);
+  await mkdir(path.dirname(absolutePath), { recursive: true });
+  await writeFile(absolutePath, contents);
+}
 
-test("only .github/workflows/ci.yml is allowed", async () => {
-  await withWorkflowDirectory(
-    { "ci.yml": ACCEPTED_WORKFLOW, "extra.yaml": ACCEPTED_WORKFLOW },
-    async (directory) => {
-      assert.deepEqual(await validateWorkflowDirectory(directory), [
-        ".github/workflows/extra.yaml:1: only .github/workflows/ci.yml is allowed",
-      ]);
-    },
-  );
-});
+async function withGitFixture(mutate, callback) {
+  const repository = await mkdtemp(path.join(tmpdir(), "fork-ci-policy-git-"));
+  try {
+    await git(repository, "init", "--quiet");
+    await git(repository, "config", "user.email", "policy@example.invalid");
+    await git(repository, "config", "user.name", "Policy Test");
+    await writeRepositoryFile(repository, CI_PATH, ACCEPTED_CI);
+    await writeRepositoryFile(repository, POLICY_PATH, ACCEPTED_POLICY);
+    await writeRepositoryFile(repository, "scripts/fork-ci-policy.mjs", "export {};\n");
+    await writeRepositoryFile(repository, "scripts/fork-ci-policy.test.js", "export {};\n");
+    await writeRepositoryFile(repository, "src/existing.js", "export const value = 1;\n");
+    await git(repository, "add", "--all");
+    await git(repository, "commit", "--quiet", "-m", "base");
+    const baseRevision = await git(repository, "rev-parse", "HEAD");
 
-test("requires .github/workflows/ci.yml", async () => {
-  await withWorkflowDirectory({}, async (directory) => {
-    assert.deepEqual(await validateWorkflowDirectory(directory), [
-      ".github/workflows/ci.yml:1: required workflow is missing",
+    await mutate(repository);
+    await git(repository, "add", "--all");
+    await git(repository, "commit", "--quiet", "-m", "candidate");
+    const revision = await git(repository, "rev-parse", "HEAD");
+
+    assert.equal(typeof policy.validateGitRevision, "function");
+    await callback({
+      repository,
+      baseRevision,
+      revision,
+      diagnostics: await policy.validateGitRevision({
+        repository,
+        revision,
+        baseRevision,
+      }),
+    });
+  } finally {
+    await rm(repository, { recursive: true, force: true });
+  }
+}
+
+async function runPolicyCli(args, env = process.env) {
+  return await new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [SCRIPT_PATH, ...args], {
+      cwd: path.resolve(import.meta.dirname, ".."),
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.on("error", reject);
+    child.on("close", (code) => resolve({ code, stdout, stderr }));
+  });
+}
+
+test("a one-workflow directory fails because policy.yml is missing", async () => {
+  await withWorkflowDirectory({ "ci.yml": ACCEPTED_CI }, async (directory) => {
+    assert.deepEqual(await policy.validateWorkflowDirectory(directory), [
+      `${POLICY_PATH}:1: required workflow is missing`,
     ]);
   });
 });
 
-test("rejects every known forbidden workflow name", async (t) => {
-  const forbiddenNames = [
-    "bonk.yml",
-    "bonk-pr.yml",
-    "cla.yml",
-    "contribution-policy.yml",
-    "label-pr.yml",
+test("accepts exactly the trusted CI and policy workflows", async () => {
+  await withWorkflowDirectory(
+    { "ci.yml": ACCEPTED_CI, "policy.yml": ACCEPTED_POLICY },
+    async (directory) => {
+      assert.deepEqual(await policy.validateWorkflowDirectory(directory), []);
+    },
+  );
+});
+
+test("repository workflow directory satisfies the fork CI policy", async () => {
+  const directory = path.resolve(import.meta.dirname, "..", ".github/workflows");
+  assert.deepEqual(await policy.validateWorkflowDirectory(directory), []);
+});
+
+test("rejects any third workflow", async () => {
+  await withWorkflowDirectory(
+    {
+      "ci.yml": ACCEPTED_CI,
+      "policy.yml": ACCEPTED_POLICY,
+      "extra.yaml": ACCEPTED_CI,
+    },
+    async (directory) => {
+      const diagnostics = await policy.validateWorkflowDirectory(directory);
+      assert.equal(diagnostics.length, 1);
+      assert.match(diagnostics[0], /only ci\.yml and policy\.yml are allowed/);
+    },
+  );
+});
+
+test("pull_request_target is rejected by ci.yml and accepted only by policy.yml", () => {
+  const unsafeCi = ACCEPTED_CI.replace(
+    "  pull_request:\n",
+    "  pull_request:\n  pull_request_target:\n",
+  );
+  assert.match(validate(unsafeCi).join("\n"), /unsafe trigger pull_request_target/);
+  assert.deepEqual(validate(ACCEPTED_POLICY, POLICY_PATH), []);
+});
+
+test("ci.yml requires only pull_request and push to main", async (t) => {
+  await t.test("rejects another trigger", () => {
+    const workflow = ACCEPTED_CI.replace(
+      "  pull_request:\n",
+      "  pull_request:\n  workflow_dispatch:\n",
+    );
+    assert.match(validate(workflow).join("\n"), /trigger workflow_dispatch is not allowed/);
+  });
+
+  await t.test("rejects another push branch", () => {
+    const workflow = ACCEPTED_CI.replace("      - main", "      - release");
+    assert.match(validate(workflow).join("\n"), /push branches must be exactly main/);
+  });
+});
+
+test("policy.yml rejects every other trigger and activity contract", async (t) => {
+  await t.test("rejects another trigger", () => {
+    const workflow = ACCEPTED_POLICY.replace(
+      "  pull_request_target:\n",
+      "  pull_request_target:\n  workflow_dispatch:\n",
+    );
+    assert.match(
+      validate(workflow, POLICY_PATH).join("\n"),
+      /triggers must be exactly pull_request_target/,
+    );
+  });
+
+  await t.test("rejects a missing activity", () => {
+    const workflow = ACCEPTED_POLICY.replace("      - ready_for_review\n", "");
+    assert.match(
+      validate(workflow, POLICY_PATH).join("\n"),
+      /activity types must be exactly/,
+    );
+  });
+
+  await t.test("rejects an extra activity", () => {
+    const workflow = ACCEPTED_POLICY.replace(
+      "      - ready_for_review",
+      "      - ready_for_review\n      - closed",
+    );
+    assert.match(
+      validate(workflow, POLICY_PATH).join("\n"),
+      /activity types must be exactly/,
+    );
+  });
+});
+
+test("policy checkout must use the exact trusted base SHA", async (t) => {
+  for (const [name, replacement] of [
+    ["head SHA", "${{ github.event.pull_request.head.sha }}"],
+    ["merge ref", "refs/pull/${{ github.event.pull_request.number }}/merge"],
+    ["candidate ref", "refs/remotes/policy/pr-head"],
+  ]) {
+    await t.test(name, () => {
+      const workflow = ACCEPTED_POLICY.replace(
+        "${{ github.event.pull_request.base.sha }}",
+        replacement,
+      );
+      assert.match(
+        validate(workflow, POLICY_PATH).join("\n"),
+        /checkout must use the exact pull request base SHA/,
+      );
+    });
+  }
+});
+
+test("policy workflow rejects untrusted execution capabilities", async (t) => {
+  const cases = [
+    [
+      "candidate checkout command",
+      "run: git fetch --no-tags origin",
+      "run: git checkout refs/remotes/policy/pr-head",
+    ],
+    [
+      "local action",
+      `run: node --test scripts/fork-ci-policy.test.js`,
+      "uses: ./.github/actions/candidate",
+    ],
+    [
+      "setup-node action",
+      `run: node --test scripts/fork-ci-policy.test.js`,
+      `uses: actions/setup-node@${SHA}`,
+    ],
+    [
+      "package manager",
+      `run: node --test scripts/fork-ci-policy.test.js`,
+      "run: pnpm install --frozen-lockfile",
+    ],
+    [
+      "install command",
+      `run: node --test scripts/fork-ci-policy.test.js`,
+      "run: npm install",
+    ],
+    [
+      "build command",
+      `run: node --test scripts/fork-ci-policy.test.js`,
+      "run: node scripts/build.mjs",
+    ],
+    [
+      "candidate test command",
+      `run: node --test scripts/fork-ci-policy.test.js`,
+      "run: node --test candidate.test.js",
+    ],
+    [
+      "secret reference",
+      `run: node --test scripts/fork-ci-policy.test.js`,
+      "run: echo '${{ secrets['CANARY_SECRET_NAME'] }}'",
+    ],
+    [
+      "permissions override",
+      "    runs-on: ubuntu-latest",
+      "    permissions:\n      contents: write\n    runs-on: ubuntu-latest",
+    ],
+    [
+      "mutable action",
+      `actions/checkout@${SHA}`,
+      "actions/checkout@v4",
+    ],
+    [
+      "missing persist-credentials false",
+      "          persist-credentials: false\n",
+      "",
+    ],
   ];
 
-  for (const name of forbiddenNames) {
-    await t.test(name, async () => {
-      await withWorkflowDirectory(
-        { "ci.yml": ACCEPTED_WORKFLOW, [name]: ACCEPTED_WORKFLOW },
-        async (directory) => {
-          assert.deepEqual(await validateWorkflowDirectory(directory), [
-            `.github/workflows/${name}:1: only .github/workflows/ci.yml is allowed`,
-          ]);
+  for (const [name, target, replacement] of cases) {
+    await t.test(name, () => {
+      const diagnostics = validate(
+        ACCEPTED_POLICY.replace(target, replacement),
+        POLICY_PATH,
+      );
+      assert.notDeepEqual(diagnostics, []);
+    });
+  }
+});
+
+test("policy workflow requires the trusted fetch and checker sequence", async (t) => {
+  const cases = [
+    ["numeric PR validation", '[[ "$PR_NUMBER" =~ ^[0-9]+$ ]]', "true"],
+    [
+      "quoted pull-ref fetch",
+      '"refs/pull/${PR_NUMBER}/head:refs/remotes/policy/pr-head"',
+      "refs/pull/${PR_NUMBER}/head:refs/remotes/policy/pr-head",
+    ],
+    [
+      "trusted base test",
+      "node --test scripts/fork-ci-policy.test.js",
+      "node --test scripts/other.test.js",
+    ],
+    [
+      "revision checker invocation",
+      "node scripts/fork-ci-policy.mjs --revision refs/remotes/policy/pr-head --base-revision HEAD",
+      "node scripts/fork-ci-policy.mjs",
+    ],
+  ];
+
+  for (const [name, target, replacement] of cases) {
+    await t.test(name, () => {
+      const diagnostics = validate(
+        ACCEPTED_POLICY.replace(target, replacement),
+        POLICY_PATH,
+      );
+      assert.notDeepEqual(diagnostics, []);
+    });
+  }
+});
+
+test("both workflows require exactly contents read and pinned non-local actions", async (t) => {
+  for (const [filePath, workflow] of [
+    [CI_PATH, ACCEPTED_CI],
+    [POLICY_PATH, ACCEPTED_POLICY],
+  ]) {
+    await t.test(filePath, async (t) => {
+      await t.test("rejects write permissions", () => {
+        assert.match(
+          validate(workflow.replace("contents: read", "contents: write"), filePath).join(
+            "\n",
+          ),
+          /permissions must be exactly contents: read/,
+        );
+      });
+      await t.test("rejects a mutable action", () => {
+        assert.match(
+          validate(workflow.replace(`actions/checkout@${SHA}`, "actions/checkout@v4"), filePath).join(
+            "\n",
+          ),
+          /40-character hexadecimal SHA/,
+        );
+      });
+    });
+  }
+});
+
+test("both workflows reject dot and bracket secret references and Cloudflare credentials", async (t) => {
+  const expressions = [
+    "${{ secrets.DEPLOY_TOKEN }}",
+    "${{ secrets['SINGLE_QUOTED_NAME'] }}",
+    '${{ secrets["DOUBLE_QUOTED_NAME"] }}',
+    "${{ toJSON(secrets) }}",
+  ];
+
+  for (const expression of expressions) {
+    await t.test(expression.replaceAll(/[A-Z_]+/g, "VALUE"), () => {
+      const workflow = ACCEPTED_CI.replace(
+        "      - run: node scripts/example.mjs",
+        `      - env:\n          VALUE: ${expression}\n        run: node scripts/example.mjs`,
+      );
+      assert.match(validate(workflow).join("\n"), /secret expressions are not allowed/);
+    });
+  }
+
+  assert.match(
+    validate(ACCEPTED_CI.replace("node scripts/example.mjs", "echo CLOUDFLARE_API_TOKEN")).join(
+      "\n",
+    ),
+    /Cloudflare credential names are not allowed/,
+  );
+});
+
+test("requires every checkout to disable persisted credentials", () => {
+  const workflow = ACCEPTED_CI.replace(
+    "        with:\n          persist-credentials: false\n",
+    "",
+  );
+  assert.match(
+    validate(workflow).join("\n"),
+    /actions\/checkout must set persist-credentials: false/,
+  );
+});
+
+test("trusted Git revisions accept only fixed policy refs and object IDs", () => {
+  assert.equal(policy.isTrustedGitRevision("HEAD"), true);
+  assert.equal(policy.isTrustedGitRevision("refs/remotes/policy/pr-head"), true);
+  assert.equal(policy.isTrustedGitRevision(SHA), true);
+  assert.equal(policy.isTrustedGitRevision("refs/pull/1/head"), false);
+  assert.equal(policy.isTrustedGitRevision("--upload-pack=canary"), false);
+});
+
+test("revision validation accepts ordinary source changes with protected files unchanged", async () => {
+  await withGitFixture(
+    async (repository) => {
+      await writeRepositoryFile(repository, "src/existing.js", "export const value = 2;\n");
+    },
+    async ({ diagnostics }) => {
+      assert.deepEqual(diagnostics, []);
+    },
+  );
+});
+
+test("revision validation rejects modification and deletion of every protected file", async (t) => {
+  for (const protectedPath of PROTECTED_PATHS) {
+    await t.test(`modifies ${protectedPath}`, async () => {
+      await withGitFixture(
+        async (repository) => {
+          const contents = await readFile(path.join(repository, protectedPath), "utf8");
+          await writeRepositoryFile(repository, protectedPath, `${contents}\n`);
+        },
+        async ({ diagnostics }) => {
+          assert.notDeepEqual(diagnostics, []);
+        },
+      );
+    });
+
+    await t.test(`deletes ${protectedPath}`, async () => {
+      await withGitFixture(
+        async (repository) => {
+          await rm(path.join(repository, protectedPath));
+        },
+        async ({ diagnostics }) => {
+          assert.notDeepEqual(diagnostics, []);
         },
       );
     });
   }
 });
 
-test("rejects unsafe workflow triggers", async (t) => {
-  for (const trigger of [
-    "pull_request_target",
-    "issue_comment",
-    "issues",
-    "workflow_run",
-    "schedule",
-  ]) {
-    await t.test(trigger, () => {
-      const workflow = ACCEPTED_WORKFLOW.replace(
+test("revision validation reads candidate workflows as inert data", async () => {
+  await withGitFixture(
+    async (repository) => {
+      const workflow = ACCEPTED_CI.replace(
         "  pull_request:\n",
-        `  pull_request:\n  ${trigger}:\n`,
+        "  pull_request:\n  pull_request_target:\n",
       );
-      assert.match(validate(workflow).join("\n"), new RegExp(`unsafe trigger ${trigger}`));
-    });
-  }
-});
-
-test("rejects triggers other than pull_request and push", () => {
-  const workflow = ACCEPTED_WORKFLOW.replace(
-    "  pull_request:\n",
-    "  pull_request:\n  workflow_dispatch:\n",
+      await writeRepositoryFile(repository, CI_PATH, workflow);
+    },
+    async ({ repository, revision }) => {
+      const diagnostics = await policy.validateGitRevision({
+        repository,
+        revision,
+        baseRevision: revision,
+      });
+      assert.notDeepEqual(diagnostics, []);
+    },
   );
-  assert.match(validate(workflow).join("\n"), /trigger workflow_dispatch is not allowed/);
 });
 
-test("requires push to be scoped only to main", async (t) => {
-  await t.test("rejects another branch", () => {
-    const workflow = ACCEPTED_WORKFLOW.replace("      - main", "      - release");
-    assert.match(validate(workflow).join("\n"), /push branches must be exactly main/);
-  });
-
-  await t.test("rejects an additional branch", () => {
-    const workflow = ACCEPTED_WORKFLOW.replace(
-      "      - main",
-      "      - main\n      - release",
-    );
-    assert.match(validate(workflow).join("\n"), /push branches must be exactly main/);
-  });
-
-  await t.test("rejects an inline push mapping", () => {
-    const workflow = ACCEPTED_WORKFLOW.replace(
-      "  push:\n    branches:\n      - main",
-      "  push: { branches: [main] }",
-    );
-    assert.match(validate(workflow).join("\n"), /push branches must be exactly main/);
-  });
-});
-
-test("requires exactly top-level contents: read permissions", async (t) => {
-  await t.test("rejects write access", () => {
-    const workflow = ACCEPTED_WORKFLOW.replace("contents: read", "contents: write");
-    assert.match(validate(workflow).join("\n"), /permissions must be exactly contents: read/);
-  });
-
-  await t.test("rejects additional permissions", () => {
-    const workflow = ACCEPTED_WORKFLOW.replace(
-      "  contents: read",
-      "  contents: read\n  actions: read",
-    );
-    assert.match(validate(workflow).join("\n"), /permissions must be exactly contents: read/);
-  });
-
-  await t.test("rejects missing permissions", () => {
-    const workflow = ACCEPTED_WORKFLOW.replace(
-      "permissions:\n  contents: read\n\n",
-      "",
-    );
-    assert.match(validate(workflow).join("\n"), /permissions must be exactly contents: read/);
-  });
-
-  await t.test("rejects a job-level override", () => {
-    const workflow = ACCEPTED_WORKFLOW.replace(
-      "    runs-on: ubuntu-latest",
-      "    permissions:\n      contents: read\n    runs-on: ubuntu-latest",
-    );
-    assert.match(validate(workflow).join("\n"), /job-level permissions are not allowed/);
-  });
-});
-
-test("rejects privileged credentials and credential persistence", async (t) => {
-  const cases = [
-    ["id-token write", "  contents: read\n  id-token: write", /id-token: write is not allowed/],
-    [
-      "GitHub secret expression",
-      "      - run: echo '${{ secrets.DEPLOY_TOKEN }}'",
-      /secret expressions are not allowed/,
-    ],
-    [
-      "Cloudflare API token name",
-      "      - run: echo CLOUDFLARE_API_TOKEN",
-      /Cloudflare credential names are not allowed/,
-    ],
-    [
-      "Cloudflare account ID name",
-      "      - run: echo CLOUDFLARE_ACCOUNT_ID",
-      /Cloudflare credential names are not allowed/,
-    ],
-    [
-      "persisted checkout credentials",
-      "          persist-credentials: true",
-      /persist-credentials: true is not allowed/,
-    ],
-  ];
-
-  for (const [name, replacement, expected] of cases) {
-    await t.test(name, () => {
-      const workflow = ACCEPTED_WORKFLOW.replace(
-        name === "id-token write"
-          ? "  contents: read"
-          : name === "persisted checkout credentials"
-            ? "          persist-credentials: false"
-            : "      - run: node --test",
-        replacement,
-      );
-      assert.match(validate(workflow).join("\n"), expected);
-    });
-  }
-});
-
-test("rejects GitHub expressions referencing secrets", async (t) => {
-  const cases = [
-    ["single-quoted bracket notation", "${{ secrets['SINGLE_QUOTED_NAME'] }}"],
-    ["double-quoted bracket notation", '${{ secrets["DOUBLE_QUOTED_NAME"] }}'],
-    ["expression whitespace", "${{  secrets  [  'SPACED_NAME'  ]  }}"],
-    ["nested secret reference", "${{ format('{0}', secrets['NESTED_NAME']) }}"],
-    ["whole secrets context", "${{ toJSON(secrets) }}"],
-  ];
-
-  for (const [name, expression] of cases) {
-    await t.test(name, () => {
-      const workflow = ACCEPTED_WORKFLOW.replace(
-        "      - run: node --test",
-        `      - env:\n          VALUE: ${expression}\n        run: node --test`,
-      );
-      const secretLine =
-        workflow.split("\n").findIndex((line) => line.includes("VALUE:")) + 1;
-
-      assert.deepEqual(validate(workflow), [
-        `${WORKFLOW_PATH}:${secretLine}: secret expressions are not allowed`,
-      ]);
-    });
-  }
-});
-
-test("accepts prose and comments containing the word secrets", () => {
-  const workflow = ACCEPTED_WORKFLOW.replace(
-    "      - run: node --test",
-    '      # secrets are unavailable\n      - name: Explain secrets policy\n        run: echo "no secrets here"',
+test("revision validation rejects every added workflow", async () => {
+  await withGitFixture(
+    async (repository) => {
+      await writeRepositoryFile(repository, ".github/workflows/extra.yml", ACCEPTED_CI);
+    },
+    async ({ diagnostics }) => {
+      assert.notDeepEqual(diagnostics, []);
+    },
   );
-
-  assert.deepEqual(validate(workflow), []);
 });
 
-test("requires non-local actions to use a 40-character hexadecimal SHA", async (t) => {
-  for (const reference of [
-    "actions/setup-node@v4",
-    "actions/setup-node@0123456",
-    "actions/setup-node@zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
-  ]) {
-    await t.test(reference, () => {
-      const workflow = ACCEPTED_WORKFLOW.replace(
-        `example/action@${SHA.toUpperCase()}`,
-        reference,
+test("revision validation never executes or imports candidate scripts", async () => {
+  let sentinel;
+  await withGitFixture(
+    async (repository) => {
+      sentinel = path.join(repository, "candidate-executed");
+      await writeRepositoryFile(
+        repository,
+        "scripts/candidate-canary.mjs",
+        `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(sentinel)}, "executed");\n`,
       );
-      assert.match(validate(workflow).join("\n"), /must use a 40-character hexadecimal SHA/);
-    });
-  }
+      await writeRepositoryFile(repository, "src/ordinary-change.js", "export const ok = true;\n");
+    },
+    async ({ diagnostics }) => {
+      assert.deepEqual(diagnostics, []);
+      await assert.rejects(access(sentinel), { code: "ENOENT" });
+    },
+  );
 });
 
-test("requires every checkout step to disable persisted credentials", async (t) => {
-  await t.test("rejects a missing setting", () => {
-    const workflow = ACCEPTED_WORKFLOW.replace(
-      "        with:\n          persist-credentials: false\n",
-      "",
-    );
-    assert.match(
-      validate(workflow).join("\n"),
-      /actions\/checkout must set persist-credentials: false/,
-    );
-  });
-
-  await t.test("rejects a non-false setting", () => {
-    const workflow = ACCEPTED_WORKFLOW.replace(
-      "persist-credentials: false",
-      'persist-credentials: "false"',
-    );
-    assert.match(
-      validate(workflow).join("\n"),
-      /actions\/checkout must set persist-credentials: false/,
-    );
-  });
-});
-
-test("diagnostics use stable relative paths and lines without environment values", () => {
-  const environmentValue = "must-not-appear-in-diagnostics";
-  process.env.CLOUDFLARE_API_TOKEN = environmentValue;
+test("revision and CLI diagnostics never disclose untrusted inputs", async () => {
+  const canaryRef = "--canary-ref-value";
+  const environmentValue = "canary-environment-value";
+  const secretName = "CANARY_CREDENTIAL_NAME";
+  const secretValue = "canary-candidate-file-value";
+  process.env.POLICY_CANARY = environmentValue;
   try {
-    const workflow = ACCEPTED_WORKFLOW.replace(
-      "      - run: node --test",
-      "      - run: echo '${{ secrets.PRIVATE_VALUE }}'",
-    );
-    const diagnostics = validate(workflow);
-    const secretLine = workflow.split("\n").findIndex((line) => line.includes("secrets.")) + 1;
+    assert.equal(typeof policy.validateGitRevision, "function");
+    const invalidDiagnostics = await policy.validateGitRevision({
+      repository: process.cwd(),
+      revision: canaryRef,
+      baseRevision: "HEAD",
+    });
+    assert.notDeepEqual(invalidDiagnostics, []);
 
-    assert.equal(
-      diagnostics.find((diagnostic) => diagnostic.includes("secret expressions")),
-      `${WORKFLOW_PATH}:${secretLine}: secret expressions are not allowed`,
+    await withGitFixture(
+      async (repository) => {
+        await writeRepositoryFile(
+          repository,
+          `.github/workflows/${secretName}.yml`,
+          `name: ${secretValue}\nrun: \${{ secrets['${secretName}'] }}\n`,
+        );
+      },
+      async ({ diagnostics }) => {
+        const output = [...invalidDiagnostics, ...diagnostics].join("\n");
+        for (const canary of [
+          canaryRef,
+          environmentValue,
+          secretName,
+          secretValue,
+        ]) {
+          assert.equal(output.includes(canary), false);
+        }
+      },
     );
-    assert.equal(diagnostics.join("\n").includes(environmentValue), false);
-    assert.equal(diagnostics.join("\n").includes(tmpdir()), false);
+
+    for (const args of [
+      ["--revision", canaryRef],
+      ["--base-revision", "HEAD", "--revision", canaryRef],
+    ]) {
+      const cli = await runPolicyCli(args, {
+        ...process.env,
+        POLICY_CANARY: environmentValue,
+      });
+      assert.equal(cli.code, 1);
+      for (const canary of [canaryRef, environmentValue]) {
+        assert.equal(`${cli.stdout}${cli.stderr}`.includes(canary), false);
+      }
+    }
   } finally {
-    delete process.env.CLOUDFLARE_API_TOKEN;
+    delete process.env.POLICY_CANARY;
   }
 });

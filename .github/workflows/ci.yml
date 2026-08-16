@@ -14,22 +14,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  policy:
-    name: Policy
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-
-      - name: Test fork CI policy
-        run: node --test scripts/fork-ci-policy.test.js
-
-      - name: Check fork CI policy
-        run: node scripts/fork-ci-policy.mjs
-
   lint-and-build:
     name: Lint and build
     runs-on: ubuntu-latest
