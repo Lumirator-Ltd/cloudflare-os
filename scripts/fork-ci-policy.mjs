@@ -564,7 +564,7 @@ export function validateWorkflowText(text, filePath = CI_PATH) {
 }
 
 export async function validateWorkflowDirectory(directory) {
-  const entries = (await readdir(directory, { withFileTypes: true })).sort((left, right) =>
+  const entries = (await readdir(directory, { withFileTypes: true })).toSorted((left, right) =>
     left.name.localeCompare(right.name),
   );
   const diagnostics = [];
@@ -648,7 +648,7 @@ export async function validateGitRevision({
       "--",
       WORKFLOW_DIRECTORY,
     ]);
-    const workflowPaths = inventory.stdout.split("\0").filter(Boolean).sort();
+    const workflowPaths = inventory.stdout.split("\0").filter(Boolean).toSorted();
     if (
       workflowPaths.length !== WORKFLOW_PATHS.length ||
       workflowPaths.some((filePath, index) => filePath !== WORKFLOW_PATHS[index])

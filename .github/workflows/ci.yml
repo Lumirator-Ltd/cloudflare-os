@@ -86,6 +86,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Build typed storage
+        run: pnpm --filter @gadgets/typed-storage build
+
       - name: Run focused bootstrap tests when available
         run: |
           if [ -f packages/workshop-backend/__tests__/admin-bootstrap.test.ts ]; then
