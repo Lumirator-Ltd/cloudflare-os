@@ -5,9 +5,13 @@ import type {
   SubmitExternalMessageInput,
   SubmitExternalMessageResult,
 } from "@gadgets/workshop-shared/external-message-gateway";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { InitialAdminConfigV1 } from "../src/admin-bootstrap.js";
 import { initialAdminConfigDigest, toAdminConfigPatch } from "../src/admin-bootstrap.js";
+import {
+  assertAdminBootstrap,
+  resetAdminBootstrapCacheForTest,
+} from "../src/admin-bootstrap-gate.js";
 import { DEFAULT_ADMIN_CONFIG } from "../src/admin-config.js";
 import { ExternalMessageGateway } from "../src/external-message-gateway.js";
 import server from "../src/server.js";
@@ -39,15 +43,23 @@ type BootstrapEnv = Cloudflare.Env & {
   INITIAL_ADMIN_CONFIG?: InitialAdminConfigV1;
 };
 
-function request(
-    config?: InitialAdminConfigV1,
-    path = "/api/client-errors",
-    ctx = createExecutionContext()): Promise<Response> {
+function bootstrapEnv(config?: InitialAdminConfigV1): BootstrapEnv {
   const requestEnv = Object.create(env) as BootstrapEnv;
   if (config) {
     Object.defineProperty(requestEnv, "INITIAL_ADMIN_CONFIG", {value: config});
   }
-  return server.fetch(new Request(`https://workshop.invalid${path}`), requestEnv, ctx);
+  return requestEnv;
+}
+
+function request(
+    config?: InitialAdminConfigV1,
+    path = "/api/client-errors",
+    ctx = createExecutionContext()): Promise<Response> {
+  return server.fetch(
+    new Request(`https://workshop.invalid${path}`),
+    bootstrapEnv(config),
+    ctx,
+  );
 }
 
 function failingBootstrapContext(): ExecutionContext {
@@ -64,6 +76,22 @@ function failingBootstrapContext(): ExecutionContext {
   return new Proxy(ctx, {
     get(target, property) {
       if (property === "exports") return bootstrapFailure;
+      return Reflect.get(target, property, target);
+    },
+  });
+}
+
+function bootstrapContext(
+    ensureInitialAdminConfig: (initial: InitialAdminConfigV1) => Promise<void>): ExecutionContext {
+  const ctx = createExecutionContext();
+  const bootstrapExports = {
+    AdminSettings: {
+      getByName: () => ({ensureInitialAdminConfig}),
+    },
+  };
+  return new Proxy(ctx, {
+    get(target, property) {
+      if (property === "exports") return bootstrapExports;
       return Reflect.get(target, property, target);
     },
   });
@@ -119,10 +147,79 @@ function externalMessageGateway(
   return new ExternalMessageGateway(gatewayContext, gatewayEnv);
 }
 
+beforeEach(() => {
+  resetAdminBootstrapCacheForTest();
+});
+
 afterEach(async () => {
   vi.restoreAllMocks();
   await reset();
   await abortAllDurableObjects();
+});
+
+describe("assertAdminBootstrap memoization", () => {
+  it("memoizes successful initialization across sequential configured calls", async () => {
+    const ensureInitialAdminConfig = vi.fn(async () => {});
+    const configuredEnv = bootstrapEnv(INITIAL_CONFIG);
+
+    await assertAdminBootstrap(configuredEnv, bootstrapContext(ensureInitialAdminConfig));
+    await assertAdminBootstrap(configuredEnv, bootstrapContext(ensureInitialAdminConfig));
+
+    expect(ensureInitialAdminConfig).toHaveBeenCalledOnce();
+    expect(ensureInitialAdminConfig).toHaveBeenCalledWith(INITIAL_CONFIG);
+  });
+
+  it("shares one in-flight initialization across concurrent configured calls", async () => {
+    let finishInitialization!: () => void;
+    const initialization = new Promise<void>(resolve => {
+      finishInitialization = resolve;
+    });
+    const ensureInitialAdminConfig = vi.fn(() => initialization);
+    const configuredEnv = bootstrapEnv(INITIAL_CONFIG);
+    const settled = vi.fn();
+
+    const first = assertAdminBootstrap(
+      configuredEnv,
+      bootstrapContext(ensureInitialAdminConfig),
+    ).finally(() => settled("first"));
+    const second = assertAdminBootstrap(
+      configuredEnv,
+      bootstrapContext(ensureInitialAdminConfig),
+    ).finally(() => settled("second"));
+
+    await vi.waitFor(() => expect(ensureInitialAdminConfig).toHaveBeenCalledOnce());
+    await Promise.resolve();
+    expect(settled).not.toHaveBeenCalled();
+
+    finishInitialization();
+    await Promise.all([first, second]);
+
+    expect(ensureInitialAdminConfig).toHaveBeenCalledOnce();
+    expect(ensureInitialAdminConfig).toHaveBeenCalledWith(INITIAL_CONFIG);
+    expect(settled).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries initialization after a failed configured call", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const ensureInitialAdminConfig = vi.fn()
+      .mockRejectedValueOnce(new Error("first attempt failed"))
+      .mockResolvedValueOnce(undefined);
+    const configuredEnv = bootstrapEnv(INITIAL_CONFIG);
+
+    await expect(assertAdminBootstrap(
+      configuredEnv,
+      bootstrapContext(ensureInitialAdminConfig),
+    )).rejects.toThrow("Deployment initialization pending.");
+    await expect(assertAdminBootstrap(
+      configuredEnv,
+      bootstrapContext(ensureInitialAdminConfig),
+    )).resolves.toBeUndefined();
+
+    expect(ensureInitialAdminConfig).toHaveBeenCalledTimes(2);
+    expect(ensureInitialAdminConfig).toHaveBeenNthCalledWith(1, INITIAL_CONFIG);
+    expect(ensureInitialAdminConfig).toHaveBeenNthCalledWith(2, INITIAL_CONFIG);
+    expect(error).toHaveBeenCalledOnce();
+  });
 });
 
 describe("Workshop admin bootstrap gate", () => {
