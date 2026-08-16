@@ -7,6 +7,7 @@ import { collection, createTypedStorage } from '@gadgets/typed-storage';
 import { createWorkshopLogger } from "./observability";
 import { ADMIN_CONFIG_KEY, FEATURED_BLUEPRINTS_KEY, isReservedBlueprintKey, parseBlueprintKvRecord, readBlueprintKvRecord, sanitizeBlueprintOutput, serializeFeaturedBlueprints } from './blueprint-archive.js';
 import { AdminConfig, DEFAULT_ADMIN_CONFIG, FormatCuration, MAX_AGENT_HINT, defaultOutputFormatId, listPromotedFormats, reorderFormats, sanitizeOutputOverrides, serializeAdminConfig } from './admin-config.js';
+import { initialAdminConfigDigest, parseInitialAdminConfig, toAdminConfigPatch } from './admin-bootstrap.js';
 import { SITE_LOGO_R2_KEY, siteLogoImage, validateSiteLogo } from './site-logo.js';
 import { ambientGatekeeperMode, DEFAULT_AMBIENT_GATEKEEPER_MODE } from './provisioning-policy.js';
 import { buildGatekeeperVendorMap } from './auth/auth-vendors.js';
@@ -15,6 +16,12 @@ import { formatBlueprintsManifestVersion, installFormatBlueprints } from './form
 import { FORMAT_BLUEPRINTS } from './generated/format-blueprints.js';
 
 const logger = createWorkshopLogger("workshop.admin.settings");
+
+type AdminBootstrapMarker = {
+  tenantId: string;
+  schemaVersion: 1;
+  digest: string;
+};
 
 function makeAdminSettingsStorage(storage: DurableObjectStorage) {
   return createTypedStorage(storage, {
@@ -29,6 +36,7 @@ function makeAdminSettingsStorage(storage: DurableObjectStorage) {
       // Authoritative deployment admin config. Mirrored to BLUEPRINTS KV (ADMIN_CONFIG_KEY) so the
       // connect/login/agent hot paths can read it without touching this singleton DO.
       adminConfig: DEFAULT_ADMIN_CONFIG as AdminConfig,
+      adminBootstrapMarker: null as AdminBootstrapMarker | null,
 
       // Which set of bundled format blueprints has been installed (see
       // formatBlueprintsManifestVersion). Empty means none yet; a mismatch means the repo shipped
@@ -270,12 +278,20 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
     return this.#config();
   }
 
-  async #mutateAdminConfig(mutate: (config: AdminConfig) => AdminConfig): Promise<void> {
+  async #serializeAdminConfigMutation<T>(operation: () => Promise<T>): Promise<T> {
     let previousMutation = this.adminConfigMutationTail;
     let release!: () => void;
     this.adminConfigMutationTail = new Promise<void>(resolve => { release = resolve; });
     await previousMutation;
     try {
+      return await operation();
+    } finally {
+      release();
+    }
+  }
+
+  #mutateAdminConfig(mutate: (config: AdminConfig) => AdminConfig): Promise<void> {
+    return this.#serializeAdminConfigMutation(async () => {
       let current = this.#config();
       let next = mutate(current);
       this.storage.adminConfig.put(next);
@@ -285,9 +301,47 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
         this.storage.adminConfig.put(current);
         throw error;
       }
-    } finally {
-      release();
+    });
+  }
+
+  async ensureInitialAdminConfig(value: unknown): Promise<void> {
+    let initial = parseInitialAdminConfig(value);
+    if (!initial) {
+      throw new Error("Invalid initial admin configuration.");
     }
+    let digest = await initialAdminConfigDigest(initial);
+
+    await this.#serializeAdminConfigMutation(async () => {
+      let marker = this.storage.adminBootstrapMarker.get();
+      if (marker) {
+        if (marker.tenantId !== initial.tenantId) {
+          throw new Error("Admin settings are already initialized for a different tenant.");
+        }
+        if (marker.schemaVersion !== initial.schemaVersion || marker.digest !== digest) {
+          throw new Error("Admin settings are already initialized with a different configuration.");
+        }
+        return;
+      }
+
+      let current = this.#config();
+      if (serializeAdminConfig(current) !== serializeAdminConfig(DEFAULT_ADMIN_CONFIG)) {
+        throw new Error("Admin settings contain unmarked non-default configuration.");
+      }
+
+      let next = {...current, ...toAdminConfigPatch(initial)};
+      this.storage.adminConfig.put(next);
+      try {
+        await this.env.BLUEPRINTS.put(ADMIN_CONFIG_KEY, serializeAdminConfig(next));
+        this.storage.adminBootstrapMarker.put({
+          tenantId: initial.tenantId,
+          schemaVersion: initial.schemaVersion,
+          digest,
+        });
+      } catch (error) {
+        this.storage.adminConfig.put(current);
+        throw error;
+      }
+    });
   }
 
   /**
