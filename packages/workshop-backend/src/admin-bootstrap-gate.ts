@@ -21,6 +21,23 @@ async function adminBootstrapDigestPrefix(value: unknown): Promise<string> {
   return new Uint8Array(digest).toHex().slice(0, 12);
 }
 
+async function attemptAdminBootstrap(
+    initial: unknown,
+    ctx: ExecutionContext): Promise<void> {
+  let digestPrefix = "unavailable";
+  try {
+    digestPrefix = await adminBootstrapDigestPrefix(initial);
+    await ctx.exports.AdminSettings.getByName("").ensureInitialAdminConfig(initial);
+  } catch {
+    bootstrapLogger.error("deployment admin bootstrap failed", {
+      event: "admin.bootstrap.failed",
+      errorCode: "ADMIN_BOOTSTRAP_FAILED",
+      digestPrefix,
+    });
+    throw new Error("Deployment initialization pending.");
+  }
+}
+
 export function assertAdminBootstrap(
     env: Cloudflare.Env,
     ctx: ExecutionContext): Promise<void> {
@@ -28,22 +45,11 @@ export function assertAdminBootstrap(
   if (initial === undefined) return Promise.resolve();
   if (adminBootstrapPromise) return adminBootstrapPromise;
 
-  let digestPrefix = "unavailable";
-  const attempt: Promise<void> = (async () => {
-    try {
-      digestPrefix = await adminBootstrapDigestPrefix(initial);
-      await ctx.exports.AdminSettings.getByName("").ensureInitialAdminConfig(initial);
-    } catch {
-      if (adminBootstrapPromise === attempt) adminBootstrapPromise = undefined;
-      bootstrapLogger.error("deployment admin bootstrap failed", {
-        event: "admin.bootstrap.failed",
-        errorCode: "ADMIN_BOOTSTRAP_FAILED",
-        digestPrefix,
-      });
-      throw new Error("Deployment initialization pending.");
-    }
-  })();
+  const attempt = attemptAdminBootstrap(initial, ctx);
   adminBootstrapPromise = attempt;
+  void attempt.catch(() => {
+    if (adminBootstrapPromise === attempt) adminBootstrapPromise = undefined;
+  });
   return attempt;
 }
 
