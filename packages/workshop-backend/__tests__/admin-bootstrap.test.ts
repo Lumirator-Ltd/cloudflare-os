@@ -10,6 +10,10 @@ import { AdminSettings } from "../src/admin-settings.js";
 import { ADMIN_CONFIG_KEY } from "../src/blueprint-archive.js";
 import { makeMockStorage } from "./mock-storage.js";
 
+vi.mock("../src/generated/format-blueprints.js", () => ({
+  FORMAT_BLUEPRINTS: [],
+}));
+
 vi.mock("cloudflare:workers", async importOriginal => {
   let original = await importOriginal<typeof import("cloudflare:workers")>();
   return {
