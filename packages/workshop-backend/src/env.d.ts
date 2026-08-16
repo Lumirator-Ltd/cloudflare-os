@@ -13,7 +13,7 @@ declare global {
       WORKERS_AI: Ai;
 
       // Optional one-time deployment bootstrap for authoritative admin settings.
-      INITIAL_ADMIN_CONFIG?: string;
+      INITIAL_ADMIN_CONFIG?: import("./admin-bootstrap.js").InitialAdminConfigV1;
 
       // AI Gateway mode: when CF_AI_GATEWAY is set, supported providers are routed through
       // Cloudflare AI Gateway with server-managed keys. Users don't need their own keys.
