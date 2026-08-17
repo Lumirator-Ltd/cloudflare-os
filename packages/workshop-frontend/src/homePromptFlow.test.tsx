@@ -6,6 +6,12 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const testState = vi.hoisted(() => {
+  const classifyRpcError = vi.fn<(error: unknown) => string | undefined>(() => undefined);
+  const logRpcFailure = vi.fn<(
+    message: string,
+    error: unknown,
+    options?: unknown,
+  ) => boolean>(() => false);
   const listModels = vi.fn<() => Promise<never[]>>(async () => []);
   const setTitle = vi.fn<(title: string) => Promise<void>>(async () => {});
   const newChat = vi.fn<() => Promise<number>>(async () => 0);
@@ -16,9 +22,12 @@ const testState = vi.hoisted(() => {
   return {
     addToast: vi.fn<(toast: unknown) => void>(),
     authenticatedApi: { listModels, newGadget },
+    classifyRpcError,
     currentUser: { id: "user-a", name: "User A" },
     listModels,
+    logRpcFailure,
     navigate: vi.fn<(options: unknown) => void>(),
+    newChat,
     newGadget,
     seeds: [] as Array<{ text?: string; nonce?: number }>,
     draftStorageKeys: [] as Array<string | undefined>,
@@ -43,6 +52,11 @@ vi.mock("./AuthContext", () => ({
     authenticatedApi: testState.authenticatedApi,
     currentUser: testState.currentUser,
   }),
+}));
+
+vi.mock("./rpcErrors", () => ({
+  classifyRpcError: testState.classifyRpcError,
+  logRpcFailure: testState.logRpcFailure,
 }));
 
 vi.mock("./ChatInterface", () => ({
@@ -109,6 +123,27 @@ describe("Home prompt route flow", () => {
       to: "/workspace/$id",
       params: { id: "workspace-1" },
       search: { chat: 0 },
+    });
+  });
+
+  it("opens the workspace when setting its initial title fails", async () => {
+    testState.setTitle.mockRejectedValueOnce(new Error("rename failed"));
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () => root!.render(<HomePageContent />));
+
+    await act(async () => testState.send!("Plan the Q3 launch", null));
+
+    expect(testState.newChat).toHaveBeenCalledTimes(1);
+    expect(testState.navigate).toHaveBeenCalledWith({
+      to: "/workspace/$id",
+      params: { id: "workspace-1" },
+      search: { chat: 0 },
+    });
+    expect(testState.addToast).toHaveBeenCalledWith({
+      title: "Workspace created, but couldn't set its name",
+      variant: "error",
     });
   });
 });
