@@ -35,12 +35,12 @@ import ConnectAccountModal from './ConnectAccountModal'
 const CONFIGURED = {
   displayName: 'Configured Service',
   url: 'https://configured.example',
-  configuration: { configured: true, inputs: [] },
+  configuration: { configured: true },
 } as VendorDescription
 const UNCONFIGURED = {
   displayName: 'Setup Needed',
   url: 'https://setup.example',
-  configuration: { configured: false, inputs: [] },
+  configuration: { configured: false },
 } as VendorDescription
 const UNAVAILABLE = {
   displayName: 'Unavailable Service',
@@ -96,7 +96,7 @@ describe('ConnectAccountModal connector readiness', () => {
     const setupCard = rendered.querySelector('[data-vendor-id="setup"]') as HTMLElement
     expect(setupCard).not.toBeNull()
     expect(setupCard.getAttribute('aria-disabled')).toBe('true')
-    expect(setupCard.textContent).toContain('Ask an administrator to configure this connector.')
+    expect(setupCard.textContent).toContain('This connector is not configured. Ask an administrator to configure it.')
 
     await act(async () => setupCard.click())
     expect(connectAccount).not.toHaveBeenCalled()
@@ -127,7 +127,7 @@ describe('ConnectAccountModal connector readiness', () => {
     })
 
     expect(addToast).toHaveBeenCalledWith({
-      title: 'Ask an administrator to configure this connector.',
+      title: 'This connector is not configured. Ask an administrator to configure it.',
       variant: 'error',
     })
   })

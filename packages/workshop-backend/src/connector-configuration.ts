@@ -7,24 +7,46 @@ import type {
   GatekeeperVendor,
 } from "@gadgets/workshop-shared/gatekeeper";
 import { buildGatekeeperVendorMap } from "./auth/auth-vendors.js";
+import { createWorkshopLogger } from "./observability.js";
 
-const CONFIGURABLE_CONNECTOR_IDS = new Set([
-  "cloudflare",
-  "confluence",
-  "github",
-  "google",
-  "linear",
-  "notion",
-  "slack",
-  "spotify",
-  "supabase",
-  "zoominfo",
+const logger = createWorkshopLogger("workshop.connector.configuration");
+
+const STATIC_OAUTH_INPUTS = Object.freeze([
+  Object.freeze({ name: "CLIENT_ID", label: "Client ID", secret: true as const }),
+  Object.freeze({ name: "CLIENT_SECRET", label: "Client Secret", secret: true as const }),
 ]);
+
+const CONNECTOR_SECRET_INPUTS = Object.freeze({
+  cloudflare: STATIC_OAUTH_INPUTS,
+  confluence: STATIC_OAUTH_INPUTS,
+  github: STATIC_OAUTH_INPUTS,
+  google: STATIC_OAUTH_INPUTS,
+  linear: STATIC_OAUTH_INPUTS,
+  notion: STATIC_OAUTH_INPUTS,
+  slack: STATIC_OAUTH_INPUTS,
+  spotify: STATIC_OAUTH_INPUTS,
+  supabase: STATIC_OAUTH_INPUTS,
+  zoominfo: STATIC_OAUTH_INPUTS,
+});
+
+type ConfigurableConnectorId = keyof typeof CONNECTOR_SECRET_INPUTS;
+
+function canonicalInputs(vendorId: string): readonly ConnectorConfigurationInput[] | undefined {
+  return CONNECTOR_SECRET_INPUTS[vendorId as ConfigurableConnectorId];
+}
 const ACCOUNT_ID_PATTERN = /^[0-9a-f]{32}$/;
 const WORKER_PREFIX_PATTERN = /^[a-z0-9][a-z0-9_-]*$/;
 const MAX_SECRET_LENGTH = 4096;
 const SETUP_UNAVAILABLE_ERROR =
   "Connector configuration writes are not available on this deployment.";
+
+function writeFailureMessage(written: number, status?: number): string {
+  const statusDetail = status === undefined ? "" : ` (Cloudflare API status ${status})`;
+  const partialDetail = written === 0
+    ? ""
+    : " The connector may have been partially updated; retry with the same values.";
+  return `Connector configuration request failed${statusDetail}.${partialDetail}`;
+}
 
 function publicBaseUrl(value: string | undefined): string | null {
   if (!value) return null;
@@ -66,13 +88,10 @@ function callbackUrl(env: Cloudflare.Env, vendorId: string): string {
 async function configurableInputs(
   vendors: Map<string, Service<GatekeeperVendor>>,
   vendorId: string,
-): Promise<ConnectorConfigurationInput[]> {
+): Promise<readonly ConnectorConfigurationInput[]> {
   const vendor = vendors.get(vendorId);
-  if (!vendor || !CONFIGURABLE_CONNECTOR_IDS.has(vendorId)) {
-    throw new Error(`Connector "${vendorId}" is not configurable.`);
-  }
-  const inputs = (await vendor.describe()).configuration?.inputs;
-  if (!inputs || inputs.length === 0) {
+  const inputs = canonicalInputs(vendorId);
+  if (!vendor || !inputs || !(await vendor.describe()).configuration) {
     throw new Error(`Connector "${vendorId}" is not configurable.`);
   }
   return inputs;
@@ -87,7 +106,7 @@ function isPrintable(value: string): boolean {
 }
 
 function validateValues(
-  inputs: ConnectorConfigurationInput[],
+  inputs: readonly ConnectorConfigurationInput[],
   values: AdminConnectorConfigurationValues,
 ): void {
   if (!values || typeof values !== "object" || Array.isArray(values)) {
@@ -117,7 +136,8 @@ export async function listConnectorConfigurations(
   const results: AdminConnectorConfiguration[] = [];
   const writeAvailable = writeSetup(env) !== null;
   for (const [id, vendor] of vendors) {
-    if (!CONFIGURABLE_CONNECTOR_IDS.has(id)) continue;
+    const inputs = canonicalInputs(id);
+    if (!inputs) continue;
     try {
       const description = await vendor.describe();
       if (!description.configuration) continue;
@@ -127,11 +147,13 @@ export async function listConnectorConfigurations(
         logo: description.logo,
         configured: description.configuration.configured,
         callbackUrl: callbackUrl(env, id),
-        inputs: description.configuration.inputs,
+        inputs: inputs.map(input => ({ ...input })),
         writeAvailable,
       });
     } catch {
-      continue;
+      logger.warn("failed to describe configurable connector", {
+        event: "connector.configuration.describe.failed", vendorId: id,
+      });
     }
   }
   return results;
@@ -153,6 +175,7 @@ export async function configureConnector(
     `https://api.cloudflare.com/client/v4/accounts/${setup.accountId}/workers/scripts/` +
     `${setup.workerPrefix}${vendorId}/secrets`;
 
+  let written = 0;
   for (const input of inputs) {
     let response: Response;
     try {
@@ -169,12 +192,11 @@ export async function configureConnector(
         }),
       });
     } catch {
-      throw new Error("Connector configuration request failed.");
+      throw new Error(writeFailureMessage(written));
     }
     if (!response.ok) {
-      throw new Error(
-        `Connector configuration request failed (Cloudflare API status ${response.status}).`,
-      );
+      throw new Error(writeFailureMessage(written, response.status));
     }
+    written++;
   }
 }

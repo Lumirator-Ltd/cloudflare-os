@@ -42,10 +42,10 @@ describe('AccountChooser connect readiness', () => {
   }
 
   it('disables connect and shows the configuration message', () => {
-    const { button, onConnect } = render('Ask an administrator to configure this connector.')
+    const { button, onConnect } = render('This connector is not configured. Ask an administrator to configure it.')
 
     expect(button.disabled).toBe(true)
-    expect(button.textContent).toContain('Ask an administrator to configure this connector.')
+    expect(button.textContent).toContain('This connector is not configured. Ask an administrator to configure it.')
     act(() => button.click())
     expect(onConnect).not.toHaveBeenCalled()
   })

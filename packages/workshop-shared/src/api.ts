@@ -866,13 +866,15 @@ export type AuthVendorInfo = {
   displayName: string;
   logo?: AvatarImage;
   color?: string;
+  // False when the connector cannot start a new sign-in authorization flow.
+  configured: boolean;
 };
 
 // Deployment-level configuration that the client needs at boot to decide what UI to render.
 // Returned by `PublicApi.getServerConfig()`. Contains no secrets.
 export type ServerConfig = {
-  // Auth-capable, allowlisted gatekeeper vendors offered as sign-in methods. Empty when none are
-  // configured (password-only).
+  // Auth-capable, allowlisted gatekeeper vendors shown as sign-in methods, including unconfigured
+  // vendors with disabled buttons. Empty when no allowlisted bound vendor provides authentication.
   authVendors: AuthVendorInfo[];
 
   // Whether username/password login is available. Defaults to true; an installation can disable it

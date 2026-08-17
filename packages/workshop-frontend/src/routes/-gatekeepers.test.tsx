@@ -43,10 +43,10 @@ describe('Gatekeepers page connector cards', () => {
   }
 
   it('keeps an unconfigured card visible and disables its connect action', () => {
-    const { card, onClick } = render('Ask an administrator to configure this connector.')
+    const { card, onClick } = render('This connector is not configured. Ask an administrator to configure it.')
 
     expect(card.textContent).toContain('Example')
-    expect(card.textContent).toContain('Ask an administrator to configure this connector.')
+    expect(card.textContent).toContain('This connector is not configured. Ask an administrator to configure it.')
     expect(card.getAttribute('aria-disabled')).toBe('true')
     act(() => card.click())
     expect(onClick).not.toHaveBeenCalled()

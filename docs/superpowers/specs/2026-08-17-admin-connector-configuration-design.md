@@ -4,19 +4,16 @@
 
 Preserve Cloudflare OS connector behavior and the existing Admin Gatekeepers controls while adding:
 
-- a clear user-facing unconfigured state: **Ask an administrator to configure this connector**;
+- a clear user-facing unconfigured state: **This connector is not configured. Ask an administrator to configure it.**;
 - `/admin/connectors`, where deployment admins can write or rotate OAuth credentials.
 
 This is an MVP for managed client deployments. Keep the change narrow and reuse each Gatekeeper's existing `CLIENT_ID` / `CLIENT_SECRET` environment contract.
 
 ## Readiness contract
 
-`VendorDescription` gains optional configuration metadata containing:
+`VendorDescription` gains optional configuration metadata containing only whether the connector is configured. OAuth Gatekeepers report configured only when both `CLIENT_ID` and `CLIENT_SECRET` are present. Connectors without deployment credentials omit configuration metadata and behave exactly as today.
 
-- whether the connector is configured;
-- the write-only input names and labels required to configure it.
-
-OAuth Gatekeepers report configured only when both `CLIENT_ID` and `CLIENT_SECRET` are present. Connectors without deployment credentials omit configuration metadata and behave exactly as today.
+The Workshop kernel owns an immutable connector-ID allowlist and the exact write-only inputs for each connector. Gatekeeper metadata cannot select Cloudflare secret names, worker targets, or additional mutation inputs.
 
 The Workshop propagates readiness through the existing vendor catalog. An unconfigured connector stays visible but is not connectable. Every connection entry point also checks readiness server-side and returns the administrator guidance message.
 
@@ -40,7 +37,7 @@ The Workshop backend calls Cloudflare's official Workers secret endpoint:
 
 `PUT /accounts/{account_id}/workers/scripts/{script_name}/secrets`
 
-The backend accepts only a fixed connector ID allowlist and only input names declared by that connector. Values are non-empty, bounded, never logged, never persisted in Durable Object storage, and never returned. Cloudflare stores them as `secret_text` bindings.
+The backend accepts only its fixed connector ID and input-name allowlists. Values are non-empty, bounded, never logged, never persisted in Durable Object storage, and never returned. Cloudflare stores them as `secret_text` bindings.
 
 Deployment configuration supplies:
 

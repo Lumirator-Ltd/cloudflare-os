@@ -2,14 +2,14 @@
 
 ## 1. Readiness contract
 
-- Add configuration metadata to `VendorDescription` and `GatekeeperVendorInfo`.
+- Add status-only configuration metadata to `VendorDescription` and `GatekeeperVendorInfo`.
 - Add tests first, then update the ten static-OAuth Gatekeepers to report readiness.
 - Add a server-side readiness guard to every connection attempt.
 
 ## 2. Secret control plane
 
 - Add typed connector configuration views and write-only Admin API methods.
-- Implement strict connector/input allowlists and Cloudflare Workers secret API calls.
+- Implement kernel-owned immutable connector/input allowlists and Cloudflare Workers secret API calls.
 - Add tests with mocked fetch covering success, partial failure, missing deployment configuration, invalid inputs, and redacted errors.
 
 ## 3. User experience

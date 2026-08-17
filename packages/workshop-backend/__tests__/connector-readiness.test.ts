@@ -19,13 +19,23 @@ describe("static OAuth connector readiness", () => {
     expect(configuration({})).toMatchObject({ configured: false });
   });
 
-  it("declares only write-only client credential inputs", () => {
-    expect(readinessHelper()({})).toEqual({
-      configured: false,
-      inputs: [
-        { name: "CLIENT_ID", label: "Client ID", secret: true },
-        { name: "CLIENT_SECRET", label: "Client Secret", secret: true },
-      ],
-    });
+  it("reports readiness without declaring control-plane secret names", () => {
+    expect(readinessHelper()({})).toEqual({ configured: false });
+  });
+
+  it("centralizes the readiness guard and exact administrator guidance", () => {
+    const message = Reflect.get(gatekeeperContract, "CONNECTOR_NOT_CONFIGURED_MESSAGE");
+    const guard = Reflect.get(gatekeeperContract, "assertConnectorConfigured");
+
+    expect(message).toBe(
+      "This connector is not configured. Ask an administrator to configure it.",
+    );
+    expect(guard).toBeTypeOf("function");
+    expect(() => guard({
+      displayName: "GitHub",
+      url: "https://github.com",
+      configuration: { configured: false },
+    })).toThrow(message);
+    expect(() => guard({ displayName: "Context", url: "https://example.com" })).not.toThrow();
   });
 });

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { GatekeeperVendor, VendorDescription } from "@gadgets/workshop-shared/gatekeeper";
 import { AdminApiImpl } from "../src/admin-settings.js";
 
@@ -22,7 +22,7 @@ function environment(overrides: Record<string, unknown> = {}): Cloudflare.Env {
       displayName: "GitHub",
       url: "https://github.com",
       logo: { url: "https://example.com/github.svg" },
-      configuration: { configured: false, inputs: INPUTS },
+      configuration: { configured: false },
     }),
     GATEKEEPER_CONTEXT: vendor({
       displayName: "Context Library",
@@ -47,8 +47,19 @@ async function call<T>(target: object, methodName: string, args: unknown[] = [])
 }
 
 describe("AdminApi connector configuration listing", () => {
-  it("lists only declared connector configuration without secret readback", async () => {
-    const result = await call<unknown[]>(api(environment()), "listConnectorConfigurations");
+  it("lists only kernel-owned connector inputs without secret readback", async () => {
+    const compromisedConfiguration = {
+      configured: false,
+      inputs: [{ name: "TOKEN_ENCRYPTION_KEY", label: "Encryption key", secret: true }],
+    };
+    const result = await call<unknown[]>(api(environment({
+      GATEKEEPER_GITHUB: vendor({
+        displayName: "GitHub",
+        url: "https://github.com",
+        logo: { url: "https://example.com/github.svg" },
+        configuration: compromisedConfiguration,
+      } as unknown as VendorDescription),
+    })), "listConnectorConfigurations");
 
     expect(result).toEqual([{
       id: "github",
@@ -59,8 +70,36 @@ describe("AdminApi connector configuration listing", () => {
       inputs: INPUTS,
       writeAvailable: true,
     }]);
+    expect(JSON.stringify(result)).not.toContain("TOKEN_ENCRYPTION_KEY");
     expect(JSON.stringify(result)).not.toContain("control-plane-token");
     expect(JSON.stringify(result)).not.toContain("values");
+  });
+
+  it("logs redacted discovery warnings when describe fails", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const secretValue = "connector-secret-that-must-not-be-logged";
+
+    const result = await call<unknown[]>(api(environment({
+      GATEKEEPER_GITHUB: {
+        async describe() { throw new Error(secretValue); },
+      } as Service<GatekeeperVendor>,
+    })), "listConnectorConfigurations");
+
+    expect(result).toEqual([]);
+    expect(warn).toHaveBeenCalled();
+    expect(JSON.stringify(warn.mock.calls)).toContain("github");
+    expect(JSON.stringify(warn.mock.calls)).not.toContain(secretValue);
+  });
+
+  it("omits an allowlisted connector that does not declare readiness metadata", async () => {
+    const result = await call<unknown[]>(api(environment({
+      GATEKEEPER_GITHUB: vendor({
+        displayName: "GitHub",
+        url: "https://github.com",
+      }),
+    })), "listConnectorConfigurations");
+
+    expect(result).toEqual([]);
   });
 
   it.each([
@@ -116,11 +155,36 @@ describe("AdminApi.configureConnector", () => {
     });
   });
 
-  it("rejects unbound connectors and bound connectors without declared inputs", async () => {
+  it("rejects unbound connectors and bound connectors without configuration metadata", async () => {
     await expect(call(api(environment()), "configureConnector", ["missing", {}]))
       .rejects.toThrow(/not configurable/);
     await expect(call(api(environment()), "configureConnector", ["context", {}]))
       .rejects.toThrow(/not configurable/);
+    await expect(call(api(environment({
+      GATEKEEPER_GITHUB: vendor({ displayName: "GitHub", url: "https://github.com" }),
+    })), "configureConnector", ["github", {
+      CLIENT_ID: "id",
+      CLIENT_SECRET: "secret",
+    }])).rejects.toThrow(/not configurable/);
+  });
+
+  it("never writes a secret name advertised by a compromised connector", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async () => new Response(null, { status: 200 }));
+    const compromised = environment({
+      GATEKEEPER_GITHUB: vendor({
+        displayName: "GitHub",
+        url: "https://github.com",
+        configuration: {
+          configured: false,
+          inputs: [{ name: "TOKEN_ENCRYPTION_KEY", label: "Encryption key", secret: true }],
+        },
+      } as unknown as VendorDescription),
+    });
+
+    await expect(call(api(compromised, fetchImpl), "configureConnector", ["github", {
+      TOKEN_ENCRYPTION_KEY: "do-not-write",
+    }])).rejects.toThrow(/Unexpected connector input: TOKEN_ENCRYPTION_KEY/);
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 
   it("requires exactly every declared input key", async () => {
@@ -172,10 +236,31 @@ describe("AdminApi.configureConnector", () => {
     expect(calls).toBe(2);
     expect(error).toBeInstanceOf(Error);
     expect(error.message).toContain("503");
+    expect(error.message).toContain("partially updated");
+    expect(error.message).toContain("retry with the same values");
     expect(error.message).not.toContain("client-id-value");
     expect(error.message).not.toContain("client-secret-value");
     expect(error.message).not.toContain("leaked by upstream");
     expect(error.message).not.toContain("control-plane-token");
+  });
+
+  it("warns about a possible partial update after a later fetch failure", async () => {
+    let calls = 0;
+    const fetchImpl: typeof fetch = async () => {
+      calls++;
+      if (calls === 1) return new Response(null, { status: 200 });
+      throw new Error("client-secret-value leaked by transport");
+    };
+
+    const error = await call(
+      api(environment(), fetchImpl),
+      "configureConnector",
+      ["github", { CLIENT_ID: "client-id-value", CLIENT_SECRET: "client-secret-value" }],
+    ).catch(value => value);
+
+    expect(error.message).toContain("partially updated");
+    expect(error.message).toContain("retry with the same values");
+    expect(error.message).not.toContain("client-secret-value");
   });
 
   it("redacts fetch failures", async () => {

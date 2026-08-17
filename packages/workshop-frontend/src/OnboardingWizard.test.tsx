@@ -12,12 +12,12 @@ import { OnboardingConnectorButton } from './OnboardingWizard'
 const CONFIGURED = {
   displayName: 'Configured',
   url: 'https://configured.example',
-  configuration: { configured: true, inputs: [] },
+  configuration: { configured: true },
 } as VendorDescription
 const UNCONFIGURED = {
   displayName: 'Needs Setup',
   url: 'https://setup.example',
-  configuration: { configured: false, inputs: [] },
+  configuration: { configured: false },
 } as VendorDescription
 
 describe('onboarding connectors', () => {
@@ -54,7 +54,7 @@ describe('onboarding connectors', () => {
 
     expect(button.disabled).toBe(true)
     expect(button.textContent).toContain('Needs Setup')
-    expect(button.textContent).toContain('Ask an administrator to configure this connector.')
+    expect(button.textContent).toContain('This connector is not configured. Ask an administrator to configure it.')
     act(() => button.click())
     expect(onConnect).not.toHaveBeenCalled()
   })

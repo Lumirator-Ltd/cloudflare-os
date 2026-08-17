@@ -3,8 +3,8 @@ import { validateRpc } from "capnweb-validate";
 import type { JWTPayload } from "jose";
 import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES } from '@gadgets/workshop-shared/api';
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
-import { getServerConfig } from "./deployment-config.js";
-import { isPasswordAuthEnabled, getAuthGatekeeperAllowlist } from "./auth/config.js";
+import { getServerConfig, isPasswordAuthAvailable } from "./deployment-config.js";
+import { getAuthGatekeeperAllowlist } from "./auth/config.js";
 import { getAuthVendorBinding } from "./auth/auth-vendors.js";
 import { getUsageInfo } from "./ai-gateway-billing/limits/usage-checker.js";
 import { listConnectedAccounts, selectAccount } from "./ai-gateway-billing/cloudflare/connection-service.js";
@@ -13,7 +13,7 @@ import { deploymentOutputForBlueprint, listFormatOffers, readAdminConfig } from 
 
 // Re-export the optional-feature Durable Objects + entrypoints so they can be bound in wrangler.
 export { PendingLogin, LoginConnectCallbackImpl };
-import { GatekeeperUiFrame } from "@gadgets/workshop-shared/gatekeeper";
+import { assertConnectorConfigured, GatekeeperUiFrame } from "@gadgets/workshop-shared/gatekeeper";
 import { LanguageModelGatekeeper } from "./ai-models";
 import { getAiGatewayConfig } from "./ai-gateway.js";
 import { AdminSettings, AdminApiImpl } from "./admin-settings.js";
@@ -621,7 +621,7 @@ class LoginAttemptImpl extends RpcTarget implements LoginAttempt {
 }
 
 @validateRpc()
-class PublicApiImpl extends RpcTarget implements PublicApi {
+export class PublicApiImpl extends RpcTarget implements PublicApi {
   users: DurableObjectNamespace<UserDurableObject>;
 
   constructor(private ctx: ExecutionContext, private env: Env,
@@ -643,6 +643,7 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
     if (!vendor) throw new Error(`No such auth gatekeeper: ${vendorId}`);
     const desc = await vendor.describe();
     if (!desc.providesAuth) throw new Error(`"${vendorId}" does not provide authentication.`);
+    assertConnectorConfigured(desc);
 
     // The PendingLogin DO is the rendezvous between this request and the (separate) OAuth-callback
     // invocation. The client never sees its id — we hand back an `attempt` stub instead.
@@ -707,7 +708,7 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
     if (this.env.CF_ACCESS_AUD) {
       throw new Error("This deployment requires Cloudflare Access authentication.");
     }
-    if (!isPasswordAuthEnabled(this.env)) {
+    if (!(await isPasswordAuthAvailable(this.env))) {
       throw new Error("Password login is disabled on this deployment. Use a sign-in option.");
     }
 
@@ -733,7 +734,7 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
     if (this.env.CF_ACCESS_AUD) {
       throw new Error("This deployment requires Cloudflare Access authentication.");
     }
-    if (!isPasswordAuthEnabled(this.env)) {
+    if (!(await isPasswordAuthAvailable(this.env))) {
       throw new Error("Password signup is disabled on this deployment. Use a sign-in option.");
     }
     if (!(await readAdminConfig(this.env)).signupsEnabled) {

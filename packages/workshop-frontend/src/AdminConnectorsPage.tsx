@@ -203,7 +203,12 @@ export default function AdminConnectorsPage() {
                           id={inputId}
                           name={inputId}
                           type="password"
-                          autoComplete="new-password"
+                          autoComplete="off"
+                          data-keeper-ignore="true"
+                          data-1p-ignore="true"
+                          data-lpignore="true"
+                          data-bwignore="true"
+                          data-form-type="other"
                           value={values[input.name] ?? ''}
                           disabled={!connector.writeAvailable || saving === connector.id}
                           onChange={(event) =>

@@ -144,7 +144,10 @@ describe('/admin/connectors', () => {
     expect(inputs).toHaveLength(4)
     for (const input of inputs) {
       expect(input.type).toBe('password')
-      expect(['off', 'new-password']).toContain(input.autocomplete)
+      expect(input.autocomplete).toBe('off')
+      expect(input.getAttribute('data-1p-ignore')).toBe('true')
+      expect(input.getAttribute('data-lpignore')).toBe('true')
+      expect(input.getAttribute('data-form-type')).toBe('other')
       expect(input.value).toBe('')
     }
     expect(rendered.textContent).not.toContain('existing-client-id')

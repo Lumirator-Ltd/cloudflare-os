@@ -1,7 +1,7 @@
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName } from '@gadgets/workshop-shared/api';
-import { Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, resolveRequestedResource, HookController, HookDescription, AGENT_CATALOG_MAX_ENTRIES, ActionKind } from "@gadgets/workshop-shared/gatekeeper";
+import { Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, resolveRequestedResource, HookController, HookDescription, AGENT_CATALOG_MAX_ENTRIES, ActionKind, assertConnectorConfigured, connectorIsConfigured, CONNECTOR_NOT_CONFIGURED_MESSAGE } from "@gadgets/workshop-shared/gatekeeper";
 import {
   DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub,
   RpcTarget as NativeRpcTarget, restore,
@@ -994,7 +994,7 @@ export function sanitizeMessageFormatRefs(
   return accepted.toSorted((a, b) => a.position - b.position);
 }
 
-class OverseerImpl implements AgentHooks {
+export class OverseerImpl implements AgentHooks {
   public storage: OverseerStorage;
   readonly logger: ReturnType<typeof createWorkshopLogger>;
 
@@ -5558,7 +5558,9 @@ class OverseerImpl implements AgentHooks {
   async listConnectableVendors(): Promise<{id: string, displayName: string}[]> {
     try {
       let vendors = await this.#listGatekeeperVendorsCached();
-      return vendors.map(v => ({id: v.id, displayName: v.description.displayName}));
+      return vendors
+          .filter(v => connectorIsConfigured(v.description))
+          .map(v => ({id: v.id, displayName: v.description.displayName}));
     } catch (err) {
       this.logger.warn("failed to list connectable vendors", {
         event: "connectable.vendors.list.failed", error: err,
@@ -5572,8 +5574,9 @@ class OverseerImpl implements AgentHooks {
     let vendor = vendors.find(v => v.id === vendorId);
     if (!vendor) {
       return `Unknown vendor "${vendorId}". Available vendors: ` +
-          `${vendors.map(v => v.id).join(", ") || "(none)"}.`;
+          `${vendors.filter(v => connectorIsConfigured(v.description)).map(v => v.id).join(", ") || "(none)"}.`;
     }
+    assertConnectorConfigured(vendor.description);
     if (vendor.supportedResources.length === 0) {
       return `Vendor "${vendorId}" (${vendor.description.displayName}) offers no connectable ` +
           `resources.`;
@@ -5608,7 +5611,10 @@ class OverseerImpl implements AgentHooks {
     if (!vendor) {
       return { requested: false, message:
           `Cannot request a connection: unknown vendor "${input.vendorId}". ` +
-          `Available vendors: ${vendors.map(v => v.id).join(", ") || "(none)"}.` };
+          `Available vendors: ${vendors.filter(v => connectorIsConfigured(v.description)).map(v => v.id).join(", ") || "(none)"}.` };
+    }
+    if (!connectorIsConfigured(vendor.description)) {
+      return { requested: false, message: CONNECTOR_NOT_CONFIGURED_MESSAGE };
     }
 
     // Resolve the exact resource this request maps to, using the same precedence the accept modal

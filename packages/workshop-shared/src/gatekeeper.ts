@@ -44,23 +44,29 @@ export type ConnectorConfigurationInput = {
 /** Describes whether a connector has its required deployment configuration. */
 export type ConnectorConfiguration = {
   configured: boolean;
-  inputs: ConnectorConfigurationInput[];
 };
 
-/** Standard write-only inputs used by Gatekeepers with static OAuth credentials. */
-export const STATIC_OAUTH_CONNECTOR_INPUTS: ConnectorConfigurationInput[] = [
-  { name: "CLIENT_ID", label: "Client ID", secret: true },
-  { name: "CLIENT_SECRET", label: "Client Secret", secret: true },
-];
+/** Guidance returned whenever a new connector authorization flow is unavailable. */
+export const CONNECTOR_NOT_CONFIGURED_MESSAGE =
+  "This connector is not configured. Ask an administrator to configure it.";
+
+/** Returns whether a vendor permits new authorization flows. */
+export function connectorIsConfigured(description: VendorDescription): boolean {
+  return description.configuration?.configured !== false;
+}
+
+/** Rejects a new authorization flow when the vendor reports missing deployment configuration. */
+export function assertConnectorConfigured(description: VendorDescription): void {
+  if (!connectorIsConfigured(description)) {
+    throw new Error(CONNECTOR_NOT_CONFIGURED_MESSAGE);
+  }
+}
 
 /** Builds readiness metadata for a Gatekeeper backed by static OAuth credentials. */
 export function staticOauthConnectorConfiguration(
   env: { CLIENT_ID?: string; CLIENT_SECRET?: string },
 ): ConnectorConfiguration {
-  return {
-    configured: Boolean(env.CLIENT_ID && env.CLIENT_SECRET),
-    inputs: STATIC_OAUTH_CONNECTOR_INPUTS,
-  };
+  return { configured: Boolean(env.CLIENT_ID && env.CLIENT_SECRET) };
 }
 
 /** Describes a connected GatekeeperVendor for display and connection readiness. */
