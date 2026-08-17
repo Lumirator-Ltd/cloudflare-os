@@ -27,7 +27,7 @@ Then visit: http://localhost:8787
 
 This runs the whole stack locally on wrangler and workerd. This is not meant for production use, but is a quick way to see what the product does.
 
-Alternatively, you can [deploy to your Cloudflare account](https://github.com/cloudflare/cloudflare-os-starter).
+Alternatively, you can [deploy to your Cloudflare account](https://os.cloudflare.app/deploy).
 
 (More options at the end of this readme.)
 
@@ -175,11 +175,46 @@ This differs from most agent harnesses, where MCP servers are configured upfront
 
 We've built an online flow that helps you deploy to your own Cloudflare account:
 
-https://os.cloudflare.app
+https://os.cloudflare.app/deploy
 
 Or, for more sophisticated deployment, with your gatekeepers and potentially code changes, check out our deployment starter repo:
 
 https://github.com/cloudflare/cloudflare-os-starter
+
+#### Optional first-run admin configuration
+
+Deployments may provide an `INITIAL_ADMIN_CONFIG` binding to initialize a restricted set of admin
+settings. Omitting it preserves the existing behavior. The binding value must be an object with
+exactly this closed V1 shape (missing or additional properties are rejected):
+
+```ts
+{
+  tenantId: string,        // 1–128 characters; stable for the deployment
+  schemaVersion: 1,
+  config: {
+    siteName: string,      // 0–40 characters
+    accentColor: string,   // #RGB or #RRGGBB
+    contextGatekeeper: "disabled" | "optional" | "enabled",
+    customGatekeeper: "disabled" | "optional" | "enabled",
+  },
+}
+```
+
+On genuinely fresh, default admin storage, this payload authoritatively sets those four values once.
+The tenant ID is immutable, and a stored SHA-256 digest covers the canonical V1 payload (property
+order does not matter). A later binding with a different tenant ID or canonical digest fails closed.
+Genuinely unmarked, non-default admin configuration also fails closed and is never adopted or
+overwritten. An interrupted `pending` initialization resumes only when its tenant, version, digest,
+and authoritative configuration all match; inconsistent state fails closed.
+
+All normal HTTP traffic and `ExternalMessageGateway` submissions await this initialization. On
+failure, HTTP receives a sanitized `503` maintenance response and the gateway rejects with the same
+generic maintenance error; underlying errors and payload values are not exposed. After bootstrap
+completes, administrators may change settings through `/admin`; those later changes are allowed and
+are not reconciled back to the bootstrap payload.
+
+This binding is deployment configuration, not a secret channel. Never put administrators, email
+addresses, secrets, agent instructions, connectors, formats, or arbitrary Gatekeeper IDs in it.
 
 ### Run locally
 
@@ -237,3 +272,12 @@ With that said, we are happy to accept small, trivially-verified PRs that fix a 
 If you have a big idea you'd like us to consider, feel free to [open a discussion](https://github.com/cloudflare/cloudflare-os/discussions) about it.
 
 This policy may change in the future as the project matures. Until then, thank you for your understanding.
+
+## Credits
+
+Cloudflare OS has far too many open source dependencies to list here. But, we'd like to highlight a few that do particularly heavy lifting:
+
+* [Pi](https://pi.dev/) (specifically, `pi-agent-core`), which made it easy to support every LLM provider with one API.
+* [Monaco](https://microsoft.github.io/monaco-editor/) which makes it too easy to embed a beautiful text editor -- for those of us who still look at the code.
+* [Yjs](https://yjs.dev/), which we use extensively to sync code changes between clients and agents and replay histories.
+* [Vite](https://vite.dev/), which makes the development loop so pleasant.
