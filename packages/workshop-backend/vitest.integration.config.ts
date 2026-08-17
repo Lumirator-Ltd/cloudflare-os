@@ -6,6 +6,10 @@ const EXPECTED_OPEN_ERROR_CODES = new Set([
   "WORKSPACE_NOT_FOUND",
   "WORKSPACE_ACCESS_DENIED",
 ]);
+const EXPECTED_ADMIN_BOUNDARY_ERRORS = new Set([
+  "'configureConnector' is not a function.",
+  "Connector configuration writes are not available on this deployment.",
+]);
 
 export default defineConfig({
   esbuild: {
@@ -16,6 +20,11 @@ export default defineConfig({
     cloudflareTest({
       main: "./src/server.ts",
       remoteBindings: false,
+      miniflare: {
+        bindings: {
+          ADMINS: ["rpcadmin"],
+        },
+      },
       wrangler: {
         configPath: "./wrangler.jsonc",
       },
@@ -35,6 +44,7 @@ export default defineConfig({
     onUnhandledError(error) {
       const code = "code" in error ? error.code : undefined;
       if (typeof code === "string" && EXPECTED_OPEN_ERROR_CODES.has(code)) return false;
+      if (EXPECTED_ADMIN_BOUNDARY_ERRORS.has(error.message)) return false;
       // The reset-recovery tests abort every Durable Object mid-session; capabilities that were
       // held across the abort (e.g. the fire-and-forget AdminSettings install kicked off by the
       // fetch handler) reject on their own schedule, independent of any awaited call.

@@ -1,6 +1,7 @@
 import { WorkerEntrypoint, DurableObject, RpcTarget, RpcStub } from "cloudflare:workers";
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import {
+  staticOauthConnectorConfiguration,
   GatekeeperUser,
   stripTrailingSlashes,
   GatekeeperUserVerifier,
@@ -488,6 +489,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
       description:
         "Connect your Linear account so Cloudflare OS can read and manage issues, projects, and " +
         "comments across the teams you choose.",
+      configuration: staticOauthConnectorConfiguration(this.env),
     };
   }
 

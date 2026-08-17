@@ -24,7 +24,7 @@
 // Gadget a stub pointing to the Gadget's server-side Durable Object interface.
 
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
-import { AccountDescription, ActionKind, ActionDescription, AvatarImage, GatekeeperUiFrame, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription } from "./gatekeeper.js";
+import { AccountDescription, ActionKind, ActionDescription, AvatarImage, ConnectorConfigurationInput, GatekeeperUiFrame, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription } from "./gatekeeper.js";
 import type { UiFeatureFlags } from "./feature-flags.js";
 
 export const SERVICE_SALT = new Uint8Array([
@@ -911,6 +911,21 @@ export type AdminFormat = {
   bundled: boolean;
 };
 
+/** A connector's write-only deployment configuration status for the admin UI. */
+export type AdminConnectorConfiguration = {
+  id: string;
+  displayName: string;
+  logo?: AvatarImage;
+  configured: boolean;
+  callbackUrl: string;
+  setupGuideUrl: string;
+  inputs: ConnectorConfigurationInput[];
+  writeAvailable: boolean;
+};
+
+/** Secret values submitted to configure a connector. Values are never returned by the API. */
+export type AdminConnectorConfigurationValues = Record<string, string>;
+
 /**
  * Capability for managing deployment-wide admin settings, obtained via
  * AuthenticatedApi.getAdminApi() (which is null for non-admins). The access check happens when the
@@ -921,6 +936,15 @@ export type AdminFormat = {
 export interface AdminApi {
   /** Read all admin-managed settings for the admin UI in one call. */
   getSettings(): Promise<AdminSettingsView>;
+
+  /** Lists write-only connector setup metadata without returning any configured values. */
+  listConnectorConfigurations(): Promise<AdminConnectorConfiguration[]>;
+
+  /** Writes every declared secret input for a configured connector. */
+  configureConnector(
+    vendorId: string,
+    values: AdminConnectorConfigurationValues,
+  ): Promise<void>;
 
   /** Enable or disable new account signups. Existing users can still log in while signups are closed. */
   setSignupsEnabled(enabled: boolean): Promise<void>;
@@ -1038,6 +1062,8 @@ export type AuthVendorInfo = {
   displayName: string;
   logo?: AvatarImage;
   color?: string;
+  /** False when the connector cannot start a new sign-in authorization flow. */
+  configured: boolean;
 };
 
 /**
@@ -1046,8 +1072,8 @@ export type AuthVendorInfo = {
  */
 export type ServerConfig = {
   /**
-   * Auth-capable, allowlisted gatekeeper vendors offered as sign-in methods. Empty when none are
-   * configured (password-only).
+   * Auth-capable, allowlisted gatekeeper vendors shown as sign-in methods, including unconfigured
+   * vendors with disabled buttons. Empty when no allowlisted bound vendor provides authentication.
    */
   authVendors: AuthVendorInfo[];
 

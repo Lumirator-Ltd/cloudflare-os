@@ -3,6 +3,7 @@
 // Contains no secrets.
 
 import { AuthVendorInfo, ServerConfig } from "@gadgets/workshop-shared/api";
+import { connectorIsConfigured } from "@gadgets/workshop-shared/gatekeeper";
 import { createWorkshopLogger } from "./observability";
 import { getAuthGatekeeperAllowlist, isPasswordAuthEnabled } from "./auth/config.js";
 import { isCloudflareLimitsEnabled } from "./ai-gateway-billing/config.js";
@@ -28,7 +29,13 @@ export async function getAuthVendors(env: Cloudflare.Env): Promise<AuthVendorInf
     try {
       const desc = await binding.describe();
       if (!desc.providesAuth) return null;
-      return { vendorId, displayName: desc.displayName, logo: desc.logo, color: desc.color };
+      return {
+        vendorId,
+        displayName: desc.displayName,
+        logo: desc.logo,
+        color: desc.color,
+        configured: connectorIsConfigured(desc),
+      };
     } catch (err) {
       logger.error("failed to describe auth gatekeeper", {
         event: "auth.gatekeeper.describe.failed", vendorId, error: err,
@@ -37,6 +44,19 @@ export async function getAuthVendors(env: Cloudflare.Env): Promise<AuthVendorInf
     }
   }));
   return results.filter((v): v is AuthVendorInfo => v !== null);
+}
+
+function passwordAuthEnabled(
+  env: Cloudflare.Env,
+  authVendors: AuthVendorInfo[],
+): boolean {
+  return isPasswordAuthEnabled(env) || !authVendors.some(vendor => vendor.configured);
+}
+
+/** Resolves password availability without allowing unconfigured OAuth connectors to lock users out. */
+export async function isPasswordAuthAvailable(env: Cloudflare.Env): Promise<boolean> {
+  if (isPasswordAuthEnabled(env)) return true;
+  return passwordAuthEnabled(env, await getAuthVendors(env));
 }
 
 export async function getServerConfig(env: Cloudflare.Env): Promise<ServerConfig> {
@@ -49,7 +69,7 @@ export async function getServerConfig(env: Cloudflare.Env): Promise<ServerConfig
   ]);
   return {
     authVendors,
-    passwordAuthEnabled: isPasswordAuthEnabled(env),
+    passwordAuthEnabled: passwordAuthEnabled(env, authVendors),
     cloudflareLimitsEnabled: isCloudflareLimitsEnabled(env),
     signupsEnabled: config.signupsEnabled,
     siteName: config.siteName,

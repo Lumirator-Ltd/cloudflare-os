@@ -1,6 +1,7 @@
 import { WorkerEntrypoint, DurableObject, RpcTarget, RpcStub } from "cloudflare:workers";
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import {
+  staticOauthConnectorConfiguration,
   GatekeeperUser, GatekeeperVendor as GatekeeperVendorIface, Gatekeeper, ResourceDescription,
   ApprovalQueue, VendorDescription, GatekeeperConnectCallback, GatekeeperConnectOptions,
   AccountDescription, SupportedResource, ResourceConfiguratorFrame, ActionKind, Cursor,
@@ -290,6 +291,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
           "Connect your Slack account to give Cloudflare OS read-only access to the workspaces, " +
           "channels, direct messages, and threads you can see. Build agents that summarize " +
           "conversations, monitor channels, or search across your Slack history.",
+      configuration: staticOauthConnectorConfiguration(this.env),
     };
   }
 

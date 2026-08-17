@@ -17,6 +17,7 @@
 import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import {
+  staticOauthConnectorConfiguration,
   type AccountDescription,
   type ApprovalQueue,
   type Gatekeeper,
@@ -248,6 +249,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
         "Connect your Atlassian Confluence site to let Cloudflare OS search, read, and edit the pages, " +
         "blog posts, and spaces you share. Build agents that draft documentation, organize " +
         "knowledge bases, or keep pages up to date.",
+      configuration: staticOauthConnectorConfiguration(this.env),
     };
   }
 

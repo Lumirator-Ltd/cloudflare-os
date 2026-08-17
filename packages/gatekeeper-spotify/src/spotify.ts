@@ -2,6 +2,7 @@ import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:
 import { validateRpc, skipRpcValidation } from "capnweb-validate";
 import {
   ApprovalQueue,
+  staticOauthConnectorConfiguration,
   stripTrailingSlashes,
   type AccountDescription,
   type ActionDescription,
@@ -468,6 +469,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
         "Connect your Spotify account so Cloudflare OS can search the catalog, read and edit your " +
         "library and playlists, and control playback on your devices. Grant whole-account access " +
         "or scope a Gadget to a single playlist.",
+      configuration: staticOauthConnectorConfiguration(this.env),
     };
   }
 

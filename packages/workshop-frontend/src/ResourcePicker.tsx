@@ -10,6 +10,11 @@ import { GatekeeperIcon } from './components/GatekeeperIcon'
 import {
   PICKER_CAPTION, PICKER_EMPTY, PICKER_ROW, PICKER_ROW_ACTIVE, TabHint,
 } from './components/pickerRows'
+import {
+  CONNECTOR_NOT_CONFIGURED_MESSAGE,
+  connectionErrorMessage,
+  connectorIsConfigured,
+} from './connectorReadiness'
 import { AccountsSubscriberAdapter } from './accountsSubscriber'
 
 export interface VendorOption {
@@ -34,6 +39,7 @@ export type SelectableItem = {
    * requests just that resource's authorization. Undefined means request everything.
    */
   resourceUrlPatterns?: string[]
+  disabled?: boolean
 } | {
   type: 'refine'
   resource: SupportedResource
@@ -331,6 +337,7 @@ export default function ResourcePicker({
           vendorId: vendor.id,
           vendorDescription: vendor.description,
           resourceUrlPatterns: resource.grantable ? [resource.urlPattern] : undefined,
+          disabled: !connectorIsConfigured(vendor.description),
         })
       }
     }
@@ -385,7 +392,7 @@ export default function ResourcePicker({
               onSelectAccount(item.accountId, item.vendorId, item.resource, item.accountDescription, item.vendorDescription)
             }
           }
-        } else {
+        } else if (!item.disabled) {
           handleConnectNew(item.vendorId, item.resourceUrlPatterns)
         }
       }
@@ -402,7 +409,10 @@ export default function ResourcePicker({
       window.open(result.url, '_blank', 'noopener,noreferrer')
     } catch (error) {
       console.error('Failed to initiate connection:', error)
-      toasts.add({ title: 'Failed to start connection flow', variant: 'error' })
+      toasts.add({
+        title: connectionErrorMessage(error, 'Failed to start connection flow'),
+        variant: 'error',
+      })
     } finally {
       setConnectingVendor(null)
     }
@@ -607,13 +617,16 @@ export default function ResourcePicker({
                 {(() => {
                   if (accountsOnly) return null
                   const isActive = itemIdx === activeIndex
+                  const configured = connectorIsConfigured(vendor.description)
                   itemIdx++
                   return (
                   <div
-                    onClick={() => !connectingVendor && handleConnectNew(vendor.id, resource.grantable ? [resource.urlPattern] : undefined)}
-                    className={`${PICKER_ROW} ${isActive ? PICKER_ROW_ACTIVE : ''}`}
+                    role="button"
+                    aria-disabled={!configured}
+                    onClick={() => configured && !connectingVendor && handleConnectNew(vendor.id, resource.grantable ? [resource.urlPattern] : undefined)}
+                    className={`${PICKER_ROW} ${isActive ? PICKER_ROW_ACTIVE : ''} ${configured ? '' : 'opacity-60'}`}
                     style={{
-                      cursor: connectingVendor === vendor.id ? 'wait' : 'pointer',
+                      cursor: !configured ? 'not-allowed' : connectingVendor === vendor.id ? 'wait' : 'pointer',
                     }}
                   >
                     <span className="grid h-6 w-6 flex-shrink-0 place-items-center rounded-md border border-dashed border-kumo-line text-kumo-inactive">
@@ -624,7 +637,11 @@ export default function ResourcePicker({
                       )}
                     </span>
                     <span className="flex-1 text-[13px] leading-[18px] tracking-[-0.25px] text-kumo-subtle">
-                      {connectingVendor === vendor.id ? 'Opening…' : 'Connect new account'}
+                      {!configured
+                        ? CONNECTOR_NOT_CONFIGURED_MESSAGE
+                        : connectingVendor === vendor.id
+                          ? 'Opening…'
+                          : 'Connect new account'}
                     </span>
                     {isActive && <TabHint />}
                   </div>

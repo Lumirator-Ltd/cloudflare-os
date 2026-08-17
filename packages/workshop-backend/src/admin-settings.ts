@@ -1,4 +1,4 @@
-import { AdminApi, AdminFormat, AdminFormatPatch, AdminResourceVendor, AdminSettingsView, AmbientGatekeeperMode, BannerColor, BlueprintPublicInfo, MAX_ANNOUNCEMENT_LENGTH, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_SITE_NAME_LENGTH, isAmbientGatekeeperMode, isBannerColor, isHexColor } from '@gadgets/workshop-shared/api';
+import { AdminApi, AdminConnectorConfiguration, AdminConnectorConfigurationValues, AdminFormat, AdminFormatPatch, AdminResourceVendor, AdminSettingsView, AmbientGatekeeperMode, BannerColor, BlueprintPublicInfo, MAX_ANNOUNCEMENT_LENGTH, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_SITE_NAME_LENGTH, isAmbientGatekeeperMode, isBannerColor, isHexColor } from '@gadgets/workshop-shared/api';
 import { GatekeeperVendor } from '@gadgets/workshop-shared/gatekeeper';
 import { DurableObject } from 'cloudflare:workers';
 import { RpcTarget } from 'capnweb';
@@ -14,6 +14,7 @@ import { buildGatekeeperVendorMap } from './auth/auth-vendors.js';
 import { UserDurableObject } from './user.js';
 import { formatBlueprintsManifestVersion, installFormatBlueprints } from './format-blueprints.js';
 import { FORMAT_BLUEPRINTS } from './generated/format-blueprints.js';
+import { configureConnector, listConnectorConfigurations } from './connector-configuration.js';
 
 const logger = createWorkshopLogger("workshop.admin.settings");
 
@@ -647,12 +648,28 @@ export class AdminApiImpl extends RpcTarget implements AdminApi {
    * `adminUserId` is the requesting admin's identity, forwarded to gatekeepers when listing the
    * resource catalog (some are RBAC-gated per user). It's plain data — not a user-DO dependency.
    */
-  constructor(private admin: DurableObjectStub<AdminSettings>, private adminUserId: string) {
+  constructor(
+    private admin: DurableObjectStub<AdminSettings>,
+    private adminUserId: string,
+    private env: Cloudflare.Env,
+    private fetchImpl: typeof fetch = fetch,
+  ) {
     super();
   }
 
   getSettings(): Promise<AdminSettingsView> {
     return this.admin.getSettings(this.adminUserId);
+  }
+
+  listConnectorConfigurations(): Promise<AdminConnectorConfiguration[]> {
+    return listConnectorConfigurations(this.env);
+  }
+
+  configureConnector(
+    vendorId: string,
+    values: AdminConnectorConfigurationValues,
+  ): Promise<void> {
+    return configureConnector(this.env, vendorId, values, this.fetchImpl);
   }
 
   async setSignupsEnabled(enabled: boolean): Promise<void> {

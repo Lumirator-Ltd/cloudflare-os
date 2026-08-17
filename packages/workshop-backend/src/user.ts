@@ -1,6 +1,6 @@
 import { RpcStub } from "capnweb";
 import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError } from '@gadgets/workshop-shared/api';
-import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame } from "@gadgets/workshop-shared/gatekeeper";
+import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, assertConnectorConfigured } from "@gadgets/workshop-shared/gatekeeper";
 import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
 import { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
@@ -226,6 +226,15 @@ function makeUserStorage(storage: DurableObjectStorage) {
 }
 
 type UserStorage = ReturnType<typeof makeUserStorage>;
+
+async function assertVendorConfigured(
+    vendors: Map<string, Service<GatekeeperVendor>>,
+    vendorId: string,
+): Promise<void> {
+  let vendor = vendors.get(vendorId.toLowerCase());
+  if (!vendor) throw new Error("No such service: " + vendorId);
+  assertConnectorConfigured(await vendor.describe());
+}
 
 function unavailableGatekeeperVendorInfo(id: string): GatekeeperVendorInfo {
   return {
@@ -1146,6 +1155,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     if ((await readAdminConfig(this.env)).disabledGatekeepers.includes(vendorId.toLowerCase())) {
       throw new Error(`The "${vendorId}" gatekeeper is disabled on this deployment.`);
     }
+    assertConnectorConfigured(await vendor.describe());
 
     let accountId = this.storage.nextAccountId.get();
     this.storage.nextAccountId.put(accountId + 1);
@@ -1370,6 +1380,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   async ensureAccountResources(accountId: number, resourceUrlPatterns: string[]): Promise<{url?: string}> {
     let record = this.storage.connectedAccounts.get(accountId);
     if (!record) throw new Error("No such account.");
+    await assertVendorConfigured(this.vendors, record.vendorId);
     return record.account.ensureResources(resourceUrlPatterns);
   }
 
@@ -1540,6 +1551,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   async reconnectAccount(accountId: number): Promise<{url: string}> {
     let record = this.storage.connectedAccounts.get(accountId);
     if (!record) throw new Error("No such account.");
+    await assertVendorConfigured(this.vendors, record.vendorId);
     return record.account.reconnect();
   }
 

@@ -34,7 +34,42 @@ export type AvatarImage = {
   url: string;
 }
 
-/** Describes a connected GatekeeperVendor, for display purposes. */
+/** Describes one write-only deployment input required by a connector. */
+export type ConnectorConfigurationInput = {
+  name: string;
+  label: string;
+  secret: true;
+};
+
+/** Describes whether a connector has its required deployment configuration. */
+export type ConnectorConfiguration = {
+  configured: boolean;
+};
+
+/** Guidance returned whenever a new connector authorization flow is unavailable. */
+export const CONNECTOR_NOT_CONFIGURED_MESSAGE =
+  "This connector is not configured. Ask an administrator to configure it.";
+
+/** Returns whether a vendor permits new authorization flows. */
+export function connectorIsConfigured(description: VendorDescription): boolean {
+  return description.configuration?.configured !== false;
+}
+
+/** Rejects a new authorization flow when the vendor reports missing deployment configuration. */
+export function assertConnectorConfigured(description: VendorDescription): void {
+  if (!connectorIsConfigured(description)) {
+    throw new Error(CONNECTOR_NOT_CONFIGURED_MESSAGE);
+  }
+}
+
+/** Builds readiness metadata for a Gatekeeper backed by static OAuth credentials. */
+export function staticOauthConnectorConfiguration(
+  env: { CLIENT_ID?: string; CLIENT_SECRET?: string },
+): ConnectorConfiguration {
+  return { configured: Boolean(env.CLIENT_ID && env.CLIENT_SECRET) };
+}
+
+/** Describes a connected GatekeeperVendor for display and connection readiness. */
 export type VendorDescription = {
   /** Human-readable name of the service, e.g. "Google", "GitHub", etc. */
   displayName: string;
@@ -76,6 +111,9 @@ export type VendorDescription = {
    * management UI (see AccountDescription.singleton / .providesUi).
    */
   autoProvisionsAccount?: boolean;
+
+  /** Optional so Gatekeepers without deployment credentials retain their existing behavior. */
+  configuration?: ConnectorConfiguration;
 }
 
 /**
