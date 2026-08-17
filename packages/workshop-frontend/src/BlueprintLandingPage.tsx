@@ -19,6 +19,11 @@ import ResourceConfiguratorHost from './ResourceConfiguratorHost'
 import { WorkshopButton, WorkshopIconButton } from './components/WorkshopControls'
 import { MENU_CONTENT, MENU_ITEM, MENU_ITEM_DANGER } from './components/menuStyles'
 import { useDocumentTitle } from './useDocumentTitle'
+import {
+  CONNECTOR_NOT_CONFIGURED_MESSAGE,
+  connectionErrorMessage,
+  connectorIsConfigured,
+} from './connectorReadiness'
 
 interface Props {
   rpcStub: RpcStub<PublicApi>
@@ -208,7 +213,10 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
       toasts.add({ title: 'Complete the account connection in the new tab.', variant: 'success' })
     } catch (err) {
       console.error('Failed to initiate connection:', err)
-      toasts.add({ title: 'Failed to start connection flow', variant: 'error' })
+      toasts.add({
+        title: connectionErrorMessage(err, 'Failed to start connection flow'),
+        variant: 'error',
+      })
     } finally {
       setConnectingVendor(null)
     }
@@ -1664,6 +1672,11 @@ function BlueprintGatekeeperBindingField({
         onSelect={(id) => onChange({ accountId: id } as any)}
         onConnect={() => onConnectAccount(binding.gatekeeperName)}
         onReconnect={onReconnectAccount}
+        connectDisabledMessage={
+          connectorIsConfigured(vendor.description)
+            ? undefined
+            : CONNECTOR_NOT_CONFIGURED_MESSAGE
+        }
       />
 
       {selectedAccount && (

@@ -11,6 +11,11 @@ import {
 import { AccountDescription, VendorDescription, SupportedResource } from '@gadgets/workshop-shared/gatekeeper'
 import { WorkshopButton } from './components/WorkshopControls'
 import Avatar from './components/Avatar'
+import {
+  CONNECTOR_NOT_CONFIGURED_MESSAGE,
+  connectionErrorMessage,
+  connectorIsConfigured,
+} from './connectorReadiness'
 
 // Shown when a non-owner opens a shared Gadget that reads data through one or more gatekeeper
 // bindings, and they haven't yet chosen which of their own connected accounts to use for each one.
@@ -188,7 +193,10 @@ export default function ObserverConfigModal({
       }
     } catch (err) {
       console.error('Failed to initiate connection:', err)
-      toasts.add({ title: 'Failed to start connection flow', variant: 'error' })
+      toasts.add({
+        title: connectionErrorMessage(err, 'Failed to start connection flow'),
+        variant: 'error',
+      })
       connectingRef.current = null
       setConnecting(null)
     }
@@ -253,6 +261,7 @@ export default function ObserverConfigModal({
               const vendor = matching[0]?.vendor ?? vendorsById.get(need.vendorId)
               const vendorName = vendor?.displayName || need.vendorId || 'service'
               const chosen = accountFor(need.gatekeeperId)
+              const configured = vendor ? connectorIsConfigured(vendor) : true
 
               return (
                 <div key={need.gatekeeperId} className="rounded-xl border border-kumo-line bg-kumo-base p-4">
@@ -277,9 +286,13 @@ export default function ObserverConfigModal({
                       <WorkshopButton
                         tone="primary"
                         onClick={() => handleConnect(need)}
-                        disabled={connecting === need.vendorId}
+                        disabled={!configured || connecting === need.vendorId}
                       >
-                        {connecting === need.vendorId ? 'Waiting for connection…' : 'Connect'}
+                        {!configured
+                          ? CONNECTOR_NOT_CONFIGURED_MESSAGE
+                          : connecting === need.vendorId
+                            ? 'Waiting for connection…'
+                            : 'Connect'}
                       </WorkshopButton>
                     )}
                   </div>
@@ -367,11 +380,15 @@ export default function ObserverConfigModal({
                         <button
                           type="button"
                           onClick={() => handleConnect(need)}
-                          disabled={connecting === need.vendorId}
+                          disabled={!configured || connecting === need.vendorId}
                           className="flex items-center gap-1 text-xs text-kumo-subtle hover:text-kumo-default disabled:opacity-60 self-start"
                         >
                           <Plus size={11} />
-                          {connecting === need.vendorId ? 'Waiting for connection…' : 'Connect a different account'}
+                          {!configured
+                            ? CONNECTOR_NOT_CONFIGURED_MESSAGE
+                            : connecting === need.vendorId
+                              ? 'Waiting for connection…'
+                              : 'Connect a different account'}
                         </button>
                       )}
                     </div>

@@ -40,6 +40,7 @@ export function AccountChooser({
   onConnect,
   onReconnect,
   onGrantAccess,
+  connectDisabledMessage,
 }: {
   accounts: AccountOption[]
   selectedAccountId: number | null
@@ -54,6 +55,7 @@ export function AccountChooser({
   onConnect: () => void
   onReconnect: (id: number) => void
   onGrantAccess?: (id: number) => void
+  connectDisabledMessage?: string
 }) {
   const isEmailMailbox = vendorId === 'email' && resourceTitle === 'Email Mailbox'
 
@@ -139,7 +141,7 @@ export function AccountChooser({
           <button
             type="button"
             onClick={onConnect}
-            disabled={connecting}
+            disabled={connecting || connectDisabledMessage !== undefined}
             className="flex w-full cursor-pointer items-center gap-2 px-3 py-2.5 text-left text-[12px] leading-4 font-medium tracking-[-0.2px] text-kumo-subtle transition-colors hover:bg-kumo-elevated hover:text-kumo-default disabled:cursor-not-allowed disabled:opacity-60"
           >
             {connecting ? (
@@ -147,9 +149,9 @@ export function AccountChooser({
             ) : (
               <Plus size={14} />
             )}
-            {isEmailMailbox
+            {connectDisabledMessage ?? (isEmailMailbox
               ? 'Enable Email mailboxes'
-              : accounts.length === 0 ? `Connect ${vendorName}` : `Use another ${vendorName} account`}
+              : accounts.length === 0 ? `Connect ${vendorName}` : `Use another ${vendorName} account`)}
           </button>
         )}
       </div>

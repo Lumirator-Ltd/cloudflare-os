@@ -34,6 +34,11 @@ import { AccountChooser, AccountOption } from './gatekeeper-modal/AccountChooser
 import { matchesResourceUrl } from './resourceMatching'
 import { reportIssue } from './errorReporting'
 import { useSiteName } from './ServerConfigContext'
+import {
+  CONNECTOR_NOT_CONFIGURED_MESSAGE,
+  connectionErrorMessage,
+  connectorIsConfigured,
+} from './connectorReadiness'
 
 export interface GatekeeperModalProps {
   open: boolean
@@ -92,6 +97,7 @@ type ConnectionType = {
   resourceUrlPattern?: string
   // Whether this resource type is independently grantable.
   grantable?: boolean
+  connectorConfigured?: boolean
 }
 
 type VendorOption = {
@@ -151,6 +157,7 @@ function connectionForResource(vendor: VendorOption, resource: SupportedResource
     accent: vendor.description.color,
     resourceUrlPattern: resource.urlPattern,
     grantable: Boolean(resource.grantable),
+    connectorConfigured: connectorIsConfigured(vendor.description),
   }
 }
 
@@ -611,7 +618,10 @@ export default function GatekeeperModal({
     } catch (error) {
       console.error('Failed to initiate connection:', error)
       reportIssue('gatekeeper.connect-start', error, { gatekeeperVendorId: vendorId })
-      toasts.add({ title: 'Failed to start connection flow', variant: 'error' })
+      toasts.add({
+        title: connectionErrorMessage(error, 'Failed to start connection flow'),
+        variant: 'error',
+      })
     } finally {
       setConnectingVendor(null)
     }
@@ -854,6 +864,11 @@ export default function GatekeeperModal({
                     }}
                     onReconnect={handleReconnectAccount}
                     onGrantAccess={handleGrantResourceAccess}
+                    connectDisabledMessage={
+                      selectedConnection.connectorConfigured === false
+                        ? CONNECTOR_NOT_CONFIGURED_MESSAGE
+                        : undefined
+                    }
                   />
                 )}
 

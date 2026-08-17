@@ -1,9 +1,13 @@
 import { useState, useEffect } from 'react'
 import { Dialog, Text, Loader, useKumoToastManager } from '@cloudflare/kumo'
 import { RpcStub } from 'capnweb'
-import { AuthenticatedApi, GatekeeperVendorFilter } from '@gadgets/workshop-shared/api'
-import { VendorDescription } from '@gadgets/workshop-shared/gatekeeper'
+import { AuthenticatedApi, GatekeeperVendorFilter, GatekeeperVendorInfo } from '@gadgets/workshop-shared/api'
 import VendorCard from './VendorCard'
+import {
+  CONNECTOR_NOT_CONFIGURED_MESSAGE,
+  connectionErrorMessage,
+  connectorIsConfigured,
+} from './connectorReadiness'
 
 interface ConnectAccountModalProps {
   visible: boolean
@@ -12,11 +16,6 @@ interface ConnectAccountModalProps {
   authenticatedApi: RpcStub<AuthenticatedApi>
   /** Optional filter to only show vendors supporting certain features */
   filter?: GatekeeperVendorFilter
-}
-
-interface VendorOption {
-  id: string
-  description: VendorDescription
 }
 
 export default function ConnectAccountModal({
@@ -28,7 +27,7 @@ export default function ConnectAccountModal({
 }: ConnectAccountModalProps) {
   const toasts = useKumoToastManager()
   const [connecting, setConnecting] = useState<string | null>(null)
-  const [vendors, setVendors] = useState<VendorOption[]>([])
+  const [vendors, setVendors] = useState<GatekeeperVendorInfo[]>([])
   const [vendorsLoading, setVendorsLoading] = useState(true)
 
   // Fetch vendors when modal opens
@@ -49,7 +48,7 @@ export default function ConnectAccountModal({
             variant: 'warning',
           })
         }
-        setVendors(vendorList.filter(v => !v.unavailable).map(v => ({ id: v.id, description: v.description })))
+        setVendors(vendorList.filter(v => !v.unavailable))
       } catch (error) {
         console.error('Failed to fetch vendors:', error)
         toasts.add({ title: 'Failed to load available services', variant: 'error' })
@@ -69,7 +68,10 @@ export default function ConnectAccountModal({
       onInitiated()
     } catch (error) {
       console.error('Failed to initiate connection:', error)
-      toasts.add({ title: 'Failed to start connection flow', variant: 'error' })
+      toasts.add({
+        title: connectionErrorMessage(error, 'Failed to start connection flow'),
+        variant: 'error',
+      })
       setConnecting(null)
     }
   }
@@ -88,15 +90,20 @@ export default function ConnectAccountModal({
           </div>
         ) : (
           <div className="flex flex-col gap-3 mt-2">
-            {vendors.map(vendor => (
-              <VendorCard
-                key={vendor.id}
-                vendor={vendor.description}
-                onClick={() => handleConnect(vendor.id)}
-                loading={connecting === vendor.id}
-                disabled={connecting !== null && connecting !== vendor.id}
-              />
-            ))}
+            {vendors.map(vendor => {
+              const configured = connectorIsConfigured(vendor.description)
+              return (
+                <VendorCard
+                  key={vendor.id}
+                  vendorId={vendor.id}
+                  vendor={vendor.description}
+                  onClick={() => handleConnect(vendor.id)}
+                  loading={connecting === vendor.id}
+                  disabled={!configured || (connecting !== null && connecting !== vendor.id)}
+                  disabledMessage={configured ? undefined : CONNECTOR_NOT_CONFIGURED_MESSAGE}
+                />
+              )
+            })}
           </div>
         )}
       </Dialog>

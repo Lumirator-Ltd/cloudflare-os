@@ -34,6 +34,11 @@ import { useTheme } from './ThemeContext'
 import { useSiteName } from './ServerConfigContext'
 import SiteLogo from './components/SiteLogo'
 import { useDocumentTitle } from './useDocumentTitle'
+import {
+  CONNECTOR_NOT_CONFIGURED_MESSAGE,
+  connectionErrorMessage,
+  connectorIsConfigured,
+} from './connectorReadiness'
 
 // ─── constants ──────────────────────────────────────────────────────────────────
 
@@ -55,6 +60,79 @@ interface VendorEntry {
   id: string
   description: VendorDescription
   logoKey: string
+}
+
+export function OnboardingConnectorButton({
+  vendorId,
+  description,
+  resolvedThemeMode,
+  connected,
+  connecting,
+  onConnect,
+}: {
+  vendorId: string
+  description: VendorDescription
+  resolvedThemeMode: 'light' | 'dark'
+  connected: boolean
+  connecting: boolean
+  onConnect: () => void
+}) {
+  const Logo = logoComponents[VENDOR_LOGO_MAP[vendorId] ?? vendorId.toLowerCase()]
+  const configured = connectorIsConfigured(description)
+  const disabled = connected || connecting || !configured
+
+  return (
+    <button
+      onClick={onConnect}
+      disabled={disabled}
+      className={`flex items-center gap-2.5 px-3 py-2.5 rounded-xl border text-left transition-all duration-150 ${
+        connected
+          ? 'border-kumo-brand/40 bg-kumo-brand/5 cursor-default'
+          : connecting
+            ? 'border-kumo-line bg-kumo-tint cursor-wait'
+            : !configured
+              ? 'border-kumo-line bg-kumo-tint cursor-not-allowed opacity-60'
+              : 'border-kumo-line hover:border-kumo-fill hover:bg-kumo-tint cursor-pointer'
+      }`}
+    >
+      <div
+        className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0"
+        style={{ backgroundColor: getVendorIconBackground(vendorId, resolvedThemeMode) }}
+      >
+        {Logo ? (
+          <Logo size={16} />
+        ) : (
+          <span className="text-xs font-bold text-kumo-strong">
+            {description.displayName[0]}
+          </span>
+        )}
+      </div>
+      <div className="flex-1 min-w-0">
+        <p className="text-sm font-medium text-kumo-default truncate">
+          {description.displayName}
+        </p>
+        <p className="text-xs text-kumo-subtle">
+          {connected
+            ? 'Connected'
+            : connecting
+              ? 'Connecting...'
+              : configured
+                ? 'Not connected'
+                : CONNECTOR_NOT_CONFIGURED_MESSAGE}
+        </p>
+      </div>
+      {connected && (
+        <PlugsConnected
+          size={14}
+          className="text-kumo-brand flex-shrink-0"
+          weight="bold"
+        />
+      )}
+      {connecting && (
+        <div className="w-3.5 h-3.5 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin flex-shrink-0" />
+      )}
+    </button>
+  )
 }
 
 // ─── component ──────────────────────────────────────────────────────────────────
@@ -275,7 +353,10 @@ export default function OnboardingWizard({
       window.open(url, '_blank', 'noopener,noreferrer')
     } catch (err) {
       console.error('Failed to start connection:', err)
-      toasts.add({ title: 'Failed to start connection', variant: 'error' })
+      toasts.add({
+        title: connectionErrorMessage(err, 'Failed to start connection'),
+        variant: 'error',
+      })
     } finally {
       // Reset after a short delay — the subscription will update the UI when the connection completes
       setTimeout(() => setConnectingVendorId(null), 2000)
@@ -598,59 +679,17 @@ export default function OnboardingWizard({
                   </div>
                 ) : (
                   <div className="grid grid-cols-2 gap-2 max-h-64 overflow-y-auto pr-1">
-                    {sortedVendors.map((vendor) => {
-                      const Logo = logoComponents[vendor.logoKey]
-                      const isConnected = connectedVendorIds.has(vendor.id)
-                      const isConnecting = connectingVendorId === vendor.id
-                      return (
-                        <button
-                          key={vendor.id}
-                          onClick={() => !isConnected && !isConnecting && handleConnect(vendor.id)}
-                          disabled={isConnected || isConnecting}
-                          className={`
-                            flex items-center gap-2.5 px-3 py-2.5 rounded-xl border text-left
-                            transition-all duration-150
-                            ${isConnected
-                              ? 'border-kumo-brand/40 bg-kumo-brand/5 cursor-default'
-                              : isConnecting
-                                ? 'border-kumo-line bg-kumo-tint cursor-wait'
-                                : 'border-kumo-line hover:border-kumo-fill hover:bg-kumo-tint cursor-pointer'
-                            }
-                          `}
-                        >
-                          <div
-                            className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0"
-                            style={{ backgroundColor: getVendorIconBackground(vendor.id, resolvedThemeMode) }}
-                          >
-                            {Logo ? (
-                              <Logo size={16} />
-                            ) : (
-                              <span className="text-xs font-bold text-kumo-strong">
-                                {vendor.description.displayName[0]}
-                              </span>
-                            )}
-                          </div>
-                          <div className="flex-1 min-w-0">
-                            <p className="text-sm font-medium text-kumo-default truncate">
-                              {vendor.description.displayName}
-                            </p>
-                            <p className="text-xs text-kumo-subtle truncate">
-                              {isConnected ? 'Connected' : isConnecting ? 'Connecting...' : 'Not connected'}
-                            </p>
-                          </div>
-                          {isConnected && (
-                            <PlugsConnected
-                              size={14}
-                              className="text-kumo-brand flex-shrink-0"
-                              weight="bold"
-                            />
-                          )}
-                          {isConnecting && (
-                            <div className="w-3.5 h-3.5 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin flex-shrink-0" />
-                          )}
-                        </button>
-                      )
-                    })}
+                    {sortedVendors.map((vendor) => (
+                      <OnboardingConnectorButton
+                        key={vendor.id}
+                        vendorId={vendor.id}
+                        description={vendor.description}
+                        resolvedThemeMode={resolvedThemeMode}
+                        connected={connectedVendorIds.has(vendor.id)}
+                        connecting={connectingVendorId === vendor.id}
+                        onConnect={() => handleConnect(vendor.id)}
+                      />
+                    ))}
                   </div>
                 )}
 

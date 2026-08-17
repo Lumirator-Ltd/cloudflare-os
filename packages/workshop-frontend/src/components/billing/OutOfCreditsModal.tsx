@@ -5,6 +5,7 @@ import { CloudWarning, Lightning } from '@phosphor-icons/react'
 import { useOptionalAuthenticatedApi } from '../../AuthContext'
 import { buildAddCreditsUrl } from './creditsUrl'
 import ResetCountdown from './ResetCountdown'
+import { connectionErrorMessage } from '../../connectorReadiness'
 
 interface OutOfCreditsModalProps {
   open: boolean
@@ -60,8 +61,11 @@ export default function OutOfCreditsModal({ open, onClose }: OutOfCreditsModalPr
     try {
       const { url } = await auth.authenticatedApi.connectAccount('cloudflare')
       window.open(url, '_blank', 'noopener,noreferrer')
-    } catch {
-      // ignore
+    } catch (error) {
+      toasts.add({
+        title: connectionErrorMessage(error, 'Failed to start Cloudflare connection'),
+        variant: 'error',
+      })
     } finally {
       setConnecting(false)
     }

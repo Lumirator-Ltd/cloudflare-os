@@ -24,6 +24,11 @@ import {
 import { ConnectedAccountsSubscriber, GatekeeperVendorInfo } from '@gadgets/workshop-shared/api'
 import { useDocumentTitle } from '../useDocumentTitle'
 import { useSiteName } from '../ServerConfigContext'
+import {
+  CONNECTOR_NOT_CONFIGURED_MESSAGE,
+  connectionErrorMessage,
+  connectorIsConfigured,
+} from '../connectorReadiness'
 
 export const Route = createFileRoute('/gatekeepers')({
   component: ConnectorsPage,
@@ -86,9 +91,10 @@ interface ConnectorCardProps {
   onReconnect?: () => void
   reconnectBusy?: boolean
   view?: 'grid' | 'list'
+  disabledMessage?: string
 }
 
-function ConnectorCard({
+export function ConnectorCard({
   logoUrl,
   color,
   fallback,
@@ -101,9 +107,11 @@ function ConnectorCard({
   onReconnect,
   reconnectBusy = false,
   view = 'grid',
+  disabledMessage,
 }: ConnectorCardProps) {
+  const disabled = disabledMessage !== undefined
   const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
-    if (event.currentTarget !== event.target) return
+    if (disabled || event.currentTarget !== event.target) return
     if (event.key === 'Enter' || event.key === ' ') {
       event.preventDefault()
       onClick()
@@ -163,10 +171,11 @@ function ConnectorCard({
     return (
       <div
         role="button"
-        tabIndex={0}
-        onClick={onClick}
+        tabIndex={disabled ? -1 : 0}
+        aria-disabled={disabled}
+        onClick={disabled ? undefined : onClick}
         onKeyDown={handleKeyDown}
-        className="group flex w-full cursor-pointer items-center gap-3 rounded-lg px-3 py-2.5 text-left transition-colors duration-150 ease-out hover:bg-kumo-tint"
+        className={`group flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left transition-colors duration-150 ease-out ${disabled ? 'cursor-not-allowed opacity-60' : 'cursor-pointer hover:bg-kumo-tint'}`}
       >
         <div className="relative shrink-0">
           <VendorIconTile
@@ -185,9 +194,9 @@ function ConnectorCard({
             </span>
             {badgeEl}
           </div>
-          {(metaLine || tagline) && (
+          {(metaLine || disabledMessage || tagline) && (
             <div className="mt-0.5 truncate text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
-              {metaLine ?? tagline}
+              {metaLine ?? disabledMessage ?? tagline}
             </div>
           )}
         </div>
@@ -199,10 +208,11 @@ function ConnectorCard({
   return (
     <div
       role="button"
-      tabIndex={0}
-      onClick={onClick}
+      tabIndex={disabled ? -1 : 0}
+      aria-disabled={disabled}
+      onClick={disabled ? undefined : onClick}
       onKeyDown={handleKeyDown}
-      className="themed-card-hover-shadow group grid w-full cursor-pointer grid-cols-[48px_1fr_auto] items-center gap-4 rounded-2xl border border-kumo-line bg-kumo-base px-5 py-5 text-left transition-[border-color,transform,box-shadow] duration-150 ease-out hover:-translate-y-px hover:border-kumo-fill active:scale-[0.995]"
+      className={`themed-card-hover-shadow group grid w-full grid-cols-[48px_1fr_auto] items-center gap-4 rounded-2xl border border-kumo-line bg-kumo-base px-5 py-5 text-left transition-[border-color,transform,box-shadow] duration-150 ease-out ${disabled ? 'cursor-not-allowed opacity-60' : 'cursor-pointer hover:-translate-y-px hover:border-kumo-fill active:scale-[0.995]'}`}
     >
       <div className="self-start">
         <div className="relative">
@@ -223,9 +233,9 @@ function ConnectorCard({
             {metaLine}
           </div>
         )}
-        {tagline && (
+        {(disabledMessage || tagline) && (
           <p className="mt-2 line-clamp-2 text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-subtle">
-            {tagline}
+            {disabledMessage ?? tagline}
           </p>
         )}
       </div>
@@ -605,7 +615,10 @@ function ConnectorsPage() {
       handleCloseModal()
     } catch (err) {
       console.error('Failed to connect account:', err)
-      toasts.add({ title: 'Failed to start connection', variant: 'error' })
+      toasts.add({
+        title: connectionErrorMessage(err, 'Failed to start connection'),
+        variant: 'error',
+      })
     } finally {
       setConnecting(false)
     }
@@ -833,19 +846,23 @@ function ConnectorsPage() {
             <SectionEyebrow label="Available" />
             <div className={sectionGridClass}>
 
-              {filteredAvailable.map((vendor) => (
-                <ConnectorCard
-                  key={vendor.id}
-                  logoUrl={vendor.description.logo?.url}
-                  color={vendor.description.color}
-                  fallback={vendor.description.displayName}
-                  name={vendor.description.displayName}
-                  tagline={vendor.description.tagline}
-                  state="available"
-                  onClick={() => handleOpenConnect(vendor.id)}
-                  view={view}
-                />
-              ))}
+              {filteredAvailable.map((vendor) => {
+                const configured = connectorIsConfigured(vendor.description)
+                return (
+                  <ConnectorCard
+                    key={vendor.id}
+                    logoUrl={vendor.description.logo?.url}
+                    color={vendor.description.color}
+                    fallback={vendor.description.displayName}
+                    name={vendor.description.displayName}
+                    tagline={vendor.description.tagline}
+                    state="available"
+                    onClick={() => handleOpenConnect(vendor.id)}
+                    view={view}
+                    disabledMessage={configured ? undefined : CONNECTOR_NOT_CONFIGURED_MESSAGE}
+                  />
+                )
+              })}
             </div>
           </section>
         )}

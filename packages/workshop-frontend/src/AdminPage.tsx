@@ -794,12 +794,18 @@ export default function AdminPage() {
       {activeTab === 'gatekeepers' && (
         <div className="bg-kumo-elevated border border-kumo-line rounded-xl p-6">
           <h2 className="text-lg font-semibold text-kumo-strong mb-1">Gatekeepers</h2>
-          <p className="text-sm text-kumo-subtle mb-5">
+          <p className="text-sm text-kumo-subtle mb-3">
             Turn connectors and resource types on or off for each service. Auto-provisioned
             gatekeepers (like the Context Library) have three modes &mdash; disabled, optional, or
             enabled for everyone. Changes are soft: they don&rsquo;t revoke access a gadget already
             holds.
           </p>
+          <a
+            href="/admin/connectors"
+            className="mb-5 inline-flex text-sm font-medium text-kumo-brand hover:underline"
+          >
+            Configure connector credentials
+          </a>
 
           {resourceVendors.length === 0 && (
             <p className="text-sm text-kumo-subtle">

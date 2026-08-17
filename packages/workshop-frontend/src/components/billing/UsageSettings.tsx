@@ -7,6 +7,7 @@ import { useAuthenticatedApi } from '../../AuthContext'
 import { useCloudflareLimitsEnabled } from '../../ServerConfigContext'
 import { buildAddCreditsUrl } from './creditsUrl'
 import ResetCountdown from './ResetCountdown'
+import { connectionErrorMessage } from '../../connectorReadiness'
 
 // Shows the user's free-tier usage and Cloudflare connection / credit status on the profile page.
 // Renders nothing unless the Cloudflare limits flow is enabled server-side.
@@ -60,8 +61,11 @@ export default function UsageSettings() {
       // OAuth popup; the connected-accounts subscription + focus refresh pick up the result.
       const { url } = await authenticatedApi.connectAccount('cloudflare')
       window.open(url, '_blank', 'noopener,noreferrer')
-    } catch {
-      toasts.add({ title: 'Failed to start Cloudflare connection', variant: 'error' })
+    } catch (error) {
+      toasts.add({
+        title: connectionErrorMessage(error, 'Failed to start Cloudflare connection'),
+        variant: 'error',
+      })
     } finally {
       setBusy(false)
     }
