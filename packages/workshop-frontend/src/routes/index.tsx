@@ -107,10 +107,11 @@ export function HomePageContent({ prompt }: HomeSearch) {
       try {
         ensureProvisionalGadget();
         const overseer = provisionalOverseerRef.current!.stub;
-        // Pipeline both independent calls in one batch, but settle both before releasing the stub.
+        const workspaceTitle = typeof message === "string" ? message.trim() : "";
         const [chat, {id}] = await Promise.all([
           overseer.newChat(message, modelId, capsules, attachments, formats),
           overseer.getMetadata(),
+          workspaceTitle ? overseer.setTitle(workspaceTitle) : Promise.resolve(),
         ]);
         provisionalOverseerRef.current?.stub[Symbol.dispose]();
         provisionalOverseerRef.current = null;
