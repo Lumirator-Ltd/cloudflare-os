@@ -39,13 +39,12 @@ const WORKER_PREFIX_PATTERN = /^[a-z0-9][a-z0-9_-]*$/;
 const MAX_SECRET_LENGTH = 4096;
 const SETUP_UNAVAILABLE_ERROR =
   "Connector configuration writes are not available on this deployment.";
+const DISCOVERY_ERROR = "Connector configuration could not be discovered.";
 
-function writeFailureMessage(written: number, status?: number): string {
+function writeFailureMessage(status?: number): string {
   const statusDetail = status === undefined ? "" : ` (Cloudflare API status ${status})`;
-  const partialDetail = written === 0
-    ? ""
-    : " The connector may have been partially updated; retry with the same values.";
-  return `Connector configuration request failed${statusDetail}.${partialDetail}`;
+  return `Connector configuration request failed${statusDetail}. ` +
+    "The connector credentials may have been partially updated; retry with the same values.";
 }
 
 function publicBaseUrl(value: string | undefined): string | null {
@@ -91,7 +90,19 @@ async function configurableInputs(
 ): Promise<readonly ConnectorConfigurationInput[]> {
   const vendor = vendors.get(vendorId);
   const inputs = canonicalInputs(vendorId);
-  if (!vendor || !inputs || !(await vendor.describe()).configuration) {
+  if (!vendor || !inputs) {
+    throw new Error(`Connector "${vendorId}" is not configurable.`);
+  }
+  let description;
+  try {
+    description = await vendor.describe();
+  } catch {
+    logger.warn("failed to describe configurable connector", {
+      event: "connector.configuration.describe.failed", vendorId,
+    });
+    throw new Error(DISCOVERY_ERROR);
+  }
+  if (!description.configuration) {
     throw new Error(`Connector "${vendorId}" is not configurable.`);
   }
   return inputs;
@@ -175,7 +186,6 @@ export async function configureConnector(
     `https://api.cloudflare.com/client/v4/accounts/${setup.accountId}/workers/scripts/` +
     `${setup.workerPrefix}${vendorId}/secrets`;
 
-  let written = 0;
   for (const input of inputs) {
     let response: Response;
     try {
@@ -192,11 +202,10 @@ export async function configureConnector(
         }),
       });
     } catch {
-      throw new Error(writeFailureMessage(written));
+      throw new Error(writeFailureMessage());
     }
     if (!response.ok) {
-      throw new Error(writeFailureMessage(written, response.status));
+      throw new Error(writeFailureMessage(response.status));
     }
-    written++;
   }
 }

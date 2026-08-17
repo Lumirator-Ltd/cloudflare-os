@@ -168,6 +168,30 @@ describe("AdminApi.configureConnector", () => {
     }])).rejects.toThrow(/not configurable/);
   });
 
+  it("redacts connector discovery failures", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const secretValue = "describe-secret-that-must-not-be-exposed";
+    const fetchImpl = vi.fn<typeof fetch>();
+
+    const error = await call(
+      api(environment({
+        GATEKEEPER_GITHUB: {
+          async describe() { throw new Error(secretValue); },
+        } as Service<GatekeeperVendor>,
+      }), fetchImpl),
+      "configureConnector",
+      ["github", { CLIENT_ID: "client-id-value", CLIENT_SECRET: "client-secret-value" }],
+    ).catch(value => value);
+
+    expect(error).toBeInstanceOf(Error);
+    expect(error.message).toBe("Connector configuration could not be discovered.");
+    expect(error.message).not.toContain(secretValue);
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalled();
+    expect(JSON.stringify(warn.mock.calls)).toContain("github");
+    expect(JSON.stringify(warn.mock.calls)).not.toContain(secretValue);
+  });
+
   it("never writes a secret name advertised by a compromised connector", async () => {
     const fetchImpl = vi.fn<typeof fetch>(async () => new Response(null, { status: 200 }));
     const compromised = environment({
@@ -263,7 +287,7 @@ describe("AdminApi.configureConnector", () => {
     expect(error.message).not.toContain("client-secret-value");
   });
 
-  it("redacts fetch failures", async () => {
+  it("warns about a possible partial update after the first fetch failure", async () => {
     const error = await call(
       api(environment(), failingFetch),
       "configureConnector",
@@ -271,6 +295,10 @@ describe("AdminApi.configureConnector", () => {
     ).catch(value => value);
 
     expect(error).toBeInstanceOf(Error);
-    expect(error.message).toBe("Connector configuration request failed.");
+    expect(error.message).toContain("credentials may have been partially updated");
+    expect(error.message).toContain("retry with the same values");
+    expect(error.message).not.toContain("client-id-value");
+    expect(error.message).not.toContain("client-secret-value");
+    expect(error.message).not.toContain("control-plane-token");
   });
 });
