@@ -163,12 +163,10 @@ describe('/admin/connectors', () => {
     expect(rendered.textContent).toContain('Save credentials')
   })
 
-  it('saves exact fields, clears them, refreshes status, and reports success', async () => {
+  it('marks the connector configured immediately after saving credentials', async () => {
     const configureConnector = vi.fn<() => Promise<void>>(async () => {})
     const listConnectorConfigurations = vi
-      .fn<() => Promise<AdminConnectorConfiguration[]>>()
-      .mockResolvedValueOnce([CONNECTORS[1]])
-      .mockResolvedValueOnce([{ ...CONNECTORS[1], configured: true }])
+      .fn<() => Promise<AdminConnectorConfiguration[]>>(async () => [CONNECTORS[1]])
     auth({ listConnectorConfigurations, configureConnector })
     const rendered = await render()
 
@@ -192,7 +190,7 @@ describe('/admin/connectors', () => {
     })
     expect(idInput.value).toBe('')
     expect(secretInput.value).toBe('')
-    expect(listConnectorConfigurations).toHaveBeenCalledTimes(2)
+    expect(listConnectorConfigurations).toHaveBeenCalledOnce()
     expect(rendered.textContent).toContain('Configured')
     expect(rendered.textContent).toContain('Rotate credentials')
     expect(addToast).toHaveBeenCalledWith({
