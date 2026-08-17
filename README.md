@@ -242,6 +242,7 @@ Each gatekeeper package contains instructions for how to set it up:
 
 * [GitHub API](packages/gatekeeper-github/README.md)
 * [Google API](packages/gatekeeper-google/README.md)
+* [HubSpot CRM](packages/gatekeeper-hubspot/README.md)
 * [Cloudflare API](packages/gatekeeper-cloudflare/README.md)
 * [Supabase API](packages/gatekeeper-supabase/README.md)
 * [Notion API](packages/gatekeeper-notion/README.md)
