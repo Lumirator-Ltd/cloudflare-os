@@ -1,0 +1,111 @@
+# HubSpot Gatekeeper Design
+
+## Goal
+
+Add an installable HubSpot connector to Cloudflare OS that connects one HubSpot account through OAuth and gives Gadgets bounded access to contacts, companies, and deals. The MVP supports read/search plus approval-gated create/update operations. It does not delete records, access sensitive-data scopes, act as a sign-in provider, or expose marketing, ticketing, custom-object, batch, association, or webhook APIs.
+
+## Provider contract
+
+The connector targets HubSpot's current Developer Platform rather than legacy public apps.
+
+- Authorization endpoint: `https://app.hubspot.com/oauth/authorize`.
+- Token endpoint: `POST https://api.hubspot.com/oauth/2026-03/token`.
+- CRM endpoints: `/crm/objects/2026-03/{contacts|companies|deals}` and their `/search` endpoints.
+- Required scopes: `oauth`, `crm.objects.contacts.read`, `crm.objects.contacts.write`, `crm.objects.companies.read`, `crm.objects.companies.write`, `crm.objects.deals.read`, and `crm.objects.deals.write`.
+- Installing users must be HubSpot Super Admins or have HubSpot Marketplace Access.
+- Production redirects require HTTPS and must be registered exactly in the app configuration.
+
+The HubSpot app can use private distribution for the staging/managed-service PoC. HubSpot currently limits privately distributed OAuth apps to an allowlist of accounts; marketplace distribution can be added later without changing the Gatekeeper protocol.
+
+Sources:
+
+- https://developers.hubspot.com/docs/apps/developer-platform/build-apps/authentication/oauth/working-with-oauth
+- https://developers.hubspot.com/docs/api-reference/latest/authentication/manage-oauth-tokens
+- https://developers.hubspot.com/docs/apps/developer-platform/build-apps/authentication/scopes
+- https://developers.hubspot.com/docs/api-reference/latest/crm/search-the-crm
+- https://developers.hubspot.com/docs/api-reference/latest/crm/objects/contacts/guide
+- https://developers.hubspot.com/docs/api-reference/latest/crm/objects/companies/guide
+- https://developers.hubspot.com/docs/api-reference/latest/crm/objects/deals/guide
+
+## Package architecture
+
+Create `packages/gatekeeper-hubspot` using the established static-OAuth Gatekeeper shape:
+
+- `src/hubspot.ts`: HTTP OAuth entrypoint, vendor RPC, per-account credential Durable Object, connected-account RPC, whole-account resource configurator, per-Gadget Gatekeeper Durable Object, action persistence, and session RPC.
+- `src/hubspot-api.ts`: bounded HubSpot OAuth and CRM HTTP client, response validation, error classification, and curated property conversion.
+- `src/types.d.ts` / `src/types.txt`: agent-facing RPC types for contacts, companies, deals, paging, and mutation tickets/results.
+- `src/configurator/*`: a no-input whole-account configurator that emits the canonical portal URL.
+- `README.md` and `deploy-inputs.json`: current HubSpot Developer Platform setup, exact callback contract, scopes, and write-only credential inputs.
+- `wrangler.jsonc`: `UserAccount` and `HubSpotGatekeeperImpl` SQLite migrations, service-worker entrypoint build, observability, and no secrets in source/config.
+
+The release manifest discovers every package with `wrangler.jsonc`, so the new package becomes installable automatically and receives the standard `CLIENT_ID` / `CLIENT_SECRET` secret contract. It is not preinstalled without input and is not a singleton.
+
+## OAuth and credential lifecycle
+
+`GatekeeperVendor.connectAccount()` creates a unique `UserAccount` Durable Object, stores the callback capability, and returns a nonce-bearing local initiation URL. The HTTP entrypoint validates the initiation nonce, rotates it to a one-time OAuth state nonce, and redirects to HubSpot.
+
+HubSpot does not document PKCE for this server-side flow, so the connector uses the confidential client secret at the token endpoint and a cryptographic state nonce for CSRF/replay protection. The token response supplies short-lived access credentials, a refresh token, scopes, and Hub ID. The Durable Object stores tokens and identity; credentials never leave it or enter logs.
+
+Before expiry, `getAccessToken()` refreshes through the 2026-03 endpoint and persists a returned rotated refresh token when present. An invalid/expired/revoked refresh token calls `credentialsExpired()` once and produces a reconnect-required error. Reconnect reuses the existing connected-account capability and calls `credentialsRestored()` after success.
+
+Disconnect deletes local credentials and capabilities. Provider-side uninstall/revocation is deferred until HubSpot's current revoke contract is confirmed and tested; the README tells administrators how to remove the connected app in HubSpot if immediate provider-side revocation is required.
+
+## Resource and privacy model
+
+The only supported resource is the connected HubSpot CRM account. The configurator returns `https://app.hubspot.com/contacts/{hubId}`. `getGatekeeperClassFor()` accepts only HubSpot app URLs whose portal identifier matches the OAuth token's Hub ID.
+
+HubSpot documents that app access tokens reflect granted scopes rather than the installing user's object ownership restrictions. The API does not provide a reliable oracle proving another Cloudflare OS collaborator can read every record previously observed. Therefore the Gatekeeper uses the private-only observer strategy: `addObserver()` always rejects, preventing the binding from being shared beyond its owner.
+
+## Agent API
+
+Expose explicit methods rather than a generic arbitrary-object/property API:
+
+- `searchContacts`, `getContact`, `createContact`, `updateContact`
+- `searchCompanies`, `getCompany`, `createCompany`, `updateCompany`
+- `searchDeals`, `getDeal`, `createDeal`, `updateDeal`
+- `getMutationResult`
+
+Search accepts a bounded free-text query, page size up to 100, and HubSpot's integer `after` cursor. Responses include only curated standard properties.
+
+Writable properties are allowlisted per object:
+
+- Contacts: email, first/last name, phone/mobile, job title, company, website, lifecycle stage.
+- Companies: name, domain, phone, website, city, state, country, industry, lifecycle stage.
+- Deals: name, amount, close date, pipeline, stage, description, and type.
+
+Contacts must include at least one identifying field. Companies require name or domain. Deals require deal name, pipeline, and stage. Input objects reject unknown keys, non-string values, excessive key/value sizes, malformed IDs, and unbounded queries.
+
+## Observation and action policy
+
+Every remote read completes before `authorizeObservation()` and returns data only after authorization succeeds. Descriptions include the object type, query or record ID, result count, and portal ID, but not full CRM contents.
+
+Create/update methods never call HubSpot directly. They persist a validated pending mutation in the Gatekeeper Durable Object, submit it to the approval queue with `awaitDecision: true`, and return a mutation ticket. `applyAction()` performs exactly one POST/PATCH and stores a bounded result. `rejectAction()` records rejection without remote side effects. Actions are never auto-approvable and declare no automatic revert; deletion is not implemented.
+
+Reads may retry a single `429`/transient failure only when HubSpot supplies a bounded retry delay. Writes are never retried automatically because a lost response could duplicate a create or replay an update. Provider errors expose status/category/correlation IDs but redact tokens, secrets, response bodies, and submitted CRM values from logs.
+
+## Deployment and Admin integration
+
+Add HubSpot to the backend's immutable connector credential/setup-guide maps and readiness static test. Add it to local development credential mapping, root connector documentation, release golden fixtures, and observer-strategy documentation.
+
+The connector is installed by default wherever the managed deployment selects all installable Gatekeepers. The Vlightup staging wrapper will add:
+
+- Worker: `vlightup-os-staging-gk-hubspot`
+- Router and Workshop binding: `GATEKEEPER_HUBSPOT`
+- Callback: `https://vlightup-os-staging-router.keisuke-watanabe.workers.dev/gatekeeper/hubspot/oauth`
+
+It initially appears visible but disabled with `Ask an administrator to configure this connector.` Admins install `CLIENT_ID` and `CLIENT_SECRET` through `/admin/connectors`; no credential is read back.
+
+## Testing
+
+- Unit-test OAuth URL/state, token exchange/refresh, CRM endpoint selection, curated properties, response bounds, and provider error redaction.
+- Unit-test input allowlists and action descriptions.
+- Test that reads require observation authorization and writes require approval before fetch.
+- Test readiness metadata, Admin server-owned guide URL, local-development credential mapping, release manifest generation, and package build.
+- Run package tests, static readiness tests, release manifest tests, full typecheck, lint, full repository tests, Wrangler dry run, and frontend build.
+- After merge, deploy the unconfigured Worker, bind Router/Workshop, and verify staging shows HubSpot as Needs setup without changing existing connectors.
+
+## Deferred
+
+- Deletes, archival, batch APIs, associations, custom properties, sensitive/highly-sensitive scopes, tickets, marketing APIs, webhooks, and HubSpot login.
+- Marketplace certification and provider-side program/security questionnaire work.
+- Provider-side token revocation until the current 2026-03 revoke request contract is verified from authoritative documentation and covered by tests.
