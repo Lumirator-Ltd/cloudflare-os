@@ -113,10 +113,20 @@ export function HomePageContent({ prompt }: HomeSearch) {
         ensureProvisionalGadget();
         const overseer = provisionalOverseerRef.current!.stub;
         const workspaceTitle = typeof message === "string" ? message.trim() : "";
+        const titleUpdate = workspaceTitle
+          ? overseer.setTitle(workspaceTitle).catch((err) => {
+              logRpcFailure("Failed to set initial workspace title:", err,
+                  { reportSite: "workspace.rename.initial" });
+              toasts.add({
+                title: "Workspace created, but couldn't set its name",
+                variant: "error",
+              });
+            })
+          : Promise.resolve();
         const [chat, {id}] = await Promise.all([
           overseer.newChat(message, modelId, capsules, attachments, formats),
           overseer.getMetadata(),
-          workspaceTitle ? overseer.setTitle(workspaceTitle) : Promise.resolve(),
+          titleUpdate,
         ]);
         provisionalOverseerRef.current?.stub[Symbol.dispose]();
         provisionalOverseerRef.current = null;
