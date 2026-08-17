@@ -100,6 +100,7 @@ export type HubSpotOAuthGrant = {
   refreshToken: string;
   expiresIn: number;
   hubId: number;
+  scopes?: string[];
 };
 
 export type HubSpotRefreshGrant = {
@@ -295,6 +296,20 @@ function requireExpiresIn(parsed: JsonObject): number {
   return value;
 }
 
+function optionalScopes(parsed: JsonObject): string[] | undefined {
+  if (parsed.scopes === undefined) return undefined;
+  if (!Array.isArray(parsed.scopes) || parsed.scopes.length > 64 ||
+    parsed.scopes.some(scope => typeof scope !== "string" ||
+      !/^[A-Za-z0-9_.:-]{1,128}$/.test(scope))) {
+    throw new HubSpotApiError({
+      message: "HubSpot OAuth response has invalid scopes",
+      status: 200,
+      kind: "invalid-response",
+    });
+  }
+  return [...new Set(parsed.scopes)];
+}
+
 export async function exchangeHubSpotAuthorizationCode(
   input: {
     code: string;
@@ -319,11 +334,13 @@ export async function exchangeHubSpotAuthorizationCode(
       kind: "invalid-response",
     });
   }
+  const scopes = optionalScopes(parsed);
   return {
     accessToken: requireString(parsed, "access_token"),
     refreshToken: requireString(parsed, "refresh_token"),
     expiresIn: requireExpiresIn(parsed),
     hubId,
+    ...(scopes === undefined ? {} : { scopes }),
   };
 }
 
