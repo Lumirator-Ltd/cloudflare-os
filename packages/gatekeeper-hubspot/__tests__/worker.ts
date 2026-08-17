@@ -3,6 +3,8 @@ import type {
   GatekeeperConnectCallback,
   GatekeeperUser,
 } from "@gadgets/workshop-shared/gatekeeper";
+import { HubSpotApi } from "../src/hubspot-api";
+import { HubSpotGatekeeperImpl } from "../src/hubspot";
 
 export { default } from "../src/hubspot";
 export {
@@ -12,6 +14,12 @@ export {
   HubSpotVerifier,
   UserAccount,
 } from "../src/hubspot";
+
+export class TestHubSpotGatekeeper extends HubSpotGatekeeperImpl {
+  protected mutationApi(): HubSpotApi {
+    return new HubSpotApi({ getAccessToken: async () => "test-hubspot-token" });
+  }
+}
 
 type CallbackState = {
   completeCount: number;

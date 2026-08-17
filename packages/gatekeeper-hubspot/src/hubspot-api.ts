@@ -409,10 +409,11 @@ function assertObjectType(value: unknown): asserts value is HubSpotCrmObjectType
   }
 }
 
-function assertRecordId(id: string): void {
-  if (!/^[1-9]\d*$/.test(id)) {
+export function validateHubSpotRecordId(id: unknown): string {
+  if (typeof id !== "string" || !/^[1-9]\d*$/.test(id)) {
     throw new TypeError("HubSpot record ID must be a positive integer string");
   }
+  return id;
 }
 
 type ValidatedSearchOptions = {
@@ -441,10 +442,10 @@ function curatedPropertyNames(type: HubSpotCrmObjectType): readonly string[] {
   return HUBSPOT_CRM_PROPERTIES[type];
 }
 
-function validatedProperties<T extends HubSpotCrmObjectType>(
+export function validateHubSpotProperties<T extends HubSpotCrmObjectType>(
   type: T,
-  input: HubSpotPropertiesByObjectType[T],
-): Record<string, string> {
+  input: unknown,
+): HubSpotPropertiesByObjectType[T] {
   if (!isJsonObject(input)) {
     throw new TypeError("HubSpot CRM properties must be an object");
   }
@@ -609,7 +610,7 @@ export class HubSpotApi {
     id: string,
   ): Promise<HubSpotRecordByObjectType[T]> {
     assertObjectType(type);
-    assertRecordId(id);
+    validateHubSpotRecordId(id);
     const properties = new URLSearchParams({
       properties: curatedPropertyNames(type).join(","),
     });
@@ -627,7 +628,7 @@ export class HubSpotApi {
     properties: HubSpotPropertiesByObjectType[T],
   ): Promise<HubSpotRecordByObjectType[T]> {
     assertObjectType(type);
-    const bounded = validatedProperties(type, properties);
+    const bounded = validateHubSpotProperties(type, properties);
     const { parsed, status } = await this.#request(
       "POST",
       `/crm/objects/2026-03/${type}`,
@@ -643,8 +644,8 @@ export class HubSpotApi {
     properties: HubSpotPropertiesByObjectType[T],
   ): Promise<HubSpotRecordByObjectType[T]> {
     assertObjectType(type);
-    assertRecordId(id);
-    const bounded = validatedProperties(type, properties);
+    validateHubSpotRecordId(id);
+    const bounded = validateHubSpotProperties(type, properties);
     const { parsed, status } = await this.#request(
       "PATCH",
       `/crm/objects/2026-03/${type}/${id}`,

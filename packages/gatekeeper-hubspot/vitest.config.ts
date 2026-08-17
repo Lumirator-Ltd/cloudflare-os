@@ -17,6 +17,7 @@ export default defineConfig({
         },
         durableObjects: {
           USER_ACCOUNT: { className: "UserAccount", useSQLite: true },
+          HUBSPOT_GATEKEEPER: { className: "TestHubSpotGatekeeper", useSQLite: true },
           TEST_CALLBACK_STORE: { className: "TestCallbackStore", useSQLite: true },
         },
       },

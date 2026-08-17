@@ -25,6 +25,8 @@ import {
   exchangeHubSpotAuthorizationCode,
   generateHubSpotOAuthState,
   refreshHubSpotAccessToken,
+  validateHubSpotProperties,
+  validateHubSpotRecordId,
 } from "./hubspot-api";
 import type {
   HubSpotCompany,
@@ -33,8 +35,10 @@ import type {
   HubSpotContactProperties,
   HubSpotDeal,
   HubSpotDealProperties,
+  HubSpotMutationOperation,
   HubSpotMutationResult,
   HubSpotMutationTicket,
+  HubSpotObjectType,
   HubSpotSearchPage,
   HubSpotSearchPaging,
   HubSpotSession,
@@ -544,28 +548,52 @@ export class HubSpotGatekeeperImpl extends DurableObject<Env, HubSpotGatekeeperI
     return [];
   }
 
+  protected mutationApi(): HubSpotApi {
+    const account = this.#account();
+    return new HubSpotApi({ getAccessToken: () => account.getAccessToken() });
+  }
+
   async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<HubSpotSession> {
     const account = this.#account();
     const portalId = await account.getHubId();
-    const api = new HubSpotApi({ getAccessToken: () => account.getAccessToken() });
     return new HubSpotSessionImpl(
-      api,
+      this.mutationApi(),
       portalId,
       approvalQueue.dup(),
       () => account.notifyCredentialsExpired(),
+      this.ctx.storage.kv,
     );
   }
 
-  async applyAction(_action: number): Promise<void> {
-    throw new Error("HubSpot CRM actions are not available yet.");
+  async applyAction(action: number): Promise<void> {
+    const store = new HubSpotMutationStore(this.ctx.storage.kv);
+    const pending = store.requirePending(action);
+    try {
+      const record = await performHubSpotMutation(this.mutationApi(), pending);
+      store.putResult(action, pending, {
+        status: "ready",
+        objectType: pending.objectType,
+        recordId: record.id,
+      });
+    } catch (error) {
+      store.putResult(action, pending, mutationFailure(error));
+    }
+    store.removePending(action);
   }
 
-  async rejectAction(_action: number): Promise<void> {
-    throw new Error("HubSpot CRM actions are not available yet.");
+  async rejectAction(action: number): Promise<void> {
+    const store = new HubSpotMutationStore(this.ctx.storage.kv);
+    const pending = store.requirePending(action);
+    store.removePending(action);
+    store.putResult(action, pending, { status: "rejected" });
   }
 
-  async revertAction(_action: number): Promise<void> {
-    throw new Error("HubSpot CRM actions are not available yet.");
+  async revertAction(_action: number): Promise<{ message: string }> {
+    return {
+      message:
+        "HubSpot CRM mutations cannot be reverted automatically. Review the record in HubSpot " +
+        "and apply any needed correction manually.",
+    };
   }
 
   async addObserver(_id: string, _user: Fetcher<GatekeeperUserVerifier>): Promise<void> {
@@ -578,8 +606,190 @@ export class HubSpotGatekeeperImpl extends DurableObject<Env, HubSpotGatekeeperI
   async removeObserver(_id: string): Promise<void> {}
 }
 
-const HUBSPOT_MUTATIONS_UNAVAILABLE = "HubSpot CRM mutations are not available yet.";
 const MAX_OBSERVATION_QUERY_LENGTH = 200;
+const MAX_RETAINED_MUTATION_RESULTS = 100;
+
+type MutationKv = Pick<DurableObjectStorage["kv"], "delete" | "get" | "put">;
+
+type StoredPendingMutation = HubSpotMutationTicket & {
+  properties: Record<string, string>;
+  recordId?: string;
+};
+
+type StoredMutationResult = HubSpotMutationTicket & {
+  outcome: HubSpotMutationResult;
+};
+
+function pendingMutationKey(id: number): string {
+  return `mutation:pending:${id}`;
+}
+
+function mutationResultKey(id: number): string {
+  return `mutation:result:${id}`;
+}
+
+function validateMutationActionId(id: unknown): number {
+  if (typeof id !== "number" || !Number.isSafeInteger(id) || id < 1) {
+    throw new TypeError("HubSpot mutation action ID must be a positive safe integer");
+  }
+  return id;
+}
+
+function validateMutationTicket(ticket: unknown): HubSpotMutationTicket {
+  if (typeof ticket !== "object" || ticket === null || Array.isArray(ticket)) {
+    throw new TypeError("Invalid HubSpot mutation ticket");
+  }
+  const candidate = ticket as Record<string, unknown>;
+  const id = validateMutationActionId(candidate.id);
+  const objectType = candidate.objectType;
+  if (objectType !== "contact" && objectType !== "company" && objectType !== "deal") {
+    throw new TypeError("Invalid HubSpot mutation ticket object type");
+  }
+  const operation = candidate.operation;
+  if (operation !== "create" && operation !== "update") {
+    throw new TypeError("Invalid HubSpot mutation ticket operation");
+  }
+  return { id, objectType, operation };
+}
+
+function sameMutation(
+  stored: Pick<HubSpotMutationTicket, "id" | "objectType" | "operation">,
+  ticket: HubSpotMutationTicket,
+): boolean {
+  return stored.id === ticket.id && stored.objectType === ticket.objectType &&
+    stored.operation === ticket.operation;
+}
+
+class HubSpotMutationStore {
+  readonly #kv: MutationKv;
+
+  constructor(kv: MutationKv) {
+    this.#kv = kv;
+  }
+
+  submit(mutation: Omit<StoredPendingMutation, "id">): HubSpotMutationTicket {
+    const id = this.#kv.get<number>("mutation:nextId") ?? 1;
+    validateMutationActionId(id);
+    if (id === Number.MAX_SAFE_INTEGER) {
+      throw new Error("HubSpot mutation action ID space is exhausted");
+    }
+    const pending = { ...mutation, id };
+    this.#kv.put("mutation:nextId", id + 1);
+    this.#kv.put(pendingMutationKey(id), pending);
+    return { id, objectType: mutation.objectType, operation: mutation.operation };
+  }
+
+  getPending(id: number): StoredPendingMutation | undefined {
+    return this.#kv.get<StoredPendingMutation>(pendingMutationKey(validateMutationActionId(id)));
+  }
+
+  requirePending(id: number): StoredPendingMutation {
+    const pending = this.getPending(id);
+    if (!pending || pending.id !== id) {
+      throw new Error(`Unknown pending HubSpot mutation: ${id}`);
+    }
+    return pending;
+  }
+
+  removePending(id: number): void {
+    this.#kv.delete(pendingMutationKey(validateMutationActionId(id)));
+  }
+
+  getResult(id: number): StoredMutationResult | undefined {
+    return this.#kv.get<StoredMutationResult>(mutationResultKey(validateMutationActionId(id)));
+  }
+
+  putResult(
+    id: number,
+    mutation: Pick<StoredPendingMutation, "objectType" | "operation">,
+    outcome: HubSpotMutationResult,
+  ): void {
+    const boundedId = validateMutationActionId(id);
+    this.#kv.put<StoredMutationResult>(mutationResultKey(boundedId), {
+      id: boundedId,
+      objectType: mutation.objectType,
+      operation: mutation.operation,
+      outcome,
+    });
+    const existing = this.#kv.get<number[]>("mutation:resultIds") ?? [];
+    const retained = [...existing.filter(candidate => candidate !== boundedId), boundedId]
+      .slice(-MAX_RETAINED_MUTATION_RESULTS);
+    this.#kv.put("mutation:resultIds", retained);
+    for (const evicted of existing) {
+      if (!retained.includes(evicted)) this.#kv.delete(mutationResultKey(evicted));
+    }
+  }
+}
+
+function mutationFailure(error: unknown): Extract<HubSpotMutationResult, { status: "failed" }> {
+  if (error instanceof HubSpotApiError) {
+    const message = error.isCredentialExpired
+      ? "HubSpot credentials expired before the CRM mutation could be confirmed. Reconnect the account and inspect the record before submitting another mutation."
+      : error.isRateLimited
+      ? "HubSpot rate-limited the CRM mutation. Inspect the record before submitting another mutation."
+      : "HubSpot could not confirm the CRM mutation. Inspect the record before submitting another mutation.";
+    return { status: "failed", message };
+  }
+  return {
+    status: "failed",
+    message: "HubSpot could not confirm the CRM mutation. Inspect the record before submitting another mutation.",
+  };
+}
+
+async function performHubSpotMutation(
+  api: HubSpotApi,
+  mutation: StoredPendingMutation,
+): Promise<HubSpotContact | HubSpotCompany | HubSpotDeal> {
+  if (mutation.operation === "update") {
+    const id = validateHubSpotRecordId(mutation.recordId);
+    switch (mutation.objectType) {
+      case "contact":
+        return api.update("contacts", id, mutation.properties);
+      case "company":
+        return api.update("companies", id, mutation.properties);
+      case "deal":
+        return api.update("deals", id, mutation.properties);
+    }
+  }
+  switch (mutation.objectType) {
+    case "contact":
+      return api.create("contacts", mutation.properties);
+    case "company":
+      return api.create("companies", mutation.properties);
+    case "deal":
+      return api.create("deals", mutation.properties);
+  }
+}
+
+function requiredCreateProperties(
+  objectType: HubSpotObjectType,
+  properties: Record<string, string>,
+): void {
+  const nonEmpty = (name: string) => properties[name]?.trim().length > 0;
+  if (objectType === "contact" && !["email", "firstname", "lastname"].some(nonEmpty)) {
+    throw new TypeError("A HubSpot contact requires a non-empty email, firstname, or lastname");
+  }
+  if (objectType === "company" && !["name", "domain"].some(nonEmpty)) {
+    throw new TypeError("A HubSpot company requires a non-empty name or domain");
+  }
+  if (objectType === "deal" && !["dealname", "pipeline", "dealstage"].every(nonEmpty)) {
+    throw new TypeError("A HubSpot deal requires non-empty dealname, pipeline, and dealstage");
+  }
+}
+
+function mutationDescription(portalId: number, mutation: StoredPendingMutation): string {
+  const properties = JSON.stringify(mutation.properties, null, 2)
+    .split("\n")
+    .map(line => `    ${line}`)
+    .join("\n");
+  return [
+    `**Portal ID:** \`${portalId}\``,
+    `**Object type:** \`${mutation.objectType}\``,
+    `**Operation:** \`${mutation.operation}\``,
+    mutation.recordId === undefined ? undefined : `**Record ID:** \`${mutation.recordId}\``,
+    `**Properties:**\n\n${properties}`,
+  ].filter((line): line is string => line !== undefined).join("\n\n");
+}
 
 function boundedQuery(query: string): string {
   const normalized = [...query]
@@ -600,18 +810,21 @@ export class HubSpotSessionImpl extends RpcTarget implements HubSpotSession {
   readonly #portalId: number;
   readonly #approvalQueue: RpcStub<ApprovalQueue>;
   readonly #notifyCredentialsExpired: () => Promise<void>;
+  readonly #mutationKv?: MutationKv;
 
   constructor(
     api: HubSpotApi,
     portalId: number,
     approvalQueue: RpcStub<ApprovalQueue>,
     notifyCredentialsExpired: () => Promise<void>,
+    mutationKv?: MutationKv,
   ) {
     super();
     this.#api = api;
     this.#portalId = portalId;
     this.#approvalQueue = approvalQueue;
     this.#notifyCredentialsExpired = notifyCredentialsExpired;
+    this.#mutationKv = mutationKv;
   }
 
   [Symbol.dispose](): void {
@@ -703,40 +916,101 @@ export class HubSpotSessionImpl extends RpcTarget implements HubSpotSession {
     return this.#get("deals", id);
   }
 
-  async createContact(_properties: HubSpotContactProperties): Promise<HubSpotMutationTicket> {
-    throw new Error(HUBSPOT_MUTATIONS_UNAVAILABLE);
+  #mutationStore(): HubSpotMutationStore {
+    if (!this.#mutationKv) throw new Error("HubSpot mutation storage is unavailable");
+    return new HubSpotMutationStore(this.#mutationKv);
   }
 
-  async updateContact(
-    _id: string,
-    _properties: HubSpotContactProperties,
+  async #submitMutation(
+    objectType: HubSpotObjectType,
+    operation: HubSpotMutationOperation,
+    propertiesInput: unknown,
+    recordIdInput?: unknown,
   ): Promise<HubSpotMutationTicket> {
-    throw new Error(HUBSPOT_MUTATIONS_UNAVAILABLE);
+    const apiObjectType = objectType === "contact"
+      ? "contacts"
+      : objectType === "company"
+      ? "companies"
+      : "deals";
+    const properties = validateHubSpotProperties(apiObjectType, propertiesInput);
+    if (operation === "create") requiredCreateProperties(objectType, properties);
+    const recordId = operation === "update"
+      ? validateHubSpotRecordId(recordIdInput)
+      : undefined;
+    const pending: Omit<StoredPendingMutation, "id"> = {
+      objectType,
+      operation,
+      properties,
+      ...(recordId === undefined ? {} : { recordId }),
+    };
+    const store = this.#mutationStore();
+    const ticket = store.submit(pending);
+    try {
+      await this.#approvalQueue.submitAction(ticket.id, {
+        title: operation === "create"
+          ? `Create HubSpot ${objectType}`
+          : `Update HubSpot ${objectType} ${recordId}`,
+        description: mutationDescription(this.#portalId, { ...pending, id: ticket.id }),
+        implementsRevert: false,
+        awaitDecision: true,
+      });
+    } catch (error) {
+      store.removePending(ticket.id);
+      throw error;
+    }
+    return ticket;
   }
 
-  async createCompany(_properties: HubSpotCompanyProperties): Promise<HubSpotMutationTicket> {
-    throw new Error(HUBSPOT_MUTATIONS_UNAVAILABLE);
+  createContact(properties: HubSpotContactProperties): Promise<HubSpotMutationTicket> {
+    return this.#submitMutation("contact", "create", properties);
   }
 
-  async updateCompany(
-    _id: string,
-    _properties: HubSpotCompanyProperties,
+  updateContact(
+    id: string,
+    properties: HubSpotContactProperties,
   ): Promise<HubSpotMutationTicket> {
-    throw new Error(HUBSPOT_MUTATIONS_UNAVAILABLE);
+    return this.#submitMutation("contact", "update", properties, id);
   }
 
-  async createDeal(_properties: HubSpotDealProperties): Promise<HubSpotMutationTicket> {
-    throw new Error(HUBSPOT_MUTATIONS_UNAVAILABLE);
+  createCompany(properties: HubSpotCompanyProperties): Promise<HubSpotMutationTicket> {
+    return this.#submitMutation("company", "create", properties);
   }
 
-  async updateDeal(
-    _id: string,
-    _properties: HubSpotDealProperties,
+  updateCompany(
+    id: string,
+    properties: HubSpotCompanyProperties,
   ): Promise<HubSpotMutationTicket> {
-    throw new Error(HUBSPOT_MUTATIONS_UNAVAILABLE);
+    return this.#submitMutation("company", "update", properties, id);
   }
 
-  async getMutationResult(_ticket: HubSpotMutationTicket): Promise<HubSpotMutationResult> {
-    throw new Error(HUBSPOT_MUTATIONS_UNAVAILABLE);
+  createDeal(properties: HubSpotDealProperties): Promise<HubSpotMutationTicket> {
+    return this.#submitMutation("deal", "create", properties);
+  }
+
+  updateDeal(
+    id: string,
+    properties: HubSpotDealProperties,
+  ): Promise<HubSpotMutationTicket> {
+    return this.#submitMutation("deal", "update", properties, id);
+  }
+
+  async getMutationResult(ticketInput: HubSpotMutationTicket): Promise<HubSpotMutationResult> {
+    const ticket = validateMutationTicket(ticketInput);
+    const store = this.#mutationStore();
+    const result = store.getResult(ticket.id);
+    const pending = result === undefined ? store.getPending(ticket.id) : undefined;
+    const stored = result ?? pending;
+    if (!stored) throw new Error(`Unknown HubSpot mutation ticket: ${ticket.id}`);
+    if (!sameMutation(stored, ticket)) {
+      throw new Error(`HubSpot mutation ticket does not match action ${ticket.id}`);
+    }
+    const outcome = result?.outcome ?? { status: "pending" as const };
+    await this.#approvalQueue.authorizeObservation({
+      title: `Read HubSpot mutation result #${ticket.id}`,
+      description:
+        `HubSpot ${ticket.objectType} ${ticket.operation} mutation #${ticket.id} is ` +
+        `**${outcome.status}**.`,
+    });
+    return outcome;
   }
 }
