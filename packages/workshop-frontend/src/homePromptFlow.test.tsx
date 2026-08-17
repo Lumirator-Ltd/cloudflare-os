@@ -8,11 +8,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 const testState = vi.hoisted(() => {
   const listModels = vi.fn<() => Promise<never[]>>(async () => []);
   const setTitle = vi.fn<(title: string) => Promise<void>>(async () => {});
-  const newChat = vi.fn(async () => 0);
-  const getMetadata = vi.fn(async () => ({ id: "workspace-1" }));
-  const dispose = vi.fn();
+  const newChat = vi.fn<() => Promise<number>>(async () => 0);
+  const getMetadata = vi.fn<() => Promise<{ id: string }>>(async () => ({ id: "workspace-1" }));
+  const dispose = vi.fn<() => void>();
   const overseer = { setTitle, newChat, getMetadata, [Symbol.dispose]: dispose };
-  const newGadget = vi.fn(() => overseer);
+  const newGadget = vi.fn<() => typeof overseer>(() => overseer);
   return {
     addToast: vi.fn<(toast: unknown) => void>(),
     authenticatedApi: { listModels, newGadget },
