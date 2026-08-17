@@ -650,7 +650,6 @@ export class HubSpotSessionImpl extends RpcTarget implements HubSpotSession {
       description:
         `Portal ID: ${this.#portalId}; object type: ${type}; query: "${boundedQuery(query)}"; ` +
         `returned count: ${page.results.length}.`,
-      prohibitAllSharing: true,
     });
     return {
       results: page.results,
@@ -672,7 +671,6 @@ export class HubSpotSessionImpl extends RpcTarget implements HubSpotSession {
       title: `Get HubSpot ${type} record`,
       description:
         `Portal ID: ${this.#portalId}; object type: ${type}; record ID: ${id}; returned count: 1.`,
-      prohibitAllSharing: true,
     });
     return record as T extends "contacts"
       ? HubSpotContact

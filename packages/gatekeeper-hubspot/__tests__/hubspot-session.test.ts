@@ -181,7 +181,7 @@ describe("HubSpot CRM observations", () => {
     });
     expect(subject.authorize).toHaveBeenCalledTimes(6);
     for (const [description] of subject.authorize.mock.calls) {
-      expect(description.prohibitAllSharing).toBe(true);
+      expect(description).not.toHaveProperty("prohibitAllSharing");
       expect(description.title.length).toBeLessThanOrEqual(100);
       expect(description.description.length).toBeLessThanOrEqual(500);
       expect(description.description).toContain(String(PORTAL_ID));
