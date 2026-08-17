@@ -7,7 +7,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 const testState = vi.hoisted(() => {
   const listModels = vi.fn<() => Promise<never[]>>(async () => []);
-  const newGadget = vi.fn<() => never>();
+  const setTitle = vi.fn<(title: string) => Promise<void>>(async () => {});
+  const newChat = vi.fn<() => Promise<number>>(async () => 0);
+  const getMetadata = vi.fn<() => Promise<{ id: string }>>(async () => ({ id: "workspace-1" }));
+  const dispose = vi.fn<() => void>();
+  const overseer = { setTitle, newChat, getMetadata, [Symbol.dispose]: dispose };
+  const newGadget = vi.fn<() => typeof overseer>(() => overseer);
   return {
     addToast: vi.fn<(toast: unknown) => void>(),
     authenticatedApi: { listModels, newGadget },
@@ -17,6 +22,10 @@ const testState = vi.hoisted(() => {
     newGadget,
     seeds: [] as Array<{ text?: string; nonce?: number }>,
     draftStorageKeys: [] as Array<string | undefined>,
+    send: undefined as
+      | ((message: string, modelId: string | null) => Promise<void>)
+      | undefined,
+    setTitle,
   };
 });
 
@@ -37,11 +46,13 @@ vi.mock("./AuthContext", () => ({
 }));
 
 vi.mock("./ChatInterface", () => ({
-  ChatInput: ({ seedText, seedNonce, draftStorageKey }: {
+  ChatInput: ({ onSend, seedText, seedNonce, draftStorageKey }: {
+    onSend: (message: string, modelId: string | null) => Promise<void>;
     seedText?: string;
     seedNonce?: number;
     draftStorageKey?: string;
   }) => {
+    testState.send = onSend;
     testState.seeds.push({ text: seedText, nonce: seedNonce });
     testState.draftStorageKeys.push(draftStorageKey);
     return <textarea aria-label="Prompt" readOnly value={seedText ?? ""} />;
@@ -66,6 +77,7 @@ describe("Home prompt route flow", () => {
     localStorage.clear();
     testState.seeds.length = 0;
     testState.draftStorageKeys.length = 0;
+    testState.send = undefined;
     vi.clearAllMocks();
   });
 
@@ -82,5 +94,21 @@ describe("Home prompt route flow", () => {
     expect(testState.navigate).toHaveBeenCalledWith({ to: "/", search: {}, replace: true });
     expect(testState.newGadget).not.toHaveBeenCalled();
     expect(testState.draftStorageKeys).toContain("gadgets:composer-draft:v1:user-a:home");
+  });
+
+  it("names a new workspace from the first home-page message", async () => {
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () => root!.render(<HomePageContent />));
+
+    await act(async () => testState.send!("Plan the Q3 launch", null));
+
+    expect(testState.setTitle).toHaveBeenCalledWith("Plan the Q3 launch");
+    expect(testState.navigate).toHaveBeenCalledWith({
+      to: "/workspace/$id",
+      params: { id: "workspace-1" },
+      search: { chat: 0 },
+    });
   });
 });
