@@ -50,7 +50,7 @@ Worker names are derived as `<prefix><vendorId>`. HTTP errors are redacted. Exis
 
 ## Scope
 
-The first release supports the credentialed connectors currently deployed by Lumirator: Cloudflare, Confluence, GitHub, Google, Linear, Notion, Slack, Spotify, Supabase, and ZoomInfo.
+The first release supports the credentialed connectors currently deployed by Lumirator: Cloudflare, Confluence, GitHub, Google, HubSpot, Linear, Notion, Slack, Spotify, Supabase, and ZoomInfo.
 
 Email remains unavailable on `workers.dev`; MCP Portal remains excluded due incomplete deployment metadata. Home Assistant, MCP, Scheduler, and Context need no static OAuth app credentials and remain unchanged.
 

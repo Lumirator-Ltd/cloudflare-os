@@ -412,6 +412,7 @@ function devBuildConfig(build, pkgDir) {
 const SHARED_GATEKEEPER_CREDS = {
   "gatekeeper-github": { id: "GITHUB_CLIENT_ID", secret: "GITHUB_CLIENT_SECRET" },
   "gatekeeper-google": { id: "GOOGLE_CLIENT_ID", secret: "GOOGLE_CLIENT_SECRET" },
+  "gatekeeper-hubspot": { id: "HUBSPOT_CLIENT_ID", secret: "HUBSPOT_CLIENT_SECRET" },
   "gatekeeper-cloudflare": { id: "CLOUDFLARE_OAUTH_CLIENT_ID", secret: "CLOUDFLARE_OAUTH_CLIENT_SECRET" },
   "gatekeeper-supabase": { id: "SUPABASE_CLIENT_ID", secret: "SUPABASE_CLIENT_SECRET" },
   "gatekeeper-notion": { id: "NOTION_CLIENT_ID", secret: "NOTION_CLIENT_SECRET" },

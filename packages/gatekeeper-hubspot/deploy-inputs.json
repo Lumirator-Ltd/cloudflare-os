@@ -1,0 +1,20 @@
+[
+  {
+    "name": "CLIENT_ID",
+    "kind": "secret",
+    "label": "OAuth client ID",
+    "consoleUrl": "https://developers.hubspot.com/docs/apps/developer-platform/build-apps/manage-apps-in-hubspot",
+    "setupSteps": [
+      "Create and upload an OAuth app on HubSpot's project-based Developer Platform, not a legacy public app or private-app token.",
+      "For a managed proof of concept, set distribution to private and allowlist each account; use marketplace distribution later for broader installation.",
+      "Set the OAuth redirect URL to the exact URI below and require oauth plus contacts, companies, and deals read/write scopes.",
+      "Open the uploaded app's Auth settings, then copy its Client ID and Client secret here. The installing user must be a Super Admin or have App Marketplace Access."
+    ],
+    "redirectUriTemplate": "{PUBLIC_BASE_URL}/gatekeeper/hubspot/oauth"
+  },
+  {
+    "name": "CLIENT_SECRET",
+    "kind": "secret",
+    "label": "OAuth client secret"
+  }
+]
