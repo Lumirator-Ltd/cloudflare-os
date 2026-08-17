@@ -1,5 +1,33 @@
 This project is building a platform for "vibe coded" personal applications and AI agents that run inside a strong sandbox.
 
+## Lumirator managed-deployment architecture
+
+This fork is the runtime layer in a four-repository managed-service MVP:
+
+| Repository | Owner responsibility |
+| --- | --- |
+| `Lumirator-Ltd/cloudflare-os` | **This repo.** Runtime behavior, sandbox, backend/frontend/gatekeepers, and the one-time Admin bootstrap contract. |
+| `Lumirator-Ltd/company_os_starter` | Packaging authority. Pins this repo at an exact commit and owns `pnpm check` / `pnpm deploy`. |
+| `Lumirator-Ltd/company-os-deployments` | Tenant manifests and orchestration CLI. Consumes the Access handoff, reconciles KV/R2, generates temporary `deployment.jsonc`, and invokes the starter. |
+| `Lumirator-Ltd/company-os-terraform` | Stateful Cloudflare Access application/policy lifecycle and context-bound audience handoff. |
+
+Ownership boundaries:
+
+- Keep tenant identities, Cloudflare account/resource ownership, Terraform
+  state, deployment orchestration, and generated configuration out of this
+  runtime repository.
+- Terraform is the normal Access mutator; the deployment CLI verifies Access
+  read-only. The starter deploys Workers. This runtime only consumes bindings,
+  vars, and bootstrap configuration supplied by the starter.
+- `INITIAL_ADMIN_CONFIG` is a closed deployment bootstrap contract: initialize
+  authoritative `AdminSettings` exactly once, fail closed while pending, gate
+  HTTP and `ExternalMessageGateway` ingress, and never log/bootstrap-error
+  sensitive values. Do not expand it into a general control-plane API.
+- Preserve upstream-compatible behavior and minimal diffs. Managed deployment
+  changes belong in the starter/CLI unless runtime behavior truly must change.
+- The starter must pin an exact reviewed runtime commit; never require it to
+  follow this branch or a floating tag.
+
 The following files are commonly important to reference:
 
 * packages/workshop-shared/node_modules/capnweb/README.md: Explains how to use Cap'n Web RPC, which is used extensively for client-server communications.
