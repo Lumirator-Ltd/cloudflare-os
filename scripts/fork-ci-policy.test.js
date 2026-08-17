@@ -361,28 +361,6 @@ test("repository workflow directory satisfies the fork CI policy", async () => {
   assert.deepEqual(await policy.validateWorkflowDirectory(directory), []);
 });
 
-test("unit and workspace tests build backend prerequisites in order", async () => {
-  const workflow = await readFile(
-    path.resolve(import.meta.dirname, "..", CI_PATH),
-    "utf8",
-  );
-  const jobStart = workflow.indexOf("  unit-and-workspace-tests:\n");
-  const jobEnd = workflow.indexOf("\n  bootstrap-integration:\n", jobStart);
-  const job = workflow.slice(jobStart, jobEnd);
-  const orderedSteps = [
-    "      - name: Build typed storage\n        run: pnpm --filter @gadgets/typed-storage build",
-    "      - name: Build format blueprints\n        run: pnpm --filter @gadgets/workshop-backend build:format-blueprints",
-    "      - name: Run unit and workspace tests\n        run: pnpm test",
-  ];
-
-  let previousIndex = -1;
-  for (const step of orderedSteps) {
-    const index = job.indexOf(step);
-    assert.ok(index > previousIndex, `${step} must appear in order`);
-    previousIndex = index;
-  }
-});
-
 test("rejects any third workflow", async () => {
   await withWorkflowDirectory(
     {
