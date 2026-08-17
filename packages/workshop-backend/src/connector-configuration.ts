@@ -29,10 +29,29 @@ const CONNECTOR_SECRET_INPUTS = Object.freeze({
   zoominfo: STATIC_OAUTH_INPUTS,
 });
 
+const README_BASE_URL =
+  "https://github.com/Lumirator-Ltd/cloudflare-os/tree/main/packages";
+const CONNECTOR_SETUP_GUIDES = Object.freeze({
+  cloudflare: `${README_BASE_URL}/gatekeeper-cloudflare#readme`,
+  confluence: `${README_BASE_URL}/gatekeeper-confluence#readme`,
+  github: `${README_BASE_URL}/gatekeeper-github#readme`,
+  google: `${README_BASE_URL}/gatekeeper-google#readme`,
+  linear: "https://linear.app/developers/oauth-2-0-authentication",
+  notion: `${README_BASE_URL}/gatekeeper-notion#readme`,
+  slack: `${README_BASE_URL}/gatekeeper-slack#readme`,
+  spotify: `${README_BASE_URL}/gatekeeper-spotify#readme`,
+  supabase: `${README_BASE_URL}/gatekeeper-supabase#readme`,
+  zoominfo: `${README_BASE_URL}/gatekeeper-zoominfo#readme`,
+});
+
 type ConfigurableConnectorId = keyof typeof CONNECTOR_SECRET_INPUTS;
 
 function canonicalInputs(vendorId: string): readonly ConnectorConfigurationInput[] | undefined {
   return CONNECTOR_SECRET_INPUTS[vendorId as ConfigurableConnectorId];
+}
+
+function canonicalSetupGuideUrl(vendorId: string): string | undefined {
+  return CONNECTOR_SETUP_GUIDES[vendorId as ConfigurableConnectorId];
 }
 const ACCOUNT_ID_PATTERN = /^[0-9a-f]{32}$/;
 const WORKER_PREFIX_PATTERN = /^[a-z0-9][a-z0-9_-]*$/;
@@ -148,7 +167,8 @@ export async function listConnectorConfigurations(
   const writeAvailable = writeSetup(env) !== null;
   for (const [id, vendor] of vendors) {
     const inputs = canonicalInputs(id);
-    if (!inputs) continue;
+    const setupGuideUrl = canonicalSetupGuideUrl(id);
+    if (!inputs || !setupGuideUrl) continue;
     try {
       const description = await vendor.describe();
       if (!description.configuration) continue;
@@ -158,6 +178,7 @@ export async function listConnectorConfigurations(
         logo: description.logo,
         configured: description.configuration.configured,
         callbackUrl: callbackUrl(env, id),
+        setupGuideUrl,
         inputs: inputs.map(input => ({ ...input })),
         writeAvailable,
       });

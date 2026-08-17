@@ -749,6 +749,7 @@ export type AdminConnectorConfiguration = {
   logo?: AvatarImage;
   configured: boolean;
   callbackUrl: string;
+  setupGuideUrl: string;
   inputs: ConnectorConfigurationInput[];
   writeAvailable: boolean;
 };

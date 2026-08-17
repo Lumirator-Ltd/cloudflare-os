@@ -67,6 +67,7 @@ describe("AdminApi connector configuration listing", () => {
       logo: { url: "https://example.com/github.svg" },
       configured: false,
       callbackUrl: "https://workshop.example/gatekeeper/github/oauth",
+      setupGuideUrl: "https://github.com/Lumirator-Ltd/cloudflare-os/tree/main/packages/gatekeeper-github#readme",
       inputs: INPUTS,
       writeAvailable: true,
     }]);

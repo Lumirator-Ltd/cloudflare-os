@@ -189,6 +189,17 @@ export default function AdminConnectorsPage() {
                   <code className="mt-1 block overflow-x-auto rounded-lg border border-kumo-line bg-kumo-base px-3 py-2 text-xs text-kumo-default">
                     {connector.callbackUrl}
                   </code>
+                  <p className="mt-2 text-xs text-kumo-subtle">
+                    Follow the provider setup guide, register the callback URL above, then enter the credentials.{' '}
+                    <a
+                      href={connector.setupGuideUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="font-medium text-kumo-brand hover:underline"
+                    >
+                      View setup guide
+                    </a>
+                  </p>
                 </div>
 
                 <div className="mt-5 grid gap-4 sm:grid-cols-2">

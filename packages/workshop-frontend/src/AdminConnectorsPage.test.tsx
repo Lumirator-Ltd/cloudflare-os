@@ -35,6 +35,7 @@ const CONNECTORS: AdminConnectorConfiguration[] = [
     logo: { url: 'https://example.com/github.svg' },
     configured: true,
     callbackUrl: 'https://workshop.example/gatekeeper/github/callback',
+    setupGuideUrl: 'https://github.com/Lumirator-Ltd/cloudflare-os/tree/main/packages/gatekeeper-github#readme',
     inputs: [
       { name: 'CLIENT_ID', label: 'Client ID', secret: true },
       { name: 'CLIENT_SECRET', label: 'Client Secret', secret: true },
@@ -46,6 +47,7 @@ const CONNECTORS: AdminConnectorConfiguration[] = [
     displayName: 'Notion',
     configured: false,
     callbackUrl: 'https://workshop.example/gatekeeper/notion/callback',
+    setupGuideUrl: 'https://github.com/Lumirator-Ltd/cloudflare-os/tree/main/packages/gatekeeper-notion#readme',
     inputs: [
       { name: 'CLIENT_ID', label: 'Client ID', secret: true },
       { name: 'CLIENT_SECRET', label: 'Client Secret', secret: true },
@@ -138,6 +140,12 @@ describe('/admin/connectors', () => {
     expect(rendered.textContent).toContain('Needs setup')
     expect(rendered.textContent).toContain(CONNECTORS[0].callbackUrl)
     expect(rendered.textContent).toContain(CONNECTORS[1].callbackUrl)
+    expect(rendered.textContent).toContain('Follow the provider setup guide, register the callback URL above, then enter the credentials.')
+    const guides = [...rendered.querySelectorAll('a')].filter((link) => link.textContent === 'View setup guide')
+    expect(guides).toHaveLength(CONNECTORS.length)
+    expect(guides[0].getAttribute('href')).toBe(CONNECTORS[0].setupGuideUrl)
+    expect(guides.every((link) => link.getAttribute('target') === '_blank')).toBe(true)
+    expect(guides.every((link) => link.getAttribute('rel') === 'noreferrer')).toBe(true)
     expect(rendered.querySelector('img')?.getAttribute('src')).toBe(CONNECTORS[0].logo?.url)
 
     const inputs = [...rendered.querySelectorAll('input')] as HTMLInputElement[]
