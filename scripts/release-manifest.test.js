@@ -143,6 +143,19 @@ test("worker entries carry the deploy contract", () => {
       google.bindings.find((b) => b.name === "CLIENT_SECRET"),
       { type: "secret_text", name: "CLIENT_SECRET", text: "$SECRET(CLIENT_SECRET)" });
 
+  const hubspot = workers["gatekeeper-hubspot"];
+  assert.equal(hubspot.kind, "gatekeeper");
+  assert.equal(hubspot.shortName, "hubspot");
+  assert.equal(hubspot.vars.BASE_URL, "$PUBLIC_BASE_URL/gatekeeper/hubspot");
+  assert.ok(hubspot.installable);
+  assert.deepEqual(hubspot.inputs.map((i) => i.name), ["CLIENT_ID", "CLIENT_SECRET"]);
+  assert.deepEqual(
+      hubspot.migrations,
+      [{ tag: "v0", new_sqlite_classes: ["UserAccount", "HubSpotGatekeeperImpl"] }]);
+  assert.deepEqual(
+      hubspot.bindings.find((b) => b.name === "CLIENT_SECRET"),
+      { type: "secret_text", name: "CLIENT_SECRET", text: "$SECRET(CLIENT_SECRET)" });
+
   // gatekeeper-email ships in the release but is not installable (needs Email Routing/a zone).
   assert.equal(workers["gatekeeper-email"].installable, false);
   assert.deepEqual(workers["gatekeeper-email"].inputs, []);
