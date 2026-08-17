@@ -553,6 +553,10 @@ export class HubSpotGatekeeperImpl extends DurableObject<Env, HubSpotGatekeeperI
     return new HubSpotApi({ getAccessToken: () => account.getAccessToken() });
   }
 
+  protected notifyCredentialsExpired(): Promise<void> {
+    return this.#account().notifyCredentialsExpired();
+  }
+
   async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<HubSpotSession> {
     const account = this.#account();
     const portalId = await account.getHubId();
@@ -567,7 +571,7 @@ export class HubSpotGatekeeperImpl extends DurableObject<Env, HubSpotGatekeeperI
 
   async applyAction(action: number): Promise<void> {
     const store = new HubSpotMutationStore(this.ctx.storage.kv);
-    const pending = store.requirePending(action);
+    const pending = store.claimPending(action);
     try {
       const record = await performHubSpotMutation(this.mutationApi(), pending);
       store.putResult(action, pending, {
@@ -576,6 +580,11 @@ export class HubSpotGatekeeperImpl extends DurableObject<Env, HubSpotGatekeeperI
         recordId: record.id,
       });
     } catch (error) {
+      if (error instanceof HubSpotApiError && error.isCredentialExpired) {
+        try {
+          await this.notifyCredentialsExpired();
+        } catch {}
+      }
       store.putResult(action, pending, mutationFailure(error));
     }
     store.removePending(action);
@@ -612,6 +621,7 @@ const MAX_RETAINED_MUTATION_RESULTS = 100;
 type MutationKv = Pick<DurableObjectStorage["kv"], "delete" | "get" | "put">;
 
 type StoredPendingMutation = HubSpotMutationTicket & {
+  applying?: true;
   properties: Record<string, string>;
   recordId?: string;
 };
@@ -685,10 +695,17 @@ class HubSpotMutationStore {
 
   requirePending(id: number): StoredPendingMutation {
     const pending = this.getPending(id);
-    if (!pending || pending.id !== id) {
-      throw new Error(`Unknown pending HubSpot mutation: ${id}`);
+    if (!pending || pending.id !== id || pending.applying) {
+      throw new Error(`Unknown or applying HubSpot mutation: ${id}`);
     }
     return pending;
+  }
+
+  claimPending(id: number): StoredPendingMutation {
+    const pending = this.requirePending(id);
+    const claimed: StoredPendingMutation = { ...pending, applying: true };
+    this.#kv.put(pendingMutationKey(id), claimed);
+    return claimed;
   }
 
   removePending(id: number): void {

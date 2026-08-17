@@ -518,6 +518,33 @@ describe("HubSpot approved CRM mutations", () => {
     },
   );
 
+  it("claims a pending mutation before remote I/O so concurrent approval delivery calls HubSpot once", async () => {
+    const submitted = session();
+    const ticket = await submitted.value.createCompany({ name: "Company" });
+    const remote = deferred<Response>();
+    const fetchMock = vi.fn(async () => remote.promise) as typeof fetch;
+    vi.stubGlobal("fetch", fetchMock);
+    const gatekeeper = testEnv.HUBSPOT_GATEKEEPER.getByName("concurrent-apply");
+
+    await runInDurableObject(gatekeeper, async (instance, state) => {
+      for (const [key, value] of submitted.storage!.data) state.storage.kv.put(key, value);
+      const first = instance.applyAction(ticket.id);
+      await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+      expect(state.storage.kv.get(`mutation:pending:${ticket.id}`)).toMatchObject({
+        id: ticket.id,
+        applying: true,
+      });
+      const duplicate = expect(instance.applyAction(ticket.id)).rejects.toThrow(/pending|applying/i);
+      await Promise.resolve();
+      await Promise.resolve();
+      remote.resolve(json(crmRecord("909", { name: "Company" })));
+      await duplicate;
+      await expect(first).resolves.toBeUndefined();
+    });
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
   it("records a redacted failed result and never retries a write with an uncertain outcome", async () => {
     const secret = "private-provider-response";
     const submitted = session();
@@ -545,6 +572,36 @@ describe("HubSpot approved CRM mutations", () => {
     >;
     expect(result.status).toBe("failed");
     expect(result.message.length).toBeLessThan(200);
+    expect(result.message).not.toContain(secret);
+  });
+
+  it("best-effort notifies credential expiry before storing a safe CRM 401 result", async () => {
+    const secret = "private-provider-response";
+    const submitted = session();
+    const ticket = await submitted.value.createContact({ email: "person@example.com" });
+    const fetchMock = vi.fn(async () => json({ message: secret }, 401)) as typeof fetch;
+    vi.stubGlobal("fetch", fetchMock);
+    const gatekeeper = testEnv.HUBSPOT_GATEKEEPER.getByName("expired-write");
+
+    const stored = await runInDurableObject(gatekeeper, async (instance, state) => {
+      for (const [key, value] of submitted.storage!.data) state.storage.kv.put(key, value);
+      state.storage.kv.put("test:failNotification", true);
+      await instance.applyAction(ticket.id);
+      return [...state.storage.kv.list()];
+    });
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(stored).toContainEqual(["test:expiredCount", 1]);
+    expect(stored).toContainEqual(["test:notifiedBeforeResult", true]);
+    const restored = mutationStorage();
+    for (const [key, value] of stored) restored.kv.put(key, value);
+    const reader = session({ mutationKv: restored.kv });
+    const result = await reader.value.getMutationResult(ticket) as Extract<
+      HubSpotMutationResult,
+      { status: "failed" }
+    >;
+    expect(result.status).toBe("failed");
+    expect(result.message).toContain("credentials expired");
     expect(result.message).not.toContain(secret);
   });
 

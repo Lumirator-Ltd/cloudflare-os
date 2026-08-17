@@ -19,6 +19,18 @@ export class TestHubSpotGatekeeper extends HubSpotGatekeeperImpl {
   protected mutationApi(): HubSpotApi {
     return new HubSpotApi({ getAccessToken: async () => "test-hubspot-token" });
   }
+
+  protected async notifyCredentialsExpired(): Promise<void> {
+    const count = this.ctx.storage.kv.get<number>("test:expiredCount") ?? 0;
+    this.ctx.storage.kv.put("test:expiredCount", count + 1);
+    this.ctx.storage.kv.put(
+      "test:notifiedBeforeResult",
+      this.ctx.storage.kv.get("mutation:result:1") === undefined,
+    );
+    if (this.ctx.storage.kv.get<boolean>("test:failNotification")) {
+      throw new Error("notification unavailable");
+    }
+  }
 }
 
 type CallbackState = {
