@@ -10,6 +10,7 @@ The connector targets HubSpot's current Developer Platform rather than legacy pu
 
 - Authorization endpoint: `https://app.hubspot.com/oauth/authorize`.
 - Token endpoint: `POST https://api.hubspot.com/oauth/2026-03/token`.
+- Refresh-token revoke endpoint: `POST https://api.hubapi.com/oauth/2026-03/token/revoke`.
 - CRM endpoints: `https://api.hubapi.com/crm/objects/2026-03/{contacts|companies|deals}` and their `/search` endpoints.
 - Required scopes: `oauth`, `crm.objects.contacts.read`, `crm.objects.contacts.write`, `crm.objects.companies.read`, `crm.objects.companies.write`, `crm.objects.deals.read`, and `crm.objects.deals.write`.
 - Installing users must be HubSpot Super Admins or have HubSpot Marketplace Access.
@@ -21,6 +22,7 @@ Sources:
 
 - https://developers.hubspot.com/docs/apps/developer-platform/build-apps/authentication/oauth/working-with-oauth
 - https://developers.hubspot.com/docs/api-reference/latest/authentication/manage-oauth-tokens
+- https://developers.hubspot.com/docs/api-reference/latest/authentication/oauth-tokens/revoke-token
 - https://developers.hubspot.com/docs/apps/developer-platform/build-apps/authentication/scopes
 - https://developers.hubspot.com/docs/api-reference/latest/crm/search-the-crm
 - https://developers.hubspot.com/docs/api-reference/latest/crm/objects/contacts/guide
@@ -46,9 +48,9 @@ The release manifest discovers every package with `wrangler.jsonc`, so the new p
 
 HubSpot does not document PKCE for this server-side flow, so the connector uses the confidential client secret at the token endpoint and a cryptographic state nonce for CSRF/replay protection. The token response supplies short-lived access credentials, a refresh token, scopes, and Hub ID. The Durable Object stores tokens and identity; credentials never leave it or enter logs.
 
-Before expiry, `getAccessToken()` single-flights refreshes through the 2026-03 endpoint per Durable Object instance and persists a returned rotated refresh token when present. Only OAuth `invalid_grant` marks credentials expired and calls `credentialsExpired()` once; provider/configuration failures remain distinct. Initial and refresh responses that include scopes must contain every required scope before credentials are stored. Reconnect reuses the existing connected-account capability, accepts only the original Hub ID, and calls `credentialsRestored()` only after that same-portal grant succeeds.
+Before expiry, `getAccessToken()` single-flights refreshes through the 2026-03 endpoint per Durable Object instance and persists a returned rotated refresh token when present. A bounded persisted credential generation prevents an in-flight refresh from overwriting a reconnect, resurrecting a revoked account, or emitting a stale expiry notification. Only OAuth `invalid_grant` marks current credentials expired and calls `credentialsExpired()` once; provider/configuration failures remain distinct. Initial and refresh responses that include scopes must contain every required scope before credentials are stored. Reconnect reuses the existing connected-account capability, accepts only the original Hub ID, and advances the generation before replacing credentials and calling `credentialsRestored()`.
 
-Disconnect deletes local credentials and capabilities. Provider-side uninstall/revocation is deferred until HubSpot's current revoke contract is confirmed and tested; the README tells administrators how to remove the connected app in HubSpot if immediate provider-side revocation is required.
+Disconnect enters a fail-closed revoking state and advances the credential generation before calling HubSpot's 2026-03 refresh-token revoke endpoint. Local credentials and capabilities are deleted only after provider success. Provider failure clears the revoking state and preserves credentials for a retry; manual HubSpot uninstall is the incident fallback rather than the normal disconnect contract.
 
 ## Resource and privacy model
 
@@ -108,4 +110,3 @@ It initially appears visible but disabled with `Ask an administrator to configur
 
 - Deletes, archival, batch APIs, associations, custom properties, sensitive/highly-sensitive scopes, tickets, marketing APIs, webhooks, and HubSpot login.
 - Marketplace certification and provider-side program/security questionnaire work.
-- Provider-side token revocation until the current 2026-03 revoke request contract is verified from authoritative documentation and covered by tests.

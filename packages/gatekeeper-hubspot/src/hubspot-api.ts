@@ -9,6 +9,7 @@ import type {
 
 const AUTHORIZE_URL = "https://app.hubspot.com/oauth/authorize";
 const TOKEN_URL = "https://api.hubspot.com/oauth/2026-03/token";
+const REVOKE_URL = "https://api.hubapi.com/oauth/2026-03/token/revoke";
 const API_BASE_URL = "https://api.hubapi.com";
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_OAUTH_RESPONSE_BYTES = 64 * 1024;
@@ -387,6 +388,45 @@ export async function refreshHubSpotAccessToken(
     ...(replacement === undefined ? {} : { refreshToken: replacement }),
     expiresIn: requireExpiresIn(parsed),
   };
+}
+
+export async function revokeHubSpotRefreshToken(
+  input: {
+    refreshToken: string;
+    clientId: string;
+    clientSecret: string;
+  },
+  options: HubSpotHttpOptions = {},
+): Promise<void> {
+  const response = await fetchWithTimeout(REVOKE_URL, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({
+      client_id: input.clientId,
+      client_secret: input.clientSecret,
+      token: input.refreshToken,
+      token_type_hint: "refresh_token",
+    }).toString(),
+  }, options);
+  if (response.status === 204) return;
+
+  const parsed = await readBoundedJson(response, MAX_OAUTH_RESPONSE_BYTES);
+  if (!response.ok) {
+    throw providerError(
+      response.status,
+      parsed,
+      [input.clientSecret, input.refreshToken, ...sensitiveResponseValues(parsed)],
+      "HubSpot OAuth revoke request failed",
+    );
+  }
+  throw new HubSpotApiError({
+    message: "HubSpot OAuth revoke returned an invalid response",
+    status: response.status,
+    kind: "invalid-response",
+  });
 }
 
 export type HubSpotCrmObjectType = keyof typeof HUBSPOT_CRM_PROPERTIES;

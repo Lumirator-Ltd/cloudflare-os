@@ -101,8 +101,10 @@ and the [scope reference](https://developers.hubspot.com/docs/apps/developer-pla
 
 ## Disconnect and uninstall
 
-Disconnecting the account in Cloudflare OS clears the Gatekeeper's locally stored OAuth credentials
-but does not uninstall the app at HubSpot. To remove the provider-side grant, a HubSpot administrator
-must open **Settings > Integrations > Connected Apps**, choose the app, and select **Actions >
-Uninstall**. HubSpot documents this in [Connect apps to
-HubSpot](https://knowledge.hubspot.com/integrations/connect-apps-to-hubspot#how-to-uninstall-an-app).
+Disconnecting the account in Cloudflare OS revokes its current refresh token through HubSpot's
+`POST /oauth/2026-03/token/revoke` endpoint before deleting locally stored credentials. If HubSpot
+rejects or cannot complete revocation, Cloudflare OS preserves the local credentials so the user can
+retry disconnecting. A HubSpot administrator can manually uninstall the app under **Settings >
+Integrations > Connected Apps** as an incident fallback. See HubSpot's [revoke-token API
+reference](https://developers.hubspot.com/docs/api-reference/latest/authentication/oauth-tokens/revoke-token)
+and [uninstall instructions](https://knowledge.hubspot.com/integrations/connect-apps-to-hubspot#how-to-uninstall-an-app).

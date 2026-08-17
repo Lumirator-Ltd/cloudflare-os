@@ -25,6 +25,7 @@ import {
   exchangeHubSpotAuthorizationCode,
   generateHubSpotOAuthState,
   refreshHubSpotAccessToken,
+  revokeHubSpotRefreshToken,
   validateHubSpotProperties,
   validateHubSpotRecordId,
 } from "./hubspot-api";
@@ -73,6 +74,10 @@ const INITIATION_NONCE_LIFETIME_MS = 10 * 60 * 1000;
 const OAUTH_NONCE_LIFETIME_MS = 10 * 60 * 1000;
 const CONNECT_TIMEOUT_MS = 60 * 60 * 1000;
 const ACCESS_TOKEN_SAFETY_MS = 60 * 1000;
+const MAX_CREDENTIAL_GENERATION = 0xffff_ffff;
+const REVOCATION_IN_PROGRESS_MESSAGE = "HubSpot account disconnect is in progress.";
+const REVOCATION_FAILED_MESSAGE =
+  "HubSpot disconnect is incomplete. Retry disconnect or manually uninstall the app in HubSpot.";
 const HUBSPOT_LOGO_URL = `data:image/svg+xml,${encodeURIComponent(HUBSPOT_LOGO_SVG)}`;
 const ACCOUNT_RESOURCE: SupportedResource = {
   urlPattern: "https://app.hubspot.com/contacts/:hubId",
@@ -263,6 +268,38 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env>
 export class UserAccount extends DurableObject<Env> {
   #refreshPromise?: Promise<string>;
 
+  #credentialGeneration(): number {
+    const stored = this.ctx.storage.kv.get<number>("credentialGeneration");
+    if (typeof stored !== "number" || !Number.isSafeInteger(stored) || stored < 0 ||
+      stored > MAX_CREDENTIAL_GENERATION) {
+      return 0;
+    }
+    return stored;
+  }
+
+  #advanceCredentialGeneration(): number {
+    const current = this.#credentialGeneration();
+    const next = current === MAX_CREDENTIAL_GENERATION ? 0 : current + 1;
+    this.ctx.storage.kv.put("credentialGeneration", next);
+    this.#refreshPromise = undefined;
+    return next;
+  }
+
+  #isCurrentGeneration(generation: number): boolean {
+    return this.#credentialGeneration() === generation;
+  }
+
+  #authoritativeAccessToken(): string {
+    if (this.ctx.storage.kv.get<boolean>("revoking")) {
+      throw new Error(REVOCATION_IN_PROGRESS_MESSAGE);
+    }
+    const accessToken = this.ctx.storage.kv.get<string>("accessToken");
+    if (!accessToken) {
+      throw new Error("HubSpot credentials are unavailable. Reconnect the account.");
+    }
+    return accessToken;
+  }
+
   async setCallback(
     callback: Fetcher<GatekeeperConnectCallback>,
     initiationNonce: string,
@@ -279,6 +316,9 @@ export class UserAccount extends DurableObject<Env> {
   }
 
   async prepareReconnect(initiationNonce: string): Promise<void> {
+    if (this.ctx.storage.kv.get<boolean>("revoking")) {
+      throw new Error(REVOCATION_IN_PROGRESS_MESSAGE);
+    }
     this.ctx.storage.kv.put("reconnecting", true);
     this.ctx.storage.kv.put("expiredNotified", false);
     this.ctx.storage.kv.put<StoredNonce>("nonce", {
@@ -322,7 +362,11 @@ export class UserAccount extends DurableObject<Env> {
   async acceptAuthCode(code: string, oauthNonce: string): Promise<boolean> {
     if (!this.#consumeOAuthNonce(oauthNonce)) return false;
     const reconnecting = this.ctx.storage.kv.get<boolean>("reconnecting") ?? false;
+    const generation = this.#credentialGeneration();
     try {
+      if (this.ctx.storage.kv.get<boolean>("revoking")) {
+        throw new Error(REVOCATION_IN_PROGRESS_MESSAGE);
+      }
       requireOAuthConfiguration(this.env);
       const callback = this.ctx.storage.kv.get<Fetcher<GatekeeperConnectCallback>>("callback");
       if (!callback) return false;
@@ -333,9 +377,14 @@ export class UserAccount extends DurableObject<Env> {
         clientId: this.env.CLIENT_ID,
         clientSecret: this.env.CLIENT_SECRET,
       });
+      if (!this.#isCurrentGeneration(generation) ||
+        this.ctx.storage.kv.get<boolean>("revoking")) {
+        throw new Error("HubSpot authorization was superseded by a credential change.");
+      }
       if (reconnecting && grant.hubId !== this.ctx.storage.kv.get<number>("hubId")) {
         throw new Error("HubSpot reconnect portal does not match the connected account.");
       }
+      this.#advanceCredentialGeneration();
       this.ctx.storage.kv.put("accessToken", grant.accessToken);
       this.ctx.storage.kv.put("refreshToken", grant.refreshToken);
       this.ctx.storage.kv.put("accessTokenExpiresAt", Date.now() + grant.expiresIn * 1000);
@@ -377,6 +426,9 @@ export class UserAccount extends DurableObject<Env> {
   }
 
   async getAccessToken(): Promise<string> {
+    if (this.ctx.storage.kv.get<boolean>("revoking")) {
+      throw new Error(REVOCATION_IN_PROGRESS_MESSAGE);
+    }
     const accessToken = this.ctx.storage.kv.get<string>("accessToken");
     const expiresAt = this.ctx.storage.kv.get<number>("accessTokenExpiresAt") ?? 0;
     if (accessToken && Date.now() < expiresAt - ACCESS_TOKEN_SAFETY_MS) return accessToken;
@@ -400,6 +452,7 @@ export class UserAccount extends DurableObject<Env> {
     const refreshToken = this.ctx.storage.kv.get<string>("refreshToken");
     if (!refreshToken) throw new Error("HubSpot credentials are unavailable. Reconnect the account.");
     requireOAuthConfiguration(this.env);
+    const generation = this.#credentialGeneration();
 
     try {
       const grant = await refreshHubSpotAccessToken({
@@ -407,11 +460,13 @@ export class UserAccount extends DurableObject<Env> {
         clientId: this.env.CLIENT_ID,
         clientSecret: this.env.CLIENT_SECRET,
       });
+      if (!this.#isCurrentGeneration(generation)) return this.#authoritativeAccessToken();
       this.ctx.storage.kv.put("accessToken", grant.accessToken);
       this.ctx.storage.kv.put("accessTokenExpiresAt", Date.now() + grant.expiresIn * 1000);
       if (grant.refreshToken) this.ctx.storage.kv.put("refreshToken", grant.refreshToken);
       return grant.accessToken;
     } catch (error) {
+      if (!this.#isCurrentGeneration(generation)) return this.#authoritativeAccessToken();
       if (error instanceof HubSpotApiError && error.isCredentialExpired) {
         await this.notifyCredentialsExpired();
         throw new Error(
@@ -454,6 +509,27 @@ export class UserAccount extends DurableObject<Env> {
   }
 
   async revoke(): Promise<void> {
+    if (this.ctx.storage.kv.get<boolean>("revoking")) {
+      throw new Error(REVOCATION_IN_PROGRESS_MESSAGE);
+    }
+    const refreshToken = this.ctx.storage.kv.get<string>("refreshToken");
+    this.ctx.storage.kv.put("revoking", true);
+    this.#advanceCredentialGeneration();
+
+    if (refreshToken) {
+      try {
+        requireOAuthConfiguration(this.env);
+        await revokeHubSpotRefreshToken({
+          refreshToken,
+          clientId: this.env.CLIENT_ID,
+          clientSecret: this.env.CLIENT_SECRET,
+        });
+      } catch (error) {
+        this.ctx.storage.kv.delete("revoking");
+        throw new Error(REVOCATION_FAILED_MESSAGE, { cause: error });
+      }
+    }
+
     await this.ctx.storage.deleteAlarm();
     await this.ctx.storage.deleteAll();
   }
@@ -800,8 +876,8 @@ class HubSpotMutationStore {
   recoverStaleApplying(
     id: number,
     pending: StoredPendingMutation,
-  ): Extract<HubSpotMutationResult, { status: "failed" }> {
-    const outcome = { status: "failed" as const, message: STALE_MUTATION_MESSAGE };
+  ): Extract<HubSpotMutationResult, { status: "uncertain" }> {
+    const outcome = { status: "uncertain" as const, message: STALE_MUTATION_MESSAGE };
     this.putResult(id, pending, outcome);
     this.removePending(id);
     return outcome;

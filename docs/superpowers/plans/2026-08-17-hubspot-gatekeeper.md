@@ -78,7 +78,7 @@ git commit -m "feat: scaffold HubSpot gatekeeper"
 
 - [ ] **Step 1: Write failing OAuth tests**
 
-Cover authorization URL query encoding, 2026-03 authorization-code exchange, refresh-token exchange, required response fields, redacted OAuth errors, and request timeouts. Assert secrets/tokens never appear in thrown messages.
+Cover authorization URL query encoding, 2026-03 authorization-code exchange, refresh-token exchange and revocation, required response fields, redacted OAuth errors, and request timeouts. Assert secrets/tokens never appear in URLs or thrown messages.
 
 Run: `mise exec node@24.13.0 -- pnpm --dir packages/gatekeeper-hubspot exec vitest run __tests__/hubspot-api.test.ts`
 
@@ -86,7 +86,7 @@ Expected: FAIL because the API helpers do not exist.
 
 - [ ] **Step 2: Implement OAuth helpers**
 
-Use `https://app.hubspot.com/oauth/authorize` and form-encoded `https://api.hubspot.com/oauth/2026-03/token`. Require `access_token`, `refresh_token` for initial exchange, positive `expires_in`, and numeric `hub_id`. If a token response includes scopes, require every configured OAuth scope before storing it. Persist a refresh token returned during refresh and preserve the prior token only when HubSpot omits a replacement.
+Use `https://app.hubspot.com/oauth/authorize`, form-encoded `https://api.hubspot.com/oauth/2026-03/token`, and form-encoded `https://api.hubapi.com/oauth/2026-03/token/revoke`. Require `access_token`, `refresh_token` for initial exchange, positive `expires_in`, and numeric `hub_id`. If a token response includes scopes, require every configured OAuth scope before storing it. Persist a refresh token returned during refresh and preserve the prior token only when HubSpot omits a replacement. Revoke with `client_id`, `client_secret`, `token`, and `token_type_hint=refresh_token`, accepting the documented empty success response and bounding/redacting failures.
 
 - [ ] **Step 3: Write failing CRM client tests**
 
@@ -132,7 +132,7 @@ Assert initiation and OAuth state nonces are cryptographically random, one-time,
 
 - [ ] **Step 3: Implement HTTP entrypoint, vendor, and UserAccount**
 
-Follow the current Gatekeeper OAuth lifecycle. Store callback, tokens, scopes, Hub ID, and user/domain identity only in the Durable Object. Single-flight refresh per instance, notify credential expiry once only for OAuth `invalid_grant`, and support reconnect through the existing account capability only when the new grant has the original Hub ID.
+Follow the current Gatekeeper OAuth lifecycle. Store callback, tokens, scopes, Hub ID, and user/domain identity only in the Durable Object. Persist a bounded credential generation so refresh results are discarded after reconnect or revoke. Single-flight refresh per instance, notify credential expiry once only for a current OAuth `invalid_grant`, and support reconnect through the existing account capability only when the new grant has the original Hub ID. Disconnect enters a fail-closed revoking state before provider I/O, deletes locally only after refresh-token revoke succeeds, and preserves reconnectable credentials on provider failure.
 
 - [ ] **Step 4: Implement connected-account RPC and configurator**
 
@@ -232,7 +232,7 @@ Add `hubspot` to the server allowlists/setup guides and local environment creden
 
 - [ ] **Step 3: Add current provider setup guide**
 
-Document Developer Platform OAuth app creation, private vs marketplace distribution, exact callback template, required scopes, install permissions, unverified-app behavior, credential installation, disconnect limitations, and verification steps.
+Document Developer Platform OAuth app creation, private vs marketplace distribution, exact callback template, required scopes, install permissions, unverified-app behavior, credential installation, provider-side disconnect revocation, manual-uninstall incident fallback, and verification steps.
 
 - [ ] **Step 4: Verify and commit**
 

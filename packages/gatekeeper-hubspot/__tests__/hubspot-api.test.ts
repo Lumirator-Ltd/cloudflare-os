@@ -9,6 +9,7 @@ import {
   exchangeHubSpotAuthorizationCode,
   generateHubSpotOAuthState,
   refreshHubSpotAccessToken,
+  revokeHubSpotRefreshToken,
 } from "../src/hubspot-api";
 
 const CLIENT_SECRET = "client-secret-never-expose";
@@ -282,6 +283,56 @@ describe("HubSpot OAuth", () => {
     const error = await promise.catch((caught: unknown) => caught as Error);
     expect(error.message).not.toContain(CLIENT_SECRET);
     expect(error.message).not.toContain(REFRESH_TOKEN);
+  });
+
+  it("revokes a refresh token with the exact 2026-03 form contract", async () => {
+    const injected = captureFetch(new Response(null, { status: 204 }));
+
+    await expect(revokeHubSpotRefreshToken({
+      refreshToken: REFRESH_TOKEN,
+      clientId: "client-id",
+      clientSecret: CLIENT_SECRET,
+    }, { fetch: injected.fetch })).resolves.toBeUndefined();
+
+    const call = injected.calls[0];
+    const url = new URL(String(call.input));
+    expect(url.origin + url.pathname).toBe(
+      "https://api.hubapi.com/oauth/2026-03/token/revoke",
+    );
+    expect(url.search).toBe("");
+    expect(call.init?.method).toBe("POST");
+    expect(new Headers(call.init?.headers).get("content-type")).toBe(
+      "application/x-www-form-urlencoded",
+    );
+    expect(Object.fromEntries(formFrom(call))).toEqual({
+      client_id: "client-id",
+      client_secret: CLIENT_SECRET,
+      token: REFRESH_TOKEN,
+      token_type_hint: "refresh_token",
+    });
+  });
+
+  it("bounds and redacts refresh-token revoke failures", async () => {
+    const injected = captureFetch(response({
+      error: REFRESH_TOKEN,
+      correlationId: CLIENT_SECRET,
+      client_secret: CLIENT_SECRET,
+      refresh_token: REFRESH_TOKEN,
+      raw: "x".repeat(50_000),
+    }, 500));
+
+    const promise = revokeHubSpotRefreshToken({
+      refreshToken: REFRESH_TOKEN,
+      clientId: "client-id",
+      clientSecret: CLIENT_SECRET,
+    }, { fetch: injected.fetch });
+    const error = await promise.catch((caught: unknown) => caught as Error);
+
+    expect(error).toBeInstanceOf(HubSpotApiError);
+    expect(error.message.length).toBeLessThan(300);
+    expect(error.message).not.toContain(CLIENT_SECRET);
+    expect(error.message).not.toContain(REFRESH_TOKEN);
+    expect(error.message).not.toContain("x".repeat(100));
   });
 });
 

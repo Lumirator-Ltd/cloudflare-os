@@ -745,6 +745,8 @@ describe("HubSpot approved CRM mutations", () => {
     gatekeeper = testEnv.HUBSPOT_GATEKEEPER.getByName("stale-fresh-apply");
     const stored = await runInDurableObject(gatekeeper, async (instance, state) => {
       await expect(instance.applyAction(ticket.id)).rejects.toThrow(/outcome.*uncertain|inspect/i);
+      await expect(instance.applyAction(ticket.id)).rejects.toThrow(/outcome.*uncertain|inspect/i);
+      await expect(instance.rejectAction(ticket.id)).rejects.toThrow(/outcome.*uncertain|inspect/i);
       return [...state.storage.kv.list()];
     });
 
@@ -753,7 +755,10 @@ describe("HubSpot approved CRM mutations", () => {
     expect(stored).toContainEqual([
       `mutation:result:${ticket.id}`,
       expect.objectContaining({
-        outcome: expect.objectContaining({ status: "failed", message: expect.stringMatching(/inspect/i) }),
+        outcome: expect.objectContaining({
+          status: "uncertain",
+          message: expect.stringMatching(/inspect/i),
+        }),
       }),
     ]);
   });
@@ -768,7 +773,7 @@ describe("HubSpot approved CRM mutations", () => {
     });
 
     await expect(lookup.value.getMutationResult(lookupTicket)).resolves.toMatchObject({
-      status: "failed",
+      status: "uncertain",
       message: expect.stringMatching(/outcome.*uncertain|inspect/i),
     });
     expect(lookup.storage!.data.has(lookupKey)).toBe(false);
@@ -794,7 +799,7 @@ describe("HubSpot approved CRM mutations", () => {
     expect(stored.some(([key]) => key === rejectedKey)).toBe(false);
     expect(stored).toContainEqual([
       `mutation:result:${rejectedTicket.id}`,
-      expect.objectContaining({ outcome: expect.objectContaining({ status: "failed" }) }),
+      expect.objectContaining({ outcome: expect.objectContaining({ status: "uncertain" }) }),
     ]);
   });
 
