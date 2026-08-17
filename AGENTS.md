@@ -1,3 +1,11 @@
+## Project intent: PoC / MVP (Lumirator)
+
+This work is a proof of concept and MVP for using Cloudflare OS to its full extent and offering it as a managed service to clients.
+
+Prioritize fast implementation and a simple working MVP. Prefer small, shippable changes over speculative complexity. Do not run supply-chain or downloaded-code audits unless explicitly requested in chat. Never commit secrets, tenant configuration, state, or credentials.
+
+## Upstream project
+
 This project is building a platform for "vibe coded" personal applications and AI agents that run inside a strong sandbox.
 
 The following files are commonly important to reference:
