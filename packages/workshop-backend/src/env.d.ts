@@ -74,6 +74,11 @@ declare global {
       // Public base URL of the deployment.
       PUBLIC_BASE_URL?: string;
 
+      // Optional Cloudflare Workers secret control plane for static-OAuth connectors.
+      CONNECTOR_CONFIG_ACCOUNT_ID?: string;
+      CONNECTOR_CONFIG_WORKER_PREFIX?: string;
+      CONNECTOR_CONFIG_API_TOKEN?: string;
+
       // Daily free-tier LLM-call limit (per user). Defaults to DEFAULT_DAILY_LLM_CALL_LIMIT.
       DAILY_LLM_CALL_LIMIT?: string;
 

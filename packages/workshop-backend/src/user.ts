@@ -1115,6 +1115,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     if ((await readAdminConfig(this.env)).disabledGatekeepers.includes(vendorId.toLowerCase())) {
       throw new Error(`The "${vendorId}" gatekeeper is disabled on this deployment.`);
     }
+    if ((await vendor.describe()).configuration?.configured === false) {
+      throw new Error(
+          "This connector is not configured. Ask an administrator to configure it.");
+    }
 
     let accountId = this.storage.nextAccountId.get();
     this.storage.nextAccountId.put(accountId + 1);

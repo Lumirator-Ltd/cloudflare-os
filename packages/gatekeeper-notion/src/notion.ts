@@ -16,6 +16,7 @@
 import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import {
+  staticOauthConnectorConfiguration,
   type AccountDescription,
   type ApprovalQueue,
   type Gatekeeper,
@@ -298,6 +299,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
           "Connect your Notion workspace to let Cloudflare OS search, read, and edit the pages and " +
           "databases you share. Build agents that draft documents, organize notes, or manage " +
           "database records.",
+      configuration: staticOauthConnectorConfiguration(this.env),
     };
   }
 

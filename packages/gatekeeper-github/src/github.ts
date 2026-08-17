@@ -2,6 +2,7 @@ import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import {
   ApprovalQueue,
+  staticOauthConnectorConfiguration,
   type ActionDescription,
   type AccountDescription,
   type Cursor,
@@ -1020,6 +1021,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
           "Connect your GitHub account so Cloudflare OS can read and update issues, pull requests, " +
           "and reviews on the repositories you choose.",
       providesAuth: true,
+      configuration: staticOauthConnectorConfiguration(this.env),
     };
   }
 

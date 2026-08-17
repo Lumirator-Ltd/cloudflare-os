@@ -2,6 +2,7 @@ import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import {
   ApprovalQueue,
+  staticOauthConnectorConfiguration,
   type AccountDescription,
   type Gatekeeper,
   type GatekeeperConnectCallback,
@@ -347,6 +348,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
       description:
           "Connect your Supabase account so Cloudflare OS can run SQL against your project databases, " +
           "explore schema, and inspect edge functions and storage for the projects you choose.",
+      configuration: staticOauthConnectorConfiguration(this.env),
     };
   }
 

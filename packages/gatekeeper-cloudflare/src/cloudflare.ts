@@ -3,7 +3,7 @@ import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import {
   GatekeeperVendor as GatekeeperVendorIface, Gatekeeper, GatekeeperUserVerifier, VendorDescription,
   GatekeeperConnectCallback, GatekeeperConnectOptions, AccountDescription,
-  SupportedResource, ResourceConfiguratorFrame,
+  SupportedResource, ResourceConfiguratorFrame, staticOauthConnectorConfiguration,
 } from "@gadgets/workshop-shared/gatekeeper";
 import { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
 import { getOAuthConfig, buildAuthorizeUrl, generatePkce, exchangeCode, refreshTokens, AUTH_SCOPES, FULL_SCOPES } from "./oauth";
@@ -159,6 +159,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
           "Sign in with your Cloudflare account. Usage beyond the free tier can be billed to your " +
           "own Cloudflare AI Gateway credits.",
       providesAuth: true,
+      configuration: staticOauthConnectorConfiguration(this.env),
     };
   }
 

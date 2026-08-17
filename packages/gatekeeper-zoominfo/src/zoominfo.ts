@@ -2,6 +2,7 @@ import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import {
   ApprovalQueue,
+  staticOauthConnectorConfiguration,
   type AccountDescription,
   type Gatekeeper,
   type GatekeeperConnectCallback,
@@ -333,6 +334,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
         "contacts, intent signals, scoops, and news, and enrich matched records into full detail. " +
         "Search is free; enrichment consumes ZoomInfo credits. Build agents that assemble target " +
         "account lists, research accounts, and prioritize outreach on buying signals.",
+      configuration: staticOauthConnectorConfiguration(this.env),
     };
   }
 

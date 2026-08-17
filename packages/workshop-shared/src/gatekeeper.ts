@@ -34,7 +34,36 @@ export type AvatarImage = {
   url: string;
 }
 
-// Describes a connected GatekeeperVendor, for display purposes.
+/** Describes one write-only deployment input required by a connector. */
+export type ConnectorConfigurationInput = {
+  name: string;
+  label: string;
+  secret: true;
+};
+
+/** Describes whether a connector has its required deployment configuration. */
+export type ConnectorConfiguration = {
+  configured: boolean;
+  inputs: ConnectorConfigurationInput[];
+};
+
+/** Standard write-only inputs used by Gatekeepers with static OAuth credentials. */
+export const STATIC_OAUTH_CONNECTOR_INPUTS: ConnectorConfigurationInput[] = [
+  { name: "CLIENT_ID", label: "Client ID", secret: true },
+  { name: "CLIENT_SECRET", label: "Client Secret", secret: true },
+];
+
+/** Builds readiness metadata for a Gatekeeper backed by static OAuth credentials. */
+export function staticOauthConnectorConfiguration(
+  env: { CLIENT_ID?: string; CLIENT_SECRET?: string },
+): ConnectorConfiguration {
+  return {
+    configured: Boolean(env.CLIENT_ID && env.CLIENT_SECRET),
+    inputs: STATIC_OAUTH_CONNECTOR_INPUTS,
+  };
+}
+
+/** Describes a connected GatekeeperVendor for display and connection readiness. */
 export type VendorDescription = {
   // Human-readable name of the service, e.g. "Google", "GitHub", etc.
   displayName: string;
@@ -68,6 +97,9 @@ export type VendorDescription = {
   // The account — not the vendor — declares whether it provides an agent singleton and/or a
   // management UI (see AccountDescription.singleton / .providesUi).
   autoProvisionsAccount?: boolean;
+
+  // Optional so Gatekeepers without deployment credentials retain their existing behavior.
+  configuration?: ConnectorConfiguration;
 }
 
 // Per-open context the Workshop passes to GatekeeperUser.startAppUi(). `isAdmin` is supplied fresh
