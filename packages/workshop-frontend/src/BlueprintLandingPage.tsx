@@ -21,7 +21,7 @@ import { WorkshopButton, WorkshopIconButton } from './components/WorkshopControl
 import { MENU_CONTENT, MENU_ITEM, MENU_ITEM_DANGER } from './components/menuStyles'
 import { useDocumentTitle } from './useDocumentTitle'
 import {
-  CONNECTOR_NOT_CONFIGURED_MESSAGE,
+  CONNECTOR_SETUP_GUIDANCE,
   connectionErrorMessage,
   connectorIsConfigured,
 } from './connectorReadiness'
@@ -1664,7 +1664,7 @@ function BlueprintGatekeeperBindingField({
         connectDisabledMessage={
           connectorIsConfigured(vendor.description)
             ? undefined
-            : CONNECTOR_NOT_CONFIGURED_MESSAGE
+            : CONNECTOR_SETUP_GUIDANCE
         }
       />
 

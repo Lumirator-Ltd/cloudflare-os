@@ -32,7 +32,7 @@ import { useSiteName } from './ServerConfigContext'
 import SiteLogo from './components/SiteLogo'
 import { useDocumentTitle } from './useDocumentTitle'
 import {
-  CONNECTOR_NOT_CONFIGURED_MESSAGE,
+  CONNECTOR_SETUP_GUIDANCE,
   connectionErrorMessage,
   connectorIsConfigured,
 } from './connectorReadiness'
@@ -116,7 +116,7 @@ export function OnboardingConnectorButton({
               ? 'Connecting...'
               : configured
                 ? 'Not connected'
-                : CONNECTOR_NOT_CONFIGURED_MESSAGE}
+                : CONNECTOR_SETUP_GUIDANCE}
         </p>
       </div>
       {connected && (
