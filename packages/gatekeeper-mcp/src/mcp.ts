@@ -10,6 +10,7 @@ import { RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
 import { validateRpc, skipRpcValidation } from "capnweb-validate";
 import { createLogger } from "@gadgets/backend-utils/logger";
 import {
+  stripTrailingSlashes,
   type AvatarImage,
   type Gatekeeper,
   type GatekeeperConnectCallback,
@@ -84,7 +85,7 @@ const MCP_AVATAR: AvatarImage = { url: MCP_LOGO_URL };
 // Helpers
 
 function getBaseUrl(env: Env): string {
-  return (env.BASE_URL ?? "http://localhost:8787/gatekeeper/mcp").replace(/\/+$/, "");
+  return stripTrailingSlashes(env.BASE_URL ?? "http://localhost:8787/gatekeeper/mcp");
 }
 
 // ---------------------------------------------------------------------------
@@ -203,8 +204,10 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
 // ---------------------------------------------------------------------------
 // Account DO — owns the endpoint choice and every credential for it.
 
-// One connected MCP server, for one user: `McpAccountBase` plus where this Worker lives and how it
-// mints an account. Nothing outside this object ever sees a credential.
+/**
+ * One connected MCP server, for one user: `McpAccountBase` plus where this Worker lives and how it
+ * mints an account. Nothing outside this object ever sees a credential.
+ */
 export class McpAccount extends McpAccountBase<Env> {
   protected baseUrl(): string {
     return getBaseUrl(this.env);
@@ -219,8 +222,10 @@ export class McpAccount extends McpAccountBase<Env> {
     return this.ctx.exports.GatekeeperUserImpl({ props });
   }
 
-  // The connect handler needs both over RPC: one to decide whether to show the endpoint form, the
-  // other to reject a stale link before doing any work.
+  /**
+   * The connect handler needs both over RPC: one to decide whether to show the endpoint form, the
+   * other to reject a stale link before doing any work.
+   */
   async hasEndpoint(): Promise<boolean> {
     return this.hasConnectedServer();
   }
@@ -386,15 +391,17 @@ export class McpGatekeeperImpl
     return logger.with({ serverHost: hostOf(this.ctx.props.endpoint) });
   }
 
-  // Namespaces this binding's action-kind tags, so a pre-approval for one server's `create_issue`
-  // cannot apply to another's.
-  //
-  // The whole endpoint is the identity, matching `sameEndpoint` and every other place a grant is
-  // compared. `serverId` is a display slug and collides across hosts, but the origin is not enough
-  // either: one host can front `/mcp` and `/mcp-v2` as unrelated servers, and keying on the origin
-  // let an always-approve decision for a tool on one of them silently auto-apply to the same tool
-  // name on the other. `endpointTag` is that identity, shared with `sameEndpoint` so the two
-  // cannot drift.
+  /**
+   * Namespaces this binding's action-kind tags, so a pre-approval for one server's `create_issue`
+   * cannot apply to another's.
+   *
+   * The whole endpoint is the identity, matching `sameEndpoint` and every other place a grant is
+   * compared. `serverId` is a display slug and collides across hosts, but the origin is not enough
+   * either: one host can front `/mcp` and `/mcp-v2` as unrelated servers, and keying on the origin
+   * let an always-approve decision for a tool on one of them silently auto-apply to the same tool
+   * name on the other. `endpointTag` is that identity, shared with `sameEndpoint` so the two
+   * cannot drift.
+   */
   protected get actionScopeTag(): string {
     return `mcp:${endpointTag(this.ctx.props.endpoint)}`;
   }

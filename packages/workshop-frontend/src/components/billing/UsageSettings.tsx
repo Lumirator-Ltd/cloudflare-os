@@ -9,8 +9,10 @@ import { buildAddCreditsUrl } from './creditsUrl'
 import ResetCountdown from './ResetCountdown'
 import { connectionErrorMessage } from '../../connectorReadiness'
 
-// Shows the user's free-tier usage and Cloudflare connection / credit status on the profile page.
-// Renders nothing unless the Cloudflare limits flow is enabled server-side.
+/**
+ * Shows the user's free-tier usage and Cloudflare connection / credit status on the profile page.
+ * Renders nothing unless the Cloudflare limits flow is enabled server-side.
+ */
 export default function UsageSettings() {
   const limitsEnabled = useCloudflareLimitsEnabled()
   const { authenticatedApi } = useAuthenticatedApi()
