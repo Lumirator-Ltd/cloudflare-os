@@ -96,7 +96,7 @@ describe('ConnectAccountModal connector readiness', () => {
     const setupCard = rendered.querySelector('[data-vendor-id="setup"]') as HTMLElement
     expect(setupCard).not.toBeNull()
     expect(setupCard.getAttribute('aria-disabled')).toBe('true')
-    expect(setupCard.textContent).toContain('This connector is not configured. Ask an administrator to configure it.')
+    expect(setupCard.textContent).toContain('Ask an administrator to configure this connector.')
 
     await act(async () => setupCard.click())
     expect(connectAccount).not.toHaveBeenCalled()
@@ -127,7 +127,7 @@ describe('ConnectAccountModal connector readiness', () => {
     })
 
     expect(addToast).toHaveBeenCalledWith({
-      title: 'This connector is not configured. Ask an administrator to configure it.',
+      title: 'Ask an administrator to configure this connector.',
       variant: 'error',
     })
   })

@@ -25,7 +25,7 @@ import { GatekeeperVendorInfo } from '@gadgets/workshop-shared/api'
 import { useDocumentTitle } from '../useDocumentTitle'
 import { useSiteName } from '../ServerConfigContext'
 import {
-  CONNECTOR_NOT_CONFIGURED_MESSAGE,
+  CONNECTOR_SETUP_GUIDANCE,
   connectionErrorMessage,
   connectorIsConfigured,
 } from '../connectorReadiness'
@@ -836,7 +836,7 @@ function ConnectorsPage() {
                     state="available"
                     onClick={() => handleOpenConnect(vendor.id)}
                     view={view}
-                    disabledMessage={configured ? undefined : CONNECTOR_NOT_CONFIGURED_MESSAGE}
+                    disabledMessage={configured ? undefined : CONNECTOR_SETUP_GUIDANCE}
                   />
                 )
               })}

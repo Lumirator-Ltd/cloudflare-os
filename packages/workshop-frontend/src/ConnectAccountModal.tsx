@@ -4,7 +4,7 @@ import { RpcStub } from 'capnweb'
 import { AuthenticatedApi, GatekeeperVendorFilter, GatekeeperVendorInfo } from '@gadgets/workshop-shared/api'
 import VendorCard from './VendorCard'
 import {
-  CONNECTOR_NOT_CONFIGURED_MESSAGE,
+  CONNECTOR_SETUP_GUIDANCE,
   connectionErrorMessage,
   connectorIsConfigured,
 } from './connectorReadiness'
@@ -100,7 +100,7 @@ export default function ConnectAccountModal({
                   onClick={() => handleConnect(vendor.id)}
                   loading={connecting === vendor.id}
                   disabled={!configured || (connecting !== null && connecting !== vendor.id)}
-                  disabledMessage={configured ? undefined : CONNECTOR_NOT_CONFIGURED_MESSAGE}
+                  disabledMessage={configured ? undefined : CONNECTOR_SETUP_GUIDANCE}
                 />
               )
             })}

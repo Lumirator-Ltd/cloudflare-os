@@ -17,7 +17,7 @@ import {
 import { WorkshopButton } from './components/WorkshopControls'
 import Avatar from './components/Avatar'
 import {
-  CONNECTOR_NOT_CONFIGURED_MESSAGE,
+  CONNECTOR_SETUP_GUIDANCE,
   connectionErrorMessage,
   connectorIsConfigured,
 } from './connectorReadiness'
@@ -375,7 +375,7 @@ export default function ObserverConfigModal({
                         disabled={!configured || connecting === need.vendorId}
                       >
                         {!configured
-                          ? CONNECTOR_NOT_CONFIGURED_MESSAGE
+                          ? CONNECTOR_SETUP_GUIDANCE
                           : connecting === need.vendorId
                             ? 'Waiting for connection…'
                             : 'Connect'}
@@ -492,7 +492,7 @@ export default function ObserverConfigModal({
                         >
                           <Plus size={11} />
                           {!configured
-                            ? CONNECTOR_NOT_CONFIGURED_MESSAGE
+                            ? CONNECTOR_SETUP_GUIDANCE
                             : connecting === need.vendorId
                               ? 'Waiting for connection…'
                               : 'Connect a different account'}

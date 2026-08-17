@@ -19,7 +19,7 @@ vi.mock('@cloudflare/kumo', () => ({
 import OAuthButtons from './OAuthButtons'
 
 const UNCONFIGURED_MESSAGE =
-  'This connector is not configured. Ask an administrator to configure it.'
+  'Ask an administrator to configure this connector.'
 
 function vendor(configured: boolean): AuthVendorInfo {
   return { vendorId: 'github', displayName: 'GitHub', configured }

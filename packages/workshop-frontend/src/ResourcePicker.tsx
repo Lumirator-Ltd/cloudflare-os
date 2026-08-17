@@ -11,7 +11,7 @@ import {
   PICKER_CAPTION, PICKER_EMPTY, PICKER_ROW, PICKER_ROW_ACTIVE, TabHint,
 } from './components/pickerRows'
 import {
-  CONNECTOR_NOT_CONFIGURED_MESSAGE,
+  CONNECTOR_SETUP_GUIDANCE,
   connectionErrorMessage,
   connectorIsConfigured,
 } from './connectorReadiness'
@@ -638,7 +638,7 @@ export default function ResourcePicker({
                     </span>
                     <span className="flex-1 text-[13px] leading-[18px] tracking-[-0.25px] text-kumo-subtle">
                       {!configured
-                        ? CONNECTOR_NOT_CONFIGURED_MESSAGE
+                        ? CONNECTOR_SETUP_GUIDANCE
                         : connectingVendor === vendor.id
                           ? 'Opening…'
                           : 'Connect new account'}

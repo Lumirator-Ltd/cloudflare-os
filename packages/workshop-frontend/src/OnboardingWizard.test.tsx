@@ -54,7 +54,7 @@ describe('onboarding connectors', () => {
 
     expect(button.disabled).toBe(true)
     expect(button.textContent).toContain('Needs Setup')
-    expect(button.textContent).toContain('This connector is not configured. Ask an administrator to configure it.')
+    expect(button.textContent).toContain('Ask an administrator to configure this connector.')
     act(() => button.click())
     expect(onConnect).not.toHaveBeenCalled()
   })

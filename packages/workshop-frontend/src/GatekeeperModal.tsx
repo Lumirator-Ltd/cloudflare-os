@@ -35,7 +35,7 @@ import { matchesResourceUrl } from './resourceMatching'
 import { reportIssue } from './errorReporting'
 import { useSiteName } from './ServerConfigContext'
 import {
-  CONNECTOR_NOT_CONFIGURED_MESSAGE,
+  CONNECTOR_SETUP_GUIDANCE,
   connectionErrorMessage,
   connectorIsConfigured,
 } from './connectorReadiness'
@@ -855,7 +855,7 @@ export default function GatekeeperModal({
                     onGrantAccess={handleGrantResourceAccess}
                     connectDisabledMessage={
                       selectedConnection.connectorConfigured === false
-                        ? CONNECTOR_NOT_CONFIGURED_MESSAGE
+                        ? CONNECTOR_SETUP_GUIDANCE
                         : undefined
                     }
                   />

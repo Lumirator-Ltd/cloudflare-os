@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { RpcStub } from 'capnweb'
 import { PublicApi, AuthVendorInfo } from '@gadgets/workshop-shared/api'
 import { Button, Banner } from '@cloudflare/kumo'
-import { CONNECTOR_NOT_CONFIGURED_MESSAGE } from '../../connectorReadiness'
+import { CONNECTOR_SETUP_GUIDANCE } from '../../connectorReadiness'
 
 interface OAuthButtonsProps {
   rpcStub: RpcStub<PublicApi>
@@ -118,7 +118,7 @@ export default function OAuthButtons({ rpcStub, vendors, onSuccess }: OAuthButto
           </Button>
           {!vendor.configured && (
             <p className="mt-1 text-xs text-kumo-subtle">
-              {CONNECTOR_NOT_CONFIGURED_MESSAGE}
+              {CONNECTOR_SETUP_GUIDANCE}
             </p>
           )}
         </div>

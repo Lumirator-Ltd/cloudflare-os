@@ -4,7 +4,8 @@
 
 Preserve Cloudflare OS connector behavior and the existing Admin Gatekeepers controls while adding:
 
-- a clear user-facing unconfigured state: **This connector is not configured. Ask an administrator to configure it.**;
+- a clear user-facing unconfigured state: **Ask an administrator to configure this connector.**;
+- a server-side rejection for raced or crafted requests: **This connector is not configured. Ask an administrator to configure it.**;
 - `/admin/connectors`, where deployment admins can write or rotate OAuth credentials.
 
 This is an MVP for managed client deployments. Keep the change narrow and reuse each Gatekeeper's existing `CLIENT_ID` / `CLIENT_SECRET` environment contract.
