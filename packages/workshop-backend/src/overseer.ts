@@ -1086,7 +1086,7 @@ export function sanitizeMessageFormatRefs(
   return accepted.toSorted((a, b) => a.position - b.position);
 }
 
-export class OverseerImpl implements AgentHooks {
+class OverseerImpl implements AgentHooks {
   public storage: OverseerStorage;
   readonly logger: ReturnType<typeof createWorkshopLogger>;
 
@@ -9749,3 +9749,6 @@ class AgentSpawnerBindingImpl extends RpcTarget implements AgentSpawnerBinding {
         title, prompt, this.ctx.props.config, this.ctx.props.creatorUserId, true);
   }
 }
+
+/** Test-only export: readiness tests construct the module-private implementation directly. */
+export { OverseerImpl };

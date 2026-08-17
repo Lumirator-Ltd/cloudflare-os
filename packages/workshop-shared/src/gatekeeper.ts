@@ -112,7 +112,7 @@ export type VendorDescription = {
    */
   autoProvisionsAccount?: boolean;
 
-  // Optional so Gatekeepers without deployment credentials retain their existing behavior.
+  /** Optional so Gatekeepers without deployment credentials retain their existing behavior. */
   configuration?: ConnectorConfiguration;
 }
 

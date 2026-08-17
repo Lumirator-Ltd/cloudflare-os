@@ -1062,7 +1062,7 @@ export type AuthVendorInfo = {
   displayName: string;
   logo?: AvatarImage;
   color?: string;
-  // False when the connector cannot start a new sign-in authorization flow.
+  /** False when the connector cannot start a new sign-in authorization flow. */
   configured: boolean;
 };
 
