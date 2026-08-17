@@ -19,13 +19,26 @@ import {
 } from "@gadgets/workshop-shared/gatekeeper";
 import {
   HUBSPOT_OAUTH_SCOPES,
+  HubSpotApi,
   HubSpotApiError,
   buildHubSpotAuthorizationUrl,
   exchangeHubSpotAuthorizationCode,
   generateHubSpotOAuthState,
   refreshHubSpotAccessToken,
 } from "./hubspot-api";
-import type { HubSpotSession } from "./types";
+import type {
+  HubSpotCompany,
+  HubSpotCompanyProperties,
+  HubSpotContact,
+  HubSpotContactProperties,
+  HubSpotDeal,
+  HubSpotDealProperties,
+  HubSpotMutationResult,
+  HubSpotMutationTicket,
+  HubSpotSearchPage,
+  HubSpotSearchPaging,
+  HubSpotSession,
+} from "./types";
 import TYPES_CODE from "./types.txt";
 import HUBSPOT_LOGO_SVG from "./hubspot-logo.svg";
 import HUBSPOT_ACCOUNT_CONFIGURATOR_HTML from "./generated/account-configurator-ui.txt";
@@ -372,7 +385,7 @@ export class UserAccount extends DurableObject<Env> {
     } catch (error) {
       if (error instanceof HubSpotApiError &&
         (error.isCredentialExpired || error.status === 400)) {
-        await this.#notifyCredentialsExpired();
+        await this.notifyCredentialsExpired();
         throw new Error(
           "HubSpot credentials have expired or been revoked. Please reconnect the account.",
           { cause: error },
@@ -382,7 +395,7 @@ export class UserAccount extends DurableObject<Env> {
     }
   }
 
-  async #notifyCredentialsExpired(): Promise<void> {
+  async notifyCredentialsExpired(): Promise<void> {
     if (this.ctx.storage.kv.get<boolean>("expiredNotified")) return;
     this.ctx.storage.kv.put("expiredNotified", true);
     const callback = this.ctx.storage.kv.get<Fetcher<GatekeeperConnectCallback>>("callback");
@@ -531,8 +544,16 @@ export class HubSpotGatekeeperImpl extends DurableObject<Env, HubSpotGatekeeperI
     return [];
   }
 
-  async startSession(_approvalQueue: RpcStub<ApprovalQueue>): Promise<HubSpotSession> {
-    throw new Error("HubSpot CRM sessions are not available yet.");
+  async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<HubSpotSession> {
+    const account = this.#account();
+    const portalId = await account.getHubId();
+    const api = new HubSpotApi({ getAccessToken: () => account.getAccessToken() });
+    return new HubSpotSessionImpl(
+      api,
+      portalId,
+      approvalQueue.dup(),
+      () => account.notifyCredentialsExpired(),
+    );
   }
 
   async applyAction(_action: number): Promise<void> {
@@ -548,8 +569,176 @@ export class HubSpotGatekeeperImpl extends DurableObject<Env, HubSpotGatekeeperI
   }
 
   async addObserver(_id: string, _user: Fetcher<GatekeeperUserVerifier>): Promise<void> {
-    throw new Error("HubSpot observer verification is not available yet.");
+    throw new Error(
+      "HubSpot CRM data cannot be shared with other users. This whole-account connection may " +
+      "only be observed by its owner.",
+    );
   }
 
   async removeObserver(_id: string): Promise<void> {}
+}
+
+const HUBSPOT_MUTATIONS_UNAVAILABLE = "HubSpot CRM mutations are not available yet.";
+const MAX_OBSERVATION_QUERY_LENGTH = 200;
+
+function boundedQuery(query: string): string {
+  const normalized = [...query]
+    .map(character => {
+      const code = character.charCodeAt(0);
+      return code <= 31 || code === 127 ? " " : character;
+    })
+    .join("")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (normalized.length <= MAX_OBSERVATION_QUERY_LENGTH) return normalized;
+  return `${normalized.slice(0, MAX_OBSERVATION_QUERY_LENGTH - 3)}...`;
+}
+
+@validateRpc()
+export class HubSpotSessionImpl extends RpcTarget implements HubSpotSession {
+  readonly #api: HubSpotApi;
+  readonly #portalId: number;
+  readonly #approvalQueue: RpcStub<ApprovalQueue>;
+  readonly #notifyCredentialsExpired: () => Promise<void>;
+
+  constructor(
+    api: HubSpotApi,
+    portalId: number,
+    approvalQueue: RpcStub<ApprovalQueue>,
+    notifyCredentialsExpired: () => Promise<void>,
+  ) {
+    super();
+    this.#api = api;
+    this.#portalId = portalId;
+    this.#approvalQueue = approvalQueue;
+    this.#notifyCredentialsExpired = notifyCredentialsExpired;
+  }
+
+  [Symbol.dispose](): void {
+    this.#approvalQueue[Symbol.dispose]();
+  }
+
+  async #read<T>(operation: () => Promise<T>): Promise<T> {
+    try {
+      return await operation();
+    } catch (error) {
+      if (!(error instanceof HubSpotApiError) || !error.isCredentialExpired) throw error;
+      try {
+        await this.#notifyCredentialsExpired();
+      } catch {}
+      throw new Error(
+        "HubSpot credentials have expired or been revoked. Please reconnect the account.",
+        { cause: error },
+      );
+    }
+  }
+
+  async #search<T extends "contacts" | "companies" | "deals">(
+    type: T,
+    query: string,
+    paging?: HubSpotSearchPaging,
+  ): Promise<HubSpotSearchPage<
+    T extends "contacts" ? HubSpotContact : T extends "companies" ? HubSpotCompany : HubSpotDeal
+  >> {
+    const page = await this.#read(() => this.#api.search(type, {
+      query,
+      limit: paging?.limit,
+      after: paging?.after === undefined ? undefined : String(paging.after),
+    }));
+    await this.#approvalQueue.authorizeObservation({
+      title: `Search HubSpot ${type} (${page.results.length} result(s))`,
+      description:
+        `Portal ID: ${this.#portalId}; object type: ${type}; query: "${boundedQuery(query)}"; ` +
+        `returned count: ${page.results.length}.`,
+      prohibitAllSharing: true,
+    });
+    return {
+      results: page.results,
+      total: page.total,
+      ...(page.nextAfter === undefined ? {} : { nextAfter: Number(page.nextAfter) }),
+    } as HubSpotSearchPage<
+      T extends "contacts" ? HubSpotContact : T extends "companies" ? HubSpotCompany : HubSpotDeal
+    >;
+  }
+
+  async #get<T extends "contacts" | "companies" | "deals">(
+    type: T,
+    id: string,
+  ): Promise<
+    T extends "contacts" ? HubSpotContact : T extends "companies" ? HubSpotCompany : HubSpotDeal
+  > {
+    const record = await this.#read(() => this.#api.get(type, id));
+    await this.#approvalQueue.authorizeObservation({
+      title: `Get HubSpot ${type} record`,
+      description:
+        `Portal ID: ${this.#portalId}; object type: ${type}; record ID: ${id}; returned count: 1.`,
+      prohibitAllSharing: true,
+    });
+    return record as T extends "contacts"
+      ? HubSpotContact
+      : T extends "companies"
+      ? HubSpotCompany
+      : HubSpotDeal;
+  }
+
+  searchContacts(query: string, paging?: HubSpotSearchPaging): Promise<HubSpotSearchPage<HubSpotContact>> {
+    return this.#search("contacts", query, paging);
+  }
+
+  getContact(id: string): Promise<HubSpotContact> {
+    return this.#get("contacts", id);
+  }
+
+  searchCompanies(query: string, paging?: HubSpotSearchPaging): Promise<HubSpotSearchPage<HubSpotCompany>> {
+    return this.#search("companies", query, paging);
+  }
+
+  getCompany(id: string): Promise<HubSpotCompany> {
+    return this.#get("companies", id);
+  }
+
+  searchDeals(query: string, paging?: HubSpotSearchPaging): Promise<HubSpotSearchPage<HubSpotDeal>> {
+    return this.#search("deals", query, paging);
+  }
+
+  getDeal(id: string): Promise<HubSpotDeal> {
+    return this.#get("deals", id);
+  }
+
+  async createContact(_properties: HubSpotContactProperties): Promise<HubSpotMutationTicket> {
+    throw new Error(HUBSPOT_MUTATIONS_UNAVAILABLE);
+  }
+
+  async updateContact(
+    _id: string,
+    _properties: HubSpotContactProperties,
+  ): Promise<HubSpotMutationTicket> {
+    throw new Error(HUBSPOT_MUTATIONS_UNAVAILABLE);
+  }
+
+  async createCompany(_properties: HubSpotCompanyProperties): Promise<HubSpotMutationTicket> {
+    throw new Error(HUBSPOT_MUTATIONS_UNAVAILABLE);
+  }
+
+  async updateCompany(
+    _id: string,
+    _properties: HubSpotCompanyProperties,
+  ): Promise<HubSpotMutationTicket> {
+    throw new Error(HUBSPOT_MUTATIONS_UNAVAILABLE);
+  }
+
+  async createDeal(_properties: HubSpotDealProperties): Promise<HubSpotMutationTicket> {
+    throw new Error(HUBSPOT_MUTATIONS_UNAVAILABLE);
+  }
+
+  async updateDeal(
+    _id: string,
+    _properties: HubSpotDealProperties,
+  ): Promise<HubSpotMutationTicket> {
+    throw new Error(HUBSPOT_MUTATIONS_UNAVAILABLE);
+  }
+
+  async getMutationResult(_ticket: HubSpotMutationTicket): Promise<HubSpotMutationResult> {
+    throw new Error(HUBSPOT_MUTATIONS_UNAVAILABLE);
+  }
 }
