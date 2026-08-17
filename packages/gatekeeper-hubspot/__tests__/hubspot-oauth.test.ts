@@ -46,6 +46,8 @@ type Callback = Fetcher & {
 };
 
 type UserAccountRpc = {
+  acceptAuthCode(code: string, oauthNonce: string): Promise<boolean>;
+  beginOAuthFlow(initiationNonce: string): Promise<{ oauthNonce: string } | null>;
   getAccessToken(): Promise<string>;
   prepareReconnect(nonce: string): Promise<void>;
   revoke(): Promise<void>;
@@ -507,7 +509,7 @@ describe("HubSpot connected account", () => {
     expect(await storageValue(original.doId, "credentialGeneration")).toBe(2);
   });
 
-  it("keeps reconnected credentials authoritative over a stale successful refresh", async () => {
+  it("serializes a successful refresh before reconnecting credentials", async () => {
     const original = await completeFlow(12345);
     await runInDurableObject(account(original.doId), (_instance, state) => {
       state.storage.kv.put("accessTokenExpiresAt", Date.now() + 1);
@@ -535,19 +537,20 @@ describe("HubSpot connected account", () => {
     const reconnect = await callback.reconnectConnected();
     const authorization = await SELF.fetch(reconnect.url, { redirect: "manual" });
     const state = new URL(authorization.headers.get("location") ?? "").searchParams.get("state") ?? "";
-    expect((await SELF.fetch(
+    const reconnectCompletion = SELF.fetch(
       `${BASE_URL}/oauth?code=reconnect-code&state=${encodeURIComponent(state)}`,
-    )).status).toBe(200);
+    );
 
     refreshResponse.resolve();
     await staleRefresh;
+    expect((await reconnectCompletion).status).toBe(200);
 
     expect(await storageValue(original.doId, "accessToken")).toBe("reconnected-access");
     expect(await storageValue(original.doId, "refreshToken")).toBe("reconnected-refresh");
     await expect(account(original.doId).getAccessToken()).resolves.toBe("reconnected-access");
   });
 
-  it("does not notify expiry when a superseded refresh fails after reconnect", async () => {
+  it("does not notify expiry when reconnect is queued behind a failed refresh", async () => {
     const original = await completeFlow(12345);
     await runInDurableObject(account(original.doId), (_instance, state) => {
       state.storage.kv.put("accessTokenExpiresAt", Date.now() + 1);
@@ -567,21 +570,136 @@ describe("HubSpot connected account", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const staleRefresh = account(original.doId).getAccessToken().catch(() => undefined);
-    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
-    const reconnect = await callback.reconnectConnected();
-    const authorization = await SELF.fetch(reconnect.url, { redirect: "manual" });
-    const state = new URL(authorization.headers.get("location") ?? "").searchParams.get("state") ?? "";
-    expect((await SELF.fetch(
-      `${BASE_URL}/oauth?code=reconnect-code&state=${encodeURIComponent(state)}`,
-    )).status).toBe(200);
+    await runInDurableObject(account(original.doId), async instance => {
+      const staleRefresh = instance.getAccessToken().catch(() => undefined);
+      await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+      const initiationNonce = "n".repeat(43);
+      await instance.prepareReconnect(initiationNonce);
+      const begun = await instance.beginOAuthFlow(initiationNonce);
+      if (!begun) throw new Error("Reconnect flow did not begin");
+      const reconnectCompletion = instance.acceptAuthCode("reconnect-code", begun.oauthNonce);
 
-    refreshResponse.resolve();
-    await staleRefresh;
+      refreshResponse.resolve();
+      await staleRefresh;
+      await expect(reconnectCompletion).resolves.toBe(true);
+    });
 
     expect((await callback.read()).expiredCount).toBe(0);
     expect(await storageValue(original.doId, "accessToken")).toBe("reconnected-access");
     expect(await storageValue(original.doId, "refreshToken")).toBe("reconnected-refresh");
+  });
+
+  it("finishes an active reconnect before revoking its rotated token and skips a queued refresh", async () => {
+    const original = await completeFlow(12345);
+    const reconnect = await callback.reconnectConnected();
+    const authorization = await SELF.fetch(reconnect.url, { redirect: "manual" });
+    const state = new URL(authorization.headers.get("location") ?? "").searchParams.get("state") ?? "";
+    await runInDurableObject(account(original.doId), (_instance, durableState) => {
+      durableState.storage.kv.put("accessTokenExpiresAt", Date.now() + 1);
+    });
+    const exchangeResponse = deferred<void>();
+    const queuedRefreshResponse = deferred<void>();
+    const grantTypes: string[] = [];
+    const revokedTokens: string[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const form = new URLSearchParams(init?.body as string);
+      if (String(input).endsWith("/revoke")) {
+        revokedTokens.push(form.get("token") ?? "");
+        return new Response(null, { status: 204 });
+      }
+      const grantType = form.get("grant_type") ?? "";
+      grantTypes.push(grantType);
+      if (grantType === "authorization_code") {
+        await exchangeResponse.promise;
+        return oauthGrant({
+          accessToken: "reconnected-access",
+          refreshToken: "reconnected-refresh",
+          hubId: 12345,
+        });
+      }
+      await queuedRefreshResponse.promise;
+      return oauthGrant({
+        accessToken: "queued-refresh-access",
+        refreshToken: "queued-refresh-token",
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await runInDurableObject(account(original.doId), async instance => {
+      const reconnectCompletion = SELF.fetch(
+        `${BASE_URL}/oauth?code=reconnect-code&state=${encodeURIComponent(state)}`,
+      );
+      await vi.waitFor(() => expect(grantTypes).toEqual(["authorization_code"]));
+      const queuedRefresh = instance.getAccessToken().catch((caught: unknown) => caught as Error);
+      const revocation = instance.revoke();
+      exchangeResponse.resolve();
+      queuedRefreshResponse.resolve();
+
+      expect((await reconnectCompletion).status).toBe(200);
+      expect(await queuedRefresh).toBeInstanceOf(Error);
+      await expect(revocation).resolves.toBeUndefined();
+    });
+
+    expect(grantTypes).toEqual(["authorization_code"]);
+    expect(revokedTokens).toEqual(["reconnected-refresh"]);
+    expect(await callback.read()).toMatchObject({ restoredCount: 1 });
+    expect(await runInDurableObject(account(original.doId), (_instance, durableState) =>
+      durableState.storage.list())).toEqual(new Map());
+  });
+
+  it("does not start a queued reconnect exchange after revocation is requested", async () => {
+    const original = await completeFlow(12345);
+    const reconnect = await callback.reconnectConnected();
+    const authorization = await SELF.fetch(reconnect.url, { redirect: "manual" });
+    const state = new URL(authorization.headers.get("location") ?? "").searchParams.get("state") ?? "";
+    const oauthNonce = state.slice(original.doId.length + 1);
+    await runInDurableObject(account(original.doId), (_instance, durableState) => {
+      durableState.storage.kv.put("accessTokenExpiresAt", Date.now() + 1);
+    });
+    const refreshResponse = deferred<void>();
+    const exchangeResponse = deferred<void>();
+    const grantTypes: string[] = [];
+    const revokedTokens: string[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const form = new URLSearchParams(init?.body as string);
+      if (String(input).endsWith("/revoke")) {
+        revokedTokens.push(form.get("token") ?? "");
+        return new Response(null, { status: 204 });
+      }
+      const grantType = form.get("grant_type") ?? "";
+      grantTypes.push(grantType);
+      if (grantType === "refresh_token") {
+        await refreshResponse.promise;
+        return oauthGrant({
+          accessToken: "rotated-access",
+          refreshToken: "rotated-refresh",
+        });
+      }
+      await exchangeResponse.promise;
+      return oauthGrant({
+        accessToken: "queued-reconnect-access",
+        refreshToken: "queued-reconnect-token",
+        hubId: 12345,
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await runInDurableObject(account(original.doId), async instance => {
+      const refresh = instance.getAccessToken();
+      await vi.waitFor(() => expect(grantTypes).toEqual(["refresh_token"]));
+      const reconnectExchange = instance.acceptAuthCode("queued-code", oauthNonce);
+      const revocation = instance.revoke();
+      refreshResponse.resolve();
+      exchangeResponse.resolve();
+
+      await expect(refresh).resolves.toBe("rotated-access");
+      await expect(reconnectExchange).resolves.toBe(false);
+      await expect(revocation).resolves.toBeUndefined();
+    });
+
+    expect(grantTypes).toEqual(["refresh_token"]);
+    expect(revokedTokens).toEqual(["rotated-refresh"]);
+    expect((await callback.read()).restoredCount).toBe(0);
   });
 
   it("rejects reconnecting to another portal without replacing the original authority", async () => {
@@ -710,6 +828,51 @@ describe("HubSpot connected account", () => {
     });
   });
 
+  it("preserves a rotated token after revoke failure and retries revocation with that token", async () => {
+    const flow = await completeFlow();
+    await runInDurableObject(account(flow.doId), (_instance, state) => {
+      state.storage.kv.put("accessTokenExpiresAt", Date.now() + 1);
+    });
+    const refreshResponse = deferred<void>();
+    const revokedTokens: string[] = [];
+    let revokeAttempts = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const form = new URLSearchParams(init?.body as string);
+      if (String(input).endsWith("/revoke")) {
+        revokedTokens.push(form.get("token") ?? "");
+        revokeAttempts++;
+        return revokeAttempts === 1
+          ? Response.json({ error: "provider unavailable" }, { status: 500 })
+          : new Response(null, { status: 204 });
+      }
+      await refreshResponse.promise;
+      return oauthGrant({
+        accessToken: "rotated-access",
+        refreshToken: "rotated-refresh",
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await runInDurableObject(account(flow.doId), async (instance, state) => {
+      const refresh = instance.getAccessToken();
+      await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+      const firstRevoke = expect(instance.revoke()).rejects.toThrow(/retry|uninstall/i);
+      refreshResponse.resolve();
+
+      await expect(refresh).resolves.toBe("rotated-access");
+      await firstRevoke;
+      expect(state.storage.kv.get("accessToken")).toBe("rotated-access");
+      expect(state.storage.kv.get("refreshToken")).toBe("rotated-refresh");
+      expect(state.storage.kv.get("revoking")).toBeUndefined();
+      await expect(instance.getAccessToken()).resolves.toBe("rotated-access");
+      await expect(instance.revoke()).resolves.toBeUndefined();
+      expect(await state.storage.list()).toEqual(new Map());
+    });
+
+    expect(revokedTokens).toEqual(["rotated-refresh", "rotated-refresh"]);
+    expect((await callback.read()).expiredCount).toBe(0);
+  });
+
   it("cleans up locally without a provider call when no refresh token remains", async () => {
     const flow = await completeFlow();
     await runInDurableObject(account(flow.doId), (_instance, state) => {
@@ -725,34 +888,42 @@ describe("HubSpot connected account", () => {
       state.storage.list())).toEqual(new Map());
   });
 
-  it("does not resurrect credentials when refresh succeeds after revocation", async () => {
+  it("waits for active refresh rotation and revokes the rotated refresh token", async () => {
     const flow = await completeFlow();
     await runInDurableObject(account(flow.doId), (_instance, state) => {
       state.storage.kv.put("accessTokenExpiresAt", Date.now() + 1);
     });
     const refreshResponse = deferred<void>();
-    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-      if (String(input).endsWith("/revoke")) return new Response(null, { status: 204 });
+    const revokedTokens: string[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const form = new URLSearchParams(init?.body as string);
+      if (String(input).endsWith("/revoke")) {
+        revokedTokens.push(form.get("token") ?? "");
+        return new Response(null, { status: 204 });
+      }
       await refreshResponse.promise;
       return oauthGrant({
-        accessToken: "stale-refresh-access",
-        refreshToken: "stale-refresh-token",
+        accessToken: "rotated-access",
+        refreshToken: "rotated-refresh",
       });
     });
     vi.stubGlobal("fetch", fetchMock);
 
     await runInDurableObject(account(flow.doId), async (instance, state) => {
-      const staleRefresh = instance.getAccessToken().catch(() => undefined);
+      const refresh = instance.getAccessToken();
       await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
-      await instance.revoke();
+      const revocation = instance.revoke();
       refreshResponse.resolve();
-      await staleRefresh;
 
+      await expect(refresh).resolves.toBe("rotated-access");
+      await expect(revocation).resolves.toBeUndefined();
       expect(await state.storage.list()).toEqual(new Map());
     });
+
+    expect(revokedTokens).toEqual(["rotated-refresh"]);
   });
 
-  it("does not notify expiry when refresh fails after revocation", async () => {
+  it("waits for an active failed refresh without sending a stale expiry notification", async () => {
     const flow = await completeFlow();
     await runInDurableObject(account(flow.doId), (_instance, state) => {
       state.storage.kv.put("accessTokenExpiresAt", Date.now() + 1);
@@ -766,12 +937,13 @@ describe("HubSpot connected account", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await runInDurableObject(account(flow.doId), async (instance, state) => {
-      const staleRefresh = instance.getAccessToken().catch(() => undefined);
+      const refresh = instance.getAccessToken().catch(() => undefined);
       await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
-      await instance.revoke();
+      const revocation = instance.revoke();
       refreshResponse.resolve();
-      await staleRefresh;
 
+      await refresh;
+      await expect(revocation).resolves.toBeUndefined();
       expect(await state.storage.list()).toEqual(new Map());
     });
     expect((await callback.read()).expiredCount).toBe(0);

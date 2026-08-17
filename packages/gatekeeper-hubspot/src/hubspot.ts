@@ -266,7 +266,32 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env>
 }
 
 export class UserAccount extends DurableObject<Env> {
+  #credentialLifecycleTail: Promise<void> = Promise.resolve();
   #refreshPromise?: Promise<string>;
+  #revocationRequested = false;
+
+  async #withCredentialLifecycle<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.#credentialLifecycleTail;
+    let release!: () => void;
+    this.#credentialLifecycleTail = new Promise(resolve => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  }
+
+  #revocationPending(): boolean {
+    return this.#revocationRequested ||
+      (this.ctx.storage.kv.get<boolean>("revoking") ?? false);
+  }
+
+  #assertRevocationNotPending(): void {
+    if (this.#revocationPending()) throw new Error(REVOCATION_IN_PROGRESS_MESSAGE);
+  }
 
   #credentialGeneration(): number {
     const stored = this.ctx.storage.kv.get<number>("credentialGeneration");
@@ -281,7 +306,6 @@ export class UserAccount extends DurableObject<Env> {
     const current = this.#credentialGeneration();
     const next = current === MAX_CREDENTIAL_GENERATION ? 0 : current + 1;
     this.ctx.storage.kv.put("credentialGeneration", next);
-    this.#refreshPromise = undefined;
     return next;
   }
 
@@ -316,9 +340,7 @@ export class UserAccount extends DurableObject<Env> {
   }
 
   async prepareReconnect(initiationNonce: string): Promise<void> {
-    if (this.ctx.storage.kv.get<boolean>("revoking")) {
-      throw new Error(REVOCATION_IN_PROGRESS_MESSAGE);
-    }
+    this.#assertRevocationNotPending();
     this.ctx.storage.kv.put("reconnecting", true);
     this.ctx.storage.kv.put("expiredNotified", false);
     this.ctx.storage.kv.put<StoredNonce>("nonce", {
@@ -360,13 +382,16 @@ export class UserAccount extends DurableObject<Env> {
   }
 
   async acceptAuthCode(code: string, oauthNonce: string): Promise<boolean> {
+    if (this.#revocationPending()) return false;
+    return this.#withCredentialLifecycle(() => this.#acceptAuthCode(code, oauthNonce));
+  }
+
+  async #acceptAuthCode(code: string, oauthNonce: string): Promise<boolean> {
     if (!this.#consumeOAuthNonce(oauthNonce)) return false;
+    if (this.#revocationPending()) return false;
     const reconnecting = this.ctx.storage.kv.get<boolean>("reconnecting") ?? false;
     const generation = this.#credentialGeneration();
     try {
-      if (this.ctx.storage.kv.get<boolean>("revoking")) {
-        throw new Error(REVOCATION_IN_PROGRESS_MESSAGE);
-      }
       requireOAuthConfiguration(this.env);
       const callback = this.ctx.storage.kv.get<Fetcher<GatekeeperConnectCallback>>("callback");
       if (!callback) return false;
@@ -400,7 +425,7 @@ export class UserAccount extends DurableObject<Env> {
           const props: GatekeeperUserImplProps = { userObjectId: this.ctx.id.toString() };
           await callback.complete(this.ctx.exports.GatekeeperUserImpl({ props }));
         } catch (error) {
-          this.#deleteCredentials();
+          if (!this.#revocationRequested) this.#deleteCredentials();
           throw error;
         }
       }
@@ -426,15 +451,15 @@ export class UserAccount extends DurableObject<Env> {
   }
 
   async getAccessToken(): Promise<string> {
-    if (this.ctx.storage.kv.get<boolean>("revoking")) {
-      throw new Error(REVOCATION_IN_PROGRESS_MESSAGE);
-    }
-    const accessToken = this.ctx.storage.kv.get<string>("accessToken");
-    const expiresAt = this.ctx.storage.kv.get<number>("accessTokenExpiresAt") ?? 0;
-    if (accessToken && Date.now() < expiresAt - ACCESS_TOKEN_SAFETY_MS) return accessToken;
+    this.#assertRevocationNotPending();
+    const accessToken = this.#unexpiredAccessToken();
+    if (accessToken) return accessToken;
 
     if (!this.#refreshPromise) {
-      const refresh = this.#refreshAccessToken();
+      const refresh = this.#withCredentialLifecycle(async () => {
+        this.#assertRevocationNotPending();
+        return this.#unexpiredAccessToken() ?? this.#refreshAccessToken();
+      });
       this.#refreshPromise = refresh;
       void refresh.then(
         () => {
@@ -446,6 +471,14 @@ export class UserAccount extends DurableObject<Env> {
       );
     }
     return this.#refreshPromise;
+  }
+
+  #unexpiredAccessToken(): string | undefined {
+    const accessToken = this.ctx.storage.kv.get<string>("accessToken");
+    const expiresAt = this.ctx.storage.kv.get<number>("accessTokenExpiresAt") ?? 0;
+    return accessToken && Date.now() < expiresAt - ACCESS_TOKEN_SAFETY_MS
+      ? accessToken
+      : undefined;
   }
 
   async #refreshAccessToken(): Promise<string> {
@@ -468,7 +501,10 @@ export class UserAccount extends DurableObject<Env> {
     } catch (error) {
       if (!this.#isCurrentGeneration(generation)) return this.#authoritativeAccessToken();
       if (error instanceof HubSpotApiError && error.isCredentialExpired) {
-        await this.notifyCredentialsExpired();
+        if (!this.#revocationRequested &&
+          !this.ctx.storage.kv.get<boolean>("reconnecting")) {
+          await this.notifyCredentialsExpired();
+        }
         throw new Error(
           "HubSpot credentials have expired or been revoked. Please reconnect the account.",
           { cause: error },
@@ -509,9 +545,16 @@ export class UserAccount extends DurableObject<Env> {
   }
 
   async revoke(): Promise<void> {
-    if (this.ctx.storage.kv.get<boolean>("revoking")) {
-      throw new Error(REVOCATION_IN_PROGRESS_MESSAGE);
+    if (this.#revocationPending()) throw new Error(REVOCATION_IN_PROGRESS_MESSAGE);
+    this.#revocationRequested = true;
+    try {
+      await this.#withCredentialLifecycle(() => this.#revoke());
+    } finally {
+      this.#revocationRequested = false;
     }
+  }
+
+  async #revoke(): Promise<void> {
     const refreshToken = this.ctx.storage.kv.get<string>("refreshToken");
     this.ctx.storage.kv.put("revoking", true);
     this.#advanceCredentialGeneration();
