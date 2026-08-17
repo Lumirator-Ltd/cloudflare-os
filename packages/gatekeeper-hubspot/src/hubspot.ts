@@ -66,6 +66,7 @@ type GatekeeperUserImplProps = {
 
 type HubSpotGatekeeperImplProps = {
   userObjectId: string;
+  expectedHubId: number;
 };
 
 const INITIATION_NONCE_LIFETIME_MS = 10 * 60 * 1000;
@@ -260,6 +261,8 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env>
 }
 
 export class UserAccount extends DurableObject<Env> {
+  #refreshPromise?: Promise<string>;
+
   async setCallback(
     callback: Fetcher<GatekeeperConnectCallback>,
     initiationNonce: string,
@@ -301,7 +304,9 @@ export class UserAccount extends DurableObject<Env> {
   }
 
   async consumeOAuthError(oauthNonce: string): Promise<boolean> {
-    return this.#consumeOAuthNonce(oauthNonce);
+    const consumed = this.#consumeOAuthNonce(oauthNonce);
+    if (consumed) this.ctx.storage.kv.delete("reconnecting");
+    return consumed;
   }
 
   #consumeOAuthNonce(oauthNonce: string): boolean {
@@ -316,6 +321,7 @@ export class UserAccount extends DurableObject<Env> {
 
   async acceptAuthCode(code: string, oauthNonce: string): Promise<boolean> {
     if (!this.#consumeOAuthNonce(oauthNonce)) return false;
+    const reconnecting = this.ctx.storage.kv.get<boolean>("reconnecting") ?? false;
     try {
       requireOAuthConfiguration(this.env);
       const callback = this.ctx.storage.kv.get<Fetcher<GatekeeperConnectCallback>>("callback");
@@ -327,6 +333,9 @@ export class UserAccount extends DurableObject<Env> {
         clientId: this.env.CLIENT_ID,
         clientSecret: this.env.CLIENT_SECRET,
       });
+      if (reconnecting && grant.hubId !== this.ctx.storage.kv.get<number>("hubId")) {
+        throw new Error("HubSpot reconnect portal does not match the connected account.");
+      }
       this.ctx.storage.kv.put("accessToken", grant.accessToken);
       this.ctx.storage.kv.put("refreshToken", grant.refreshToken);
       this.ctx.storage.kv.put("accessTokenExpiresAt", Date.now() + grant.expiresIn * 1000);
@@ -334,7 +343,6 @@ export class UserAccount extends DurableObject<Env> {
       this.ctx.storage.kv.put("scopes", grant.scopes ?? [...HUBSPOT_OAUTH_SCOPES]);
       this.ctx.storage.kv.put("expiredNotified", false);
 
-      const reconnecting = this.ctx.storage.kv.get<boolean>("reconnecting") ?? false;
       if (reconnecting) {
         this.ctx.storage.kv.delete("reconnecting");
         await callback.credentialsRestored();
@@ -350,6 +358,7 @@ export class UserAccount extends DurableObject<Env> {
       await this.ctx.storage.deleteAlarm();
       return true;
     } catch {
+      if (reconnecting) this.ctx.storage.kv.delete("reconnecting");
       return false;
     }
   }
@@ -372,6 +381,22 @@ export class UserAccount extends DurableObject<Env> {
     const expiresAt = this.ctx.storage.kv.get<number>("accessTokenExpiresAt") ?? 0;
     if (accessToken && Date.now() < expiresAt - ACCESS_TOKEN_SAFETY_MS) return accessToken;
 
+    if (!this.#refreshPromise) {
+      const refresh = this.#refreshAccessToken();
+      this.#refreshPromise = refresh;
+      void refresh.then(
+        () => {
+          if (this.#refreshPromise === refresh) this.#refreshPromise = undefined;
+        },
+        () => {
+          if (this.#refreshPromise === refresh) this.#refreshPromise = undefined;
+        },
+      );
+    }
+    return this.#refreshPromise;
+  }
+
+  async #refreshAccessToken(): Promise<string> {
     const refreshToken = this.ctx.storage.kv.get<string>("refreshToken");
     if (!refreshToken) throw new Error("HubSpot credentials are unavailable. Reconnect the account.");
     requireOAuthConfiguration(this.env);
@@ -387,8 +412,7 @@ export class UserAccount extends DurableObject<Env> {
       if (grant.refreshToken) this.ctx.storage.kv.put("refreshToken", grant.refreshToken);
       return grant.accessToken;
     } catch (error) {
-      if (error instanceof HubSpotApiError &&
-        (error.isCredentialExpired || error.status === 400)) {
+      if (error instanceof HubSpotApiError && error.isCredentialExpired) {
         await this.notifyCredentialsExpired();
         throw new Error(
           "HubSpot credentials have expired or been revoked. Please reconnect the account.",
@@ -415,6 +439,12 @@ export class UserAccount extends DurableObject<Env> {
     const hubId = this.ctx.storage.kv.get<number>("hubId");
     if (!Number.isFinite(hubId)) throw new Error("HubSpot account identity is unavailable.");
     return hubId as number;
+  }
+
+  async assertHubId(expectedHubId: number): Promise<void> {
+    if (await this.getHubId() !== expectedHubId) {
+      throw new Error("HubSpot portal authority no longer matches this binding.");
+    }
   }
 
   async alarm(): Promise<void> {
@@ -467,7 +497,10 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
     if (!isHubSpotAccountUrl(url, hubId)) {
       throw new Error(`Unsupported HubSpot URL: ${url}`);
     }
-    const props: HubSpotGatekeeperImplProps = { userObjectId: this.ctx.props.userObjectId };
+    const props: HubSpotGatekeeperImplProps = {
+      userObjectId: this.ctx.props.userObjectId,
+      expectedHubId: hubId,
+    };
     return {
       class: this.ctx.exports.HubSpotGatekeeperImpl({ props }),
       resource: ACCOUNT_RESOURCE,
@@ -523,14 +556,25 @@ class HubSpotAccountConfiguratorUI extends RpcTarget implements HubSpotAccountCo
 @validateRpc()
 export class HubSpotGatekeeperImpl extends DurableObject<Env, HubSpotGatekeeperImplProps>
   implements Gatekeeper<HubSpotSession> {
+  readonly #activeApplications = new Set<number>();
+
   #account(): DurableObjectStub<UserAccount> {
     return this.ctx.exports.UserAccount.get(
       this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId),
     );
   }
 
+  protected expectedHubId(): number {
+    return this.ctx.props.expectedHubId;
+  }
+
+  protected assertExpectedHubId(): Promise<void> {
+    return this.#account().assertHubId(this.expectedHubId());
+  }
+
   async describe(): Promise<ResourceDescription> {
-    const hubId = await this.#account().getHubId();
+    await this.assertExpectedHubId();
+    const hubId = this.expectedHubId();
     return {
       url: accountUrl(hubId),
       title: `HubSpot account ${hubId}`,
@@ -558,43 +602,81 @@ export class HubSpotGatekeeperImpl extends DurableObject<Env, HubSpotGatekeeperI
   }
 
   async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<HubSpotSession> {
+    await this.assertExpectedHubId();
     const account = this.#account();
-    const portalId = await account.getHubId();
     return new HubSpotSessionImpl(
       this.mutationApi(),
-      portalId,
+      this.expectedHubId(),
       approvalQueue.dup(),
       () => account.notifyCredentialsExpired(),
       this.ctx.storage.kv,
+      () => this.assertExpectedHubId(),
+      action => this.#activeApplications.has(action),
     );
   }
 
   async applyAction(action: number): Promise<void> {
+    const id = validateMutationActionId(action);
+    await this.assertExpectedHubId();
+    if (this.#activeApplications.has(id)) {
+      throw new Error(`HubSpot mutation ${id} is actively applying`);
+    }
     const store = new HubSpotMutationStore(this.ctx.storage.kv);
-    const pending = store.claimPending(action);
+    const existing = store.getResult(id);
+    if (existing) throw mutationResultError(id, existing.outcome);
+    const pending = store.getPending(id);
+    if (!pending || pending.id !== id) throw new Error(`Unknown HubSpot mutation: ${id}`);
+    if (pending.applying) {
+      throw mutationResultError(id, store.recoverStaleApplying(id, pending));
+    }
+
+    this.#activeApplications.add(id);
+    const claimed = store.claimPending(id);
+    let writeAttempted = false;
     try {
-      const record = await performHubSpotMutation(this.mutationApi(), pending);
-      store.putResult(action, pending, {
+      await this.assertExpectedHubId();
+      if (claimed.expectedHubId !== this.expectedHubId()) {
+        throw new Error("HubSpot mutation portal authority does not match this binding.");
+      }
+      writeAttempted = true;
+      const record = await performHubSpotMutation(this.mutationApi(), claimed);
+      store.putResult(id, claimed, {
         status: "ready",
-        objectType: pending.objectType,
+        objectType: claimed.objectType,
         recordId: record.id,
       });
+      store.removePending(id);
     } catch (error) {
       if (error instanceof HubSpotApiError && error.isCredentialExpired) {
         try {
           await this.notifyCredentialsExpired();
         } catch {}
       }
-      store.putResult(action, pending, mutationFailure(error));
+      const outcome = mutationFailure(error, writeAttempted);
+      store.putResult(id, claimed, outcome);
+      store.removePending(id);
+      throw mutationResultError(id, outcome);
+    } finally {
+      this.#activeApplications.delete(id);
     }
-    store.removePending(action);
   }
 
   async rejectAction(action: number): Promise<void> {
+    const id = validateMutationActionId(action);
+    await this.assertExpectedHubId();
+    if (this.#activeApplications.has(id)) {
+      throw new Error(`HubSpot mutation ${id} is actively applying`);
+    }
     const store = new HubSpotMutationStore(this.ctx.storage.kv);
-    const pending = store.requirePending(action);
-    store.removePending(action);
-    store.putResult(action, pending, { status: "rejected" });
+    const existing = store.getResult(id);
+    if (existing) throw mutationResultError(id, existing.outcome);
+    const pending = store.getPending(id);
+    if (!pending || pending.id !== id) throw new Error(`Unknown HubSpot mutation: ${id}`);
+    if (pending.applying) {
+      throw mutationResultError(id, store.recoverStaleApplying(id, pending));
+    }
+    store.removePending(id);
+    store.putResult(id, pending, { status: "rejected" });
   }
 
   async revertAction(_action: number): Promise<{ message: string }> {
@@ -617,11 +699,14 @@ export class HubSpotGatekeeperImpl extends DurableObject<Env, HubSpotGatekeeperI
 
 const MAX_OBSERVATION_QUERY_LENGTH = 200;
 const MAX_RETAINED_MUTATION_RESULTS = 100;
+const STALE_MUTATION_MESSAGE =
+  "HubSpot mutation outcome is uncertain after an interrupted application. Inspect the record manually before submitting another mutation.";
 
 type MutationKv = Pick<DurableObjectStorage["kv"], "delete" | "get" | "put">;
 
 type StoredPendingMutation = HubSpotMutationTicket & {
   applying?: true;
+  expectedHubId: number;
   properties: Record<string, string>;
   recordId?: string;
 };
@@ -712,6 +797,16 @@ class HubSpotMutationStore {
     this.#kv.delete(pendingMutationKey(validateMutationActionId(id)));
   }
 
+  recoverStaleApplying(
+    id: number,
+    pending: StoredPendingMutation,
+  ): Extract<HubSpotMutationResult, { status: "failed" }> {
+    const outcome = { status: "failed" as const, message: STALE_MUTATION_MESSAGE };
+    this.putResult(id, pending, outcome);
+    this.removePending(id);
+    return outcome;
+  }
+
   getResult(id: number): StoredMutationResult | undefined {
     return this.#kv.get<StoredMutationResult>(mutationResultKey(validateMutationActionId(id)));
   }
@@ -738,18 +833,31 @@ class HubSpotMutationStore {
   }
 }
 
-function mutationFailure(error: unknown): Extract<HubSpotMutationResult, { status: "failed" }> {
+function mutationResultError(id: number, outcome: HubSpotMutationResult): Error {
+  if (outcome.status === "failed" || outcome.status === "uncertain") {
+    return new Error(outcome.message);
+  }
+  return new Error(`HubSpot mutation ${id} is already ${outcome.status}`);
+}
+
+function mutationFailure(
+  error: unknown,
+  writeAttempted: boolean,
+): Extract<HubSpotMutationResult, { status: "failed" | "uncertain" }> {
+  const status = writeAttempted ? "uncertain" as const : "failed" as const;
   if (error instanceof HubSpotApiError) {
     const message = error.isCredentialExpired
-      ? "HubSpot credentials expired before the CRM mutation could be confirmed. Reconnect the account and inspect the record before submitting another mutation."
+      ? "HubSpot credentials expired while applying the CRM mutation. Reconnect and inspect the record before submitting another mutation."
       : error.isRateLimited
       ? "HubSpot rate-limited the CRM mutation. Inspect the record before submitting another mutation."
       : "HubSpot could not confirm the CRM mutation. Inspect the record before submitting another mutation.";
-    return { status: "failed", message };
+    return { status, message };
   }
   return {
-    status: "failed",
-    message: "HubSpot could not confirm the CRM mutation. Inspect the record before submitting another mutation.",
+    status,
+    message: writeAttempted
+      ? "HubSpot could not confirm the CRM mutation. Inspect the record before submitting another mutation."
+      : "HubSpot rejected the CRM mutation before remote application. Inspect the connection before submitting another mutation.",
   };
 }
 
@@ -828,6 +936,8 @@ export class HubSpotSessionImpl extends RpcTarget implements HubSpotSession {
   readonly #approvalQueue: RpcStub<ApprovalQueue>;
   readonly #notifyCredentialsExpired: () => Promise<void>;
   readonly #mutationKv?: MutationKv;
+  readonly #assertExpectedHubId: () => Promise<void>;
+  readonly #isMutationActive: (id: number) => boolean;
 
   constructor(
     api: HubSpotApi,
@@ -835,6 +945,8 @@ export class HubSpotSessionImpl extends RpcTarget implements HubSpotSession {
     approvalQueue: RpcStub<ApprovalQueue>,
     notifyCredentialsExpired: () => Promise<void>,
     mutationKv?: MutationKv,
+    assertExpectedHubId: () => Promise<void> = async () => {},
+    isMutationActive: (id: number) => boolean = () => false,
   ) {
     super();
     this.#api = api;
@@ -842,6 +954,8 @@ export class HubSpotSessionImpl extends RpcTarget implements HubSpotSession {
     this.#approvalQueue = approvalQueue;
     this.#notifyCredentialsExpired = notifyCredentialsExpired;
     this.#mutationKv = mutationKv;
+    this.#assertExpectedHubId = assertExpectedHubId;
+    this.#isMutationActive = isMutationActive;
   }
 
   [Symbol.dispose](): void {
@@ -849,6 +963,7 @@ export class HubSpotSessionImpl extends RpcTarget implements HubSpotSession {
   }
 
   async #read<T>(operation: () => Promise<T>): Promise<T> {
+    await this.#assertExpectedHubId();
     try {
       return await operation();
     } catch (error) {
@@ -873,7 +988,7 @@ export class HubSpotSessionImpl extends RpcTarget implements HubSpotSession {
     const page = await this.#read(() => this.#api.search(type, {
       query,
       limit: paging?.limit,
-      after: paging?.after === undefined ? undefined : String(paging.after),
+      after: paging?.after,
     }));
     await this.#approvalQueue.authorizeObservation({
       title: `Search HubSpot ${type} (${page.results.length} result(s))`,
@@ -884,7 +999,7 @@ export class HubSpotSessionImpl extends RpcTarget implements HubSpotSession {
     return {
       results: page.results,
       total: page.total,
-      ...(page.nextAfter === undefined ? {} : { nextAfter: Number(page.nextAfter) }),
+      ...(page.nextAfter === undefined ? {} : { nextAfter: page.nextAfter }),
     } as HubSpotSearchPage<
       T extends "contacts" ? HubSpotContact : T extends "companies" ? HubSpotCompany : HubSpotDeal
     >;
@@ -944,6 +1059,7 @@ export class HubSpotSessionImpl extends RpcTarget implements HubSpotSession {
     propertiesInput: unknown,
     recordIdInput?: unknown,
   ): Promise<HubSpotMutationTicket> {
+    await this.#assertExpectedHubId();
     const apiObjectType = objectType === "contact"
       ? "contacts"
       : objectType === "company"
@@ -956,6 +1072,7 @@ export class HubSpotSessionImpl extends RpcTarget implements HubSpotSession {
       : undefined;
     const pending: Omit<StoredPendingMutation, "id"> = {
       objectType,
+      expectedHubId: this.#portalId,
       operation,
       properties,
       ...(recordId === undefined ? {} : { recordId }),
@@ -1013,13 +1130,21 @@ export class HubSpotSessionImpl extends RpcTarget implements HubSpotSession {
 
   async getMutationResult(ticketInput: HubSpotMutationTicket): Promise<HubSpotMutationResult> {
     const ticket = validateMutationTicket(ticketInput);
+    await this.#assertExpectedHubId();
     const store = this.#mutationStore();
-    const result = store.getResult(ticket.id);
+    let result = store.getResult(ticket.id);
     const pending = result === undefined ? store.getPending(ticket.id) : undefined;
     const stored = result ?? pending;
     if (!stored) throw new Error(`Unknown HubSpot mutation ticket: ${ticket.id}`);
     if (!sameMutation(stored, ticket)) {
       throw new Error(`HubSpot mutation ticket does not match action ${ticket.id}`);
+    }
+    if (pending && pending.expectedHubId !== this.#portalId) {
+      throw new Error("HubSpot mutation portal authority does not match this session.");
+    }
+    if (pending?.applying && !this.#isMutationActive(ticket.id)) {
+      const outcome = store.recoverStaleApplying(ticket.id, pending);
+      result = { ...ticket, outcome };
     }
     const outcome = result?.outcome ?? { status: "pending" as const };
     await this.#approvalQueue.authorizeObservation({

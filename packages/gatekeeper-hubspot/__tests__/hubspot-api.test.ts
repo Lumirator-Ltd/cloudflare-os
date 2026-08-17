@@ -92,7 +92,7 @@ describe("HubSpot OAuth", () => {
     });
     expect(injected.calls).toHaveLength(1);
     const call = injected.calls[0];
-    expect(String(call.input)).toBe("https://api.hubapi.com/oauth/2026-03/token");
+    expect(String(call.input)).toBe("https://api.hubspot.com/oauth/2026-03/token");
     expect(call.init?.method).toBe("POST");
     expect(new Headers(call.init?.headers).get("content-type")).toBe(
       "application/x-www-form-urlencoded",
@@ -162,6 +162,57 @@ describe("HubSpot OAuth", () => {
     await expect(promise).rejects.not.toThrow(CLIENT_SECRET);
     await expect(promise).rejects.not.toThrow(ACCESS_TOKEN);
     await expect(promise).rejects.not.toThrow(REFRESH_TOKEN);
+  });
+
+  it("rejects incomplete scopes included in initial and refresh grants", async () => {
+    const initial = exchangeHubSpotAuthorizationCode({
+      code: "code",
+      redirectUri: "https://example.com/oauth",
+      clientId: "client-id",
+      clientSecret: CLIENT_SECRET,
+    }, { fetch: captureFetch(response({
+      access_token: ACCESS_TOKEN,
+      refresh_token: REFRESH_TOKEN,
+      expires_in: 1800,
+      hub_id: 1,
+      scopes: ["oauth", "crm.objects.contacts.read"],
+    })).fetch });
+    const refresh = refreshHubSpotAccessToken({
+      refreshToken: REFRESH_TOKEN,
+      clientId: "client-id",
+      clientSecret: CLIENT_SECRET,
+    }, { fetch: captureFetch(response({
+      access_token: ACCESS_TOKEN,
+      refresh_token: "rotated-refresh",
+      expires_in: 1800,
+      scopes: ["oauth"],
+    })).fetch });
+
+    await expect(initial).rejects.toThrow(/scope/i);
+    await expect(refresh).rejects.toThrow(/scope/i);
+  });
+
+  it.each([
+    ["invalid_grant", "credentials-expired"],
+    ["invalid_client", "provider"],
+  ])("classifies OAuth %s precisely", async (providerCode, kind) => {
+    const promise = refreshHubSpotAccessToken({
+      refreshToken: REFRESH_TOKEN,
+      clientId: "client-id",
+      clientSecret: CLIENT_SECRET,
+    }, { fetch: captureFetch(response({ error: providerCode }, 400)).fetch });
+
+    await expect(promise).rejects.toMatchObject({ kind, status: 400 });
+  });
+
+  it("does not classify non-invalid_grant OAuth 401 responses as credential expiry", async () => {
+    const promise = refreshHubSpotAccessToken({
+      refreshToken: REFRESH_TOKEN,
+      clientId: "client-id",
+      clientSecret: CLIENT_SECRET,
+    }, { fetch: captureFetch(response({ error: "invalid_client" }, 401)).fetch });
+
+    await expect(promise).rejects.toMatchObject({ kind: "provider", status: 401 });
   });
 
   it("reports bounded OAuth metadata without exposing secrets, tokens, or raw bodies", async () => {
@@ -369,6 +420,7 @@ describe("HubSpot CRM API", () => {
     [{ query: "x", limit: 10, after: "1.5" }, "after"],
     [{ query: "x", limit: 10, after: "-1" }, "after"],
     [{ query: "x", limit: 10, after: 1 }, "after"],
+    [{ query: "x", limit: 10, after: "1".repeat(33) }, "after"],
   ])("rejects invalid search bounds before fetching", async (options, field) => {
     const injected = captureFetch(response({}));
     const api = new HubSpotApi({
@@ -392,7 +444,7 @@ describe("HubSpot CRM API", () => {
     expect(JSON.parse(injected.calls[0].init?.body as string).limit).toBe(100);
   });
 
-  it.each(["", "-1", "1.5", "1e3", "abc", "1/associations/companies"])(
+  it.each(["", "-1", "1.5", "1e3", "abc", "1".repeat(33), "1/associations/companies"])(
     "rejects malformed record ID %j before fetching",
     async id => {
       const injected = captureFetch(response({}));
@@ -405,6 +457,31 @@ describe("HubSpot CRM API", () => {
       expect(injected.calls).toHaveLength(0);
     },
   );
+
+  it("rejects oversized provider record IDs and cursors", async () => {
+    const recordApi = new HubSpotApi({
+      getAccessToken: async () => ACCESS_TOKEN,
+      fetch: captureFetch(response({
+        id: "1".repeat(33),
+        properties: {},
+        createdAt: "2026-01-01T00:00:00Z",
+        updatedAt: "2026-01-02T00:00:00Z",
+      })).fetch,
+    });
+    const cursorApi = new HubSpotApi({
+      getAccessToken: async () => ACCESS_TOKEN,
+      fetch: captureFetch(response({
+        total: 0,
+        results: [],
+        paging: { next: { after: "9".repeat(33) } },
+      })).fetch,
+    });
+
+    await expect(recordApi.get("contacts", "1")).rejects.toMatchObject({ kind: "invalid-response" });
+    await expect(cursorApi.search("contacts", { query: "x" })).rejects.toMatchObject({
+      kind: "invalid-response",
+    });
+  });
 
   it("rejects arbitrary object types, unknown properties, non-strings, and oversized values", async () => {
     const injected = captureFetch(response({}));

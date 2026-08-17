@@ -92,6 +92,14 @@ async function setStoredExpiry(doId: string, expiresAt: number): Promise<void> {
   });
 }
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>(resolvePromise => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
 function oauthGrant(options?: {
   accessToken?: string;
   refreshToken?: string;
@@ -258,7 +266,7 @@ describe("HubSpot OAuth HTTP lifecycle", () => {
   it("stores credentials and identity before completing without an account expiry", async () => {
     const flow = await beginFlow();
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-      expect(String(input)).toBe("https://api.hubapi.com/oauth/2026-03/token");
+      expect(String(input)).toBe("https://api.hubspot.com/oauth/2026-03/token");
       return oauthGrant();
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -284,15 +292,18 @@ describe("HubSpot OAuth HTTP lifecycle", () => {
       state.storage.getAlarm())).toBeNull();
   });
 
-  it("stores the scopes returned by HubSpot", async () => {
+  it("rejects incomplete returned scopes before storing initial credentials", async () => {
     const flow = await beginFlow();
-    const grantedScopes = ["oauth", "crm.objects.contacts.read"];
-    vi.stubGlobal("fetch", vi.fn(async () => oauthGrant({ scopes: grantedScopes })));
+    vi.stubGlobal("fetch", vi.fn(async () => oauthGrant({
+      scopes: ["oauth", "crm.objects.contacts.read"],
+    })));
 
     expect((await SELF.fetch(
       `${BASE_URL}/oauth?code=provider-code&state=${encodeURIComponent(flow.state)}`,
-    )).status).toBe(200);
-    expect(await storageValue(flow.doId, "scopes")).toEqual(grantedScopes);
+    )).status).toBe(400);
+    expect(await storageValue(flow.doId, "accessToken")).toBeUndefined();
+    expect(await storageValue(flow.doId, "refreshToken")).toBeUndefined();
+    expect((await callback.read()).completeCount).toBe(0);
   });
 
   it("rejects replayed OAuth state after one successful exchange", async () => {
@@ -360,6 +371,34 @@ describe("HubSpot connected account", () => {
     expect(await storageValue(first.doId, "refreshToken")).toBe("rotated-refresh");
   });
 
+  it("single-flights concurrent refreshes and preserves the rotated refresh token", async () => {
+    const flow = await completeFlow();
+    await runInDurableObject(account(flow.doId), (_instance, state) => {
+      state.storage.kv.put("accessTokenExpiresAt", Date.now() + 1);
+    });
+    const response = deferred<Response>();
+    const fetchMock = vi.fn(async () => response.promise);
+    vi.stubGlobal("fetch", fetchMock);
+
+    await runInDurableObject(account(flow.doId), async instance => {
+      const first = instance.getAccessToken();
+      const second = instance.getAccessToken();
+      await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+      response.resolve(oauthGrant({
+        accessToken: "single-flight-access",
+        refreshToken: "single-flight-refresh",
+      }));
+      await expect(Promise.all([first, second])).resolves.toEqual([
+        "single-flight-access",
+        "single-flight-access",
+      ]);
+    });
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(await storageValue(flow.doId, "refreshToken")).toBe("single-flight-refresh");
+    expect((await callback.read()).expiredCount).toBe(0);
+  });
+
   it("notifies credentialsExpired once for invalid refresh credentials", async () => {
     const flow = await completeFlow();
     await runInDurableObject(account(flow.doId), (_instance, state) => {
@@ -382,7 +421,61 @@ describe("HubSpot connected account", () => {
     expect((await callback.read()).expiredCount).toBe(1);
   });
 
-  it("reconnects through the same account capability and reports restoration", async () => {
+  it("does not report invalid_client as credential expiry or replace refresh credentials", async () => {
+    const flow = await completeFlow();
+    await runInDurableObject(account(flow.doId), (_instance, state) => {
+      state.storage.kv.put("accessTokenExpiresAt", Date.now() + 1);
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({
+      error: "invalid_client",
+    }, { status: 400 })));
+
+    const error = await runInDurableObject(
+      account(flow.doId),
+      instance => instance.getAccessToken(),
+    ).catch((caught: unknown) => caught as Error);
+    expect(error.message).not.toContain("reconnect");
+    expect((await callback.read()).expiredCount).toBe(0);
+    expect(await storageValue(flow.doId, "refreshToken")).toBe(REFRESH_TOKEN);
+  });
+
+  it("preserves refresh credentials when a refresh response omits required scopes", async () => {
+    const flow = await completeFlow();
+    await runInDurableObject(account(flow.doId), (_instance, state) => {
+      state.storage.kv.put("accessTokenExpiresAt", Date.now() + 1);
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => oauthGrant({
+      accessToken: "under-scoped-access",
+      refreshToken: "under-scoped-refresh",
+      scopes: ["oauth"],
+    })));
+
+    const error = await runInDurableObject(
+      account(flow.doId),
+      instance => instance.getAccessToken(),
+    ).catch((caught: unknown) => caught as Error);
+    expect(error.message).toMatch(/scope/i);
+    expect(await storageValue(flow.doId, "accessToken")).toBe(ACCESS_TOKEN);
+    expect(await storageValue(flow.doId, "refreshToken")).toBe(REFRESH_TOKEN);
+    expect((await callback.read()).expiredCount).toBe(0);
+  });
+
+  it("clears reconnect state after provider denial without changing credentials", async () => {
+    const original = await completeFlow(12345);
+    const reconnect = await callback.reconnectConnected();
+    const authorization = await SELF.fetch(reconnect.url, { redirect: "manual" });
+    const state = new URL(authorization.headers.get("location") ?? "").searchParams.get("state") ?? "";
+
+    expect((await SELF.fetch(
+      `${BASE_URL}/oauth?error=access_denied&state=${encodeURIComponent(state)}`,
+    )).status).toBe(400);
+    expect(await storageValue(original.doId, "reconnecting")).toBeUndefined();
+    expect(await storageValue(original.doId, "accessToken")).toBe(ACCESS_TOKEN);
+    expect(await storageValue(original.doId, "hubId")).toBe(12345);
+    expect((await callback.read()).restoredCount).toBe(0);
+  });
+
+  it("reconnects only to the original portal and reports restoration", async () => {
     const original = await completeFlow(12345);
     const reconnect = await callback.reconnectConnected();
     const parsed = parseInitiationUrl(reconnect.url);
@@ -393,7 +486,7 @@ describe("HubSpot connected account", () => {
     vi.stubGlobal("fetch", vi.fn(async () => oauthGrant({
       accessToken: "restored-access",
       refreshToken: "restored-refresh",
-      hubId: 67890,
+      hubId: 12345,
     })));
 
     expect((await SELF.fetch(
@@ -405,9 +498,56 @@ describe("HubSpot connected account", () => {
       restoredExpiry: undefined,
     });
     expect(await callback.describeConnected()).toMatchObject({
-      displayName: "HubSpot account 67890",
+      displayName: "HubSpot account 12345",
     });
     expect(await storageValue(original.doId, "accessToken")).toBe("restored-access");
+  });
+
+  it("rejects reconnecting to another portal without replacing the original authority", async () => {
+    const original = await completeFlow(12345);
+    const reconnect = await callback.reconnectConnected();
+    const authorization = await SELF.fetch(reconnect.url, { redirect: "manual" });
+    const state = new URL(authorization.headers.get("location") ?? "").searchParams.get("state") ?? "";
+    vi.stubGlobal("fetch", vi.fn(async () => oauthGrant({
+      accessToken: "other-access",
+      refreshToken: "other-refresh",
+      hubId: 67890,
+    })));
+
+    const response = await SELF.fetch(
+      `${BASE_URL}/oauth?code=reconnect-code&state=${encodeURIComponent(state)}`,
+    );
+
+    expect(response.status).toBe(400);
+    expect(await callback.read()).toMatchObject({ completeCount: 1, restoredCount: 0 });
+    expect(await storageValue(original.doId, "accessToken")).toBe(ACCESS_TOKEN);
+    expect(await storageValue(original.doId, "refreshToken")).toBe(REFRESH_TOKEN);
+    expect(await storageValue(original.doId, "hubId")).toBe(12345);
+    expect(await storageValue(original.doId, "scopes")).toEqual(HUBSPOT_OAUTH_SCOPES);
+    expect(await storageValue(original.doId, "reconnecting")).toBeUndefined();
+  });
+
+  it("preserves original credentials when reconnect returns incomplete scopes", async () => {
+    const original = await completeFlow(12345);
+    const reconnect = await callback.reconnectConnected();
+    const authorization = await SELF.fetch(reconnect.url, { redirect: "manual" });
+    const state = new URL(authorization.headers.get("location") ?? "").searchParams.get("state") ?? "";
+    vi.stubGlobal("fetch", vi.fn(async () => oauthGrant({
+      accessToken: "under-scoped-access",
+      refreshToken: "under-scoped-refresh",
+      hubId: 12345,
+      scopes: ["oauth"],
+    })));
+
+    expect((await SELF.fetch(
+      `${BASE_URL}/oauth?code=reconnect-code&state=${encodeURIComponent(state)}`,
+    )).status).toBe(400);
+    expect(await storageValue(original.doId, "accessToken")).toBe(ACCESS_TOKEN);
+    expect(await storageValue(original.doId, "refreshToken")).toBe(REFRESH_TOKEN);
+    expect(await storageValue(original.doId, "hubId")).toBe(12345);
+    expect(await storageValue(original.doId, "scopes")).toEqual(HUBSPOT_OAUTH_SCOPES);
+    expect(await storageValue(original.doId, "reconnecting")).toBeUndefined();
+    expect((await callback.read()).restoredCount).toBe(0);
   });
 
   it("describes the portal, serves its canonical no-input configurator, and validates URLs", async () => {

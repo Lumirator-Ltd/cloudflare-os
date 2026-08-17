@@ -8,12 +8,15 @@ import type {
 } from "./types";
 
 const AUTHORIZE_URL = "https://app.hubspot.com/oauth/authorize";
-const TOKEN_URL = "https://api.hubapi.com/oauth/2026-03/token";
+const TOKEN_URL = "https://api.hubspot.com/oauth/2026-03/token";
 const API_BASE_URL = "https://api.hubapi.com";
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_OAUTH_RESPONSE_BYTES = 64 * 1024;
 const MAX_CRM_RESPONSE_BYTES = 1024 * 1024;
 const MAX_SEARCH_QUERY_LENGTH = 3000;
+const MAX_PROVIDER_ID_DIGITS = 32;
+const RECORD_ID_PATTERN = /^[1-9]\d{0,31}$/;
+const CURSOR_PATTERN = /^\d{1,32}$/;
 
 export const MAX_HUBSPOT_PROPERTY_VALUE_LENGTH = 16_384;
 
@@ -171,6 +174,7 @@ function providerError(
   parsed: JsonObject | null,
   sensitiveValues: readonly string[],
   prefix = "HubSpot API request failed",
+  oauth = false,
 ): HubSpotApiError {
   const category = safeMetadata(parsed?.category ?? parsed?.error, sensitiveValues);
   const correlationId = safeMetadata(
@@ -182,7 +186,9 @@ function providerError(
     category ? `category ${category}` : undefined,
     correlationId ? `correlationId ${correlationId}` : undefined,
   ].filter((value): value is string => value !== undefined).join(", ");
-  const kind: HubSpotApiErrorKind = status === 401
+  const invalidGrant = oauth && status === 400 &&
+    (parsed?.error === "invalid_grant" || parsed?.category === "invalid_grant");
+  const kind: HubSpotApiErrorKind = invalidGrant || (!oauth && status === 401)
     ? "credentials-expired"
     : status === 429
     ? "rate-limited"
@@ -260,6 +266,7 @@ async function postToken(
       parsed,
       [...sensitiveValues, ...sensitiveResponseValues(parsed)],
       "HubSpot OAuth request failed",
+      true,
     );
   }
   if (!parsed) {
@@ -307,7 +314,15 @@ function optionalScopes(parsed: JsonObject): string[] | undefined {
       kind: "invalid-response",
     });
   }
-  return [...new Set(parsed.scopes)];
+  const scopes = [...new Set(parsed.scopes)];
+  if (HUBSPOT_OAUTH_SCOPES.some(required => !scopes.includes(required))) {
+    throw new HubSpotApiError({
+      message: "HubSpot OAuth response is missing required scopes",
+      status: 200,
+      kind: "invalid-response",
+    });
+  }
+  return scopes;
 }
 
 export async function exchangeHubSpotAuthorizationCode(
@@ -366,6 +381,7 @@ export async function refreshHubSpotAccessToken(
       kind: "invalid-response",
     });
   }
+  optionalScopes(parsed);
   return {
     accessToken: requireString(parsed, "access_token"),
     ...(replacement === undefined ? {} : { refreshToken: replacement }),
@@ -410,8 +426,10 @@ function assertObjectType(value: unknown): asserts value is HubSpotCrmObjectType
 }
 
 export function validateHubSpotRecordId(id: unknown): string {
-  if (typeof id !== "string" || !/^[1-9]\d*$/.test(id)) {
-    throw new TypeError("HubSpot record ID must be a positive integer string");
+  if (typeof id !== "string" || !RECORD_ID_PATTERN.test(id)) {
+    throw new TypeError(
+      `HubSpot record ID must be a positive integer string of at most ${MAX_PROVIDER_ID_DIGITS} digits`,
+    );
   }
   return id;
 }
@@ -431,9 +449,11 @@ function assertSearchOptions(options: HubSpotSearchOptions): ValidatedSearchOpti
     throw new TypeError("HubSpot search limit must be an integer from 1 through 100");
   }
   if (options.after !== undefined && (
-    typeof options.after !== "string" || !/^\d+$/.test(options.after)
+    typeof options.after !== "string" || !CURSOR_PATTERN.test(options.after)
   )) {
-    throw new TypeError("HubSpot search after cursor must be an integer string");
+    throw new TypeError(
+      `HubSpot search after cursor must be an integer string of at most ${MAX_PROVIDER_ID_DIGITS} digits`,
+    );
   }
   return { query: options.query, limit, after: options.after };
 }
@@ -484,7 +504,7 @@ function crmRecord<T extends HubSpotCrmObjectType>(
 ): HubSpotRecordByObjectType[T] {
   if (!isJsonObject(value)
     || typeof value.id !== "string"
-    || !/^[1-9]\d*$/.test(value.id)
+    || !RECORD_ID_PATTERN.test(value.id)
     || typeof value.createdAt !== "string"
     || typeof value.updatedAt !== "string"
     || !isJsonObject(value.properties)) {
@@ -527,9 +547,9 @@ export class HubSpotApi {
     } catch (error) {
       if (error instanceof HubSpotApiError) throw error;
       throw new HubSpotApiError({
-        message: "HubSpot credentials are unavailable",
+        message: "HubSpot credential provider failed",
         status: 0,
-        kind: "credentials-expired",
+        kind: "provider",
       });
     }
     if (!token) {
@@ -593,7 +613,7 @@ export class HubSpotApi {
       if (!isJsonObject(parsed.paging)
         || !isJsonObject(parsed.paging.next)
         || typeof parsed.paging.next.after !== "string"
-        || !/^\d+$/.test(parsed.paging.next.after)) {
+        || !CURSOR_PATTERN.test(parsed.paging.next.after)) {
         throw invalidCrmResponse(status);
       }
       nextAfter = parsed.paging.next.after;

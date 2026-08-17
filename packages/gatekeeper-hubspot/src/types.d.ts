@@ -46,16 +46,16 @@ export interface HubSpotSession extends RpcTarget {
 export type HubSpotSearchPaging = {
   /** Maximum records to return, from 1 through 100. */
   limit?: number;
-  /** Integer cursor returned by the previous page. */
-  after?: number;
+  /** Digit-string cursor returned by the previous page. */
+  after?: string;
 };
 
 /** One bounded page of HubSpot CRM records. */
 export type HubSpotSearchPage<T> = {
   /** Records in this page. */
   results: T[];
-  /** Cursor for the next page, when another page exists. */
-  nextAfter?: number;
+  /** Digit-string cursor for the next page, when another page exists. */
+  nextAfter?: string;
   /** Total matches reported by HubSpot. */
   total: number;
 };
@@ -179,4 +179,5 @@ export type HubSpotMutationResult =
   | { status: "pending" }
   | { status: "rejected" }
   | { status: "failed"; message: string }
+  | { status: "uncertain"; message: string }
   | { status: "ready"; objectType: HubSpotObjectType; recordId: string };

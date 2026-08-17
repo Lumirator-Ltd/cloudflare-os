@@ -16,6 +16,16 @@ export {
 } from "../src/hubspot";
 
 export class TestHubSpotGatekeeper extends HubSpotGatekeeperImpl {
+  protected expectedHubId(): number {
+    return 24680;
+  }
+
+  protected async assertExpectedHubId(): Promise<void> {
+    if (this.ctx.storage.kv.get<boolean>("test:identityMismatch")) {
+      throw new Error("HubSpot portal authority changed");
+    }
+  }
+
   protected mutationApi(): HubSpotApi {
     return new HubSpotApi({ getAccessToken: async () => "test-hubspot-token" });
   }

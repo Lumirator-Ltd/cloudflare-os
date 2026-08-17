@@ -1,5 +1,5 @@
 import { env, RpcStub, RpcTarget } from "cloudflare:workers";
-import { createExecutionContext, runInDurableObject } from "cloudflare:test";
+import { abortAllDurableObjects, createExecutionContext, runInDurableObject } from "cloudflare:test";
 import type {
   ActionDescription,
   ApprovalQueue,
@@ -84,6 +84,8 @@ function session(options?: {
   mutationKv?: MutationKv;
   notifyCredentialsExpired?: () => Promise<void>;
   submit?: Submit;
+  assertExpectedHubId?: () => Promise<void>;
+  isMutationActive?: (id: number) => boolean;
 }) {
   const authorize = options?.authorize ?? vi.fn(async () => {});
   const submit = options?.submit ?? vi.fn(async () => {});
@@ -109,6 +111,8 @@ function session(options?: {
       approvalQueue,
       options?.notifyCredentialsExpired ?? (async () => {}),
       options?.mutationKv ?? storage?.kv as MutationKv,
+      options?.assertExpectedHubId ?? (async () => {}),
+      options?.isMutationActive ?? (() => false),
     ),
   };
 }
@@ -182,10 +186,13 @@ describe("HubSpot CRM observations", () => {
     }) as typeof fetch;
     const subject = session({ fetch: fetchMock });
 
-    await expect(subject.value.searchContacts("contact query", { limit: 5, after: 10 })).resolves.toEqual({
+    await expect(subject.value.searchContacts("contact query", {
+      limit: 5,
+      after: "90071992547409931234",
+    })).resolves.toEqual({
       total: 1,
       results: [crmRecord("101", { email: "private@example.com" })],
-      nextAfter: 400,
+      nextAfter: "400",
     });
     await expect(subject.value.getContact("101")).resolves.toEqual(
       crmRecord("101", { email: "private@example.com" }),
@@ -193,7 +200,7 @@ describe("HubSpot CRM observations", () => {
     await expect(subject.value.searchCompanies("company query")).resolves.toEqual({
       total: 1,
       results: [crmRecord("202", { name: "Private Company" })],
-      nextAfter: 400,
+      nextAfter: "400",
     });
     await expect(subject.value.getCompany("202")).resolves.toEqual(
       crmRecord("202", { name: "Private Company" }),
@@ -201,7 +208,7 @@ describe("HubSpot CRM observations", () => {
     await expect(subject.value.searchDeals("deal query")).resolves.toEqual({
       total: 1,
       results: [crmRecord("303", { dealname: "Private Deal" })],
-      nextAfter: 400,
+      nextAfter: "400",
     });
     await expect(subject.value.getDeal("303")).resolves.toEqual(
       crmRecord("303", { dealname: "Private Deal" }),
@@ -218,7 +225,7 @@ describe("HubSpot CRM observations", () => {
     expect(JSON.parse(fetchMock.mock.calls[0][1]?.body as string)).toMatchObject({
       query: "contact query",
       limit: 5,
-      after: "10",
+      after: "90071992547409931234",
     });
     expect(subject.authorize).toHaveBeenCalledTimes(6);
     for (const [description] of subject.authorize.mock.calls) {
@@ -238,8 +245,12 @@ describe("HubSpot CRM observations", () => {
 
     await expect(subject.value.searchContacts("x".repeat(3001))).rejects.toThrow("query");
     await expect(subject.value.searchCompanies("x", { limit: 101 })).rejects.toThrow("limit");
-    await expect(subject.value.searchDeals("x", { after: 1.5 })).rejects.toThrow("after");
+    await expect(Promise.resolve().then(() =>
+      subject.value.searchDeals("x", { after: 1.5 as never })
+    )).rejects.toThrow();
+    await expect(subject.value.searchDeals("x", { after: "1".repeat(33) })).rejects.toThrow("after");
     await expect(subject.value.getContact("0")).rejects.toThrow("record ID");
+    await expect(subject.value.getContact("1".repeat(33))).rejects.toThrow("record ID");
     await expect(subject.value.getCompany("1.5")).rejects.toThrow("record ID");
     await expect(subject.value.getDeal("1/associations/contacts")).rejects.toThrow("record ID");
     expect(fetchMock).not.toHaveBeenCalled();
@@ -292,6 +303,33 @@ describe("HubSpot CRM observations", () => {
     expect((await callback.read()).expiredCount).toBe(1);
   });
 
+  it("does not report serialized OAuth provider failures as credential expiry", async () => {
+    const notifyCredentialsExpired = vi.fn(async () => {});
+    const fetchMock = vi.fn(async () => json({})) as typeof fetch;
+    const approvalQueue = {
+      authorizeObservation: vi.fn(async () => {}),
+      [Symbol.dispose]: vi.fn(),
+    } as unknown as RpcStub<ApprovalQueue>;
+    const value = new HubSpotSessionImpl(
+      new HubSpotApi({
+        getAccessToken: async () => {
+          throw new Error("HubSpotApiError: OAuth invalid_client");
+        },
+        fetch: fetchMock,
+      }),
+      PORTAL_ID,
+      approvalQueue,
+      notifyCredentialsExpired,
+    );
+
+    const error = await value.getContact("101").catch((caught: unknown) => caught as Error);
+
+    expect(error.message).not.toContain("reconnect");
+    expect(notifyCredentialsExpired).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+    value[Symbol.dispose]();
+  });
+
   it("does not report rate limits as credential expiry", async () => {
     const notifyCredentialsExpired = vi.fn(async () => {});
     const subject = session({
@@ -301,6 +339,20 @@ describe("HubSpot CRM observations", () => {
 
     await expect(subject.value.getDeal("303")).rejects.toMatchObject({ kind: "rate-limited" });
     expect(notifyCredentialsExpired).not.toHaveBeenCalled();
+  });
+
+  it("fails closed before reads when the bound portal identity changes", async () => {
+    const fetchMock = vi.fn(async () => json(crmRecord("101", {}))) as typeof fetch;
+    const subject = session({
+      fetch: fetchMock,
+      assertExpectedHubId: async () => {
+        throw new Error("HubSpot portal authority changed");
+      },
+    });
+
+    await expect(subject.value.getContact("101")).rejects.toThrow(/authority/i);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(subject.authorize).not.toHaveBeenCalled();
   });
 
   it("disposes the duplicated approval queue with the session", () => {
@@ -398,6 +450,11 @@ describe("HubSpot approved CRM mutations", () => {
       { id: 6, objectType: "deal", operation: "update" },
     ]);
     expect(subject.submit).toHaveBeenCalledTimes(6);
+    for (let id = 1; id <= 6; id++) {
+      expect(subject.storage?.data.get(`mutation:pending:${id}`)).toMatchObject({
+        expectedHubId: PORTAL_ID,
+      });
+    }
     expect(subject.submit.mock.calls[0]).toEqual([1, {
       title: "Create HubSpot contact",
       description:
@@ -434,6 +491,20 @@ describe("HubSpot approved CRM mutations", () => {
     expect(subject.authorize).not.toHaveBeenCalled();
   });
 
+  it("fails closed before persisting or submitting a mutation after portal identity changes", async () => {
+    const subject = session({
+      assertExpectedHubId: async () => {
+        throw new Error("HubSpot portal authority changed");
+      },
+    });
+
+    await expect(subject.value.createCompany({ name: "Private Company" })).rejects.toThrow(
+      /authority/i,
+    );
+    expect(subject.storage?.data.size).toBe(0);
+    expect(subject.submit).not.toHaveBeenCalled();
+  });
+
   it("removes pending state when approval submission fails", async () => {
     const rejection = new Error("queue unavailable");
     const subject = session({ submit: vi.fn(async () => { throw rejection; }) });
@@ -441,6 +512,33 @@ describe("HubSpot approved CRM mutations", () => {
     await expect(subject.value.createCompany({ name: "Private Company" })).rejects.toBe(rejection);
 
     expect([...subject.storage!.data.keys()]).toEqual(["mutation:nextId"]);
+  });
+
+  it("fails closed before mutation result lookup after portal identity changes", async () => {
+    let matches = true;
+    const subject = session({
+      assertExpectedHubId: async () => {
+        if (!matches) throw new Error("HubSpot portal authority changed");
+      },
+    });
+    const ticket = await subject.value.createContact({ email: "person@example.com" });
+    matches = false;
+
+    await expect(subject.value.getMutationResult(ticket)).rejects.toThrow(/authority/i);
+    expect(subject.authorize).not.toHaveBeenCalled();
+  });
+
+  it("rejects a pending mutation whose persisted portal authority changed", async () => {
+    const subject = session();
+    const ticket = await subject.value.createContact({ email: "person@example.com" });
+    const key = `mutation:pending:${ticket.id}`;
+    subject.storage!.data.set(key, {
+      ...(subject.storage!.data.get(key) as object),
+      expectedHubId: 99999,
+    });
+
+    await expect(subject.value.getMutationResult(ticket)).rejects.toThrow(/portal|authority/i);
+    expect(subject.authorize).not.toHaveBeenCalled();
   });
 
   it("returns pending only after authorization and rejects unknown or mismatched tickets", async () => {
@@ -534,18 +632,39 @@ describe("HubSpot approved CRM mutations", () => {
         id: ticket.id,
         applying: true,
       });
-      const duplicate = expect(instance.applyAction(ticket.id)).rejects.toThrow(/pending|applying/i);
+      const duplicate = expect(instance.applyAction(ticket.id)).rejects.toThrow(/active|applying/i);
+      const rejection = expect(instance.rejectAction(ticket.id)).rejects.toThrow(/active|applying/i);
       await Promise.resolve();
       await Promise.resolve();
       remote.resolve(json(crmRecord("909", { name: "Company" })));
       await duplicate;
+      await rejection;
       await expect(first).resolves.toBeUndefined();
     });
 
     expect(fetchMock).toHaveBeenCalledOnce();
   });
 
-  it("records a redacted failed result and never retries a write with an uncertain outcome", async () => {
+  it("fails closed before applying a pending mutation for another portal", async () => {
+    const submitted = session();
+    const ticket = await submitted.value.createCompany({ name: "Company" });
+    const fetchMock = vi.fn(async () => json(crmRecord("909", { name: "Company" }))) as typeof fetch;
+    vi.stubGlobal("fetch", fetchMock);
+    const gatekeeper = testEnv.HUBSPOT_GATEKEEPER.getByName("identity-mismatch-apply");
+
+    const stored = await runInDurableObject(gatekeeper, async (instance, state) => {
+      for (const [key, value] of submitted.storage!.data) state.storage.kv.put(key, value);
+      state.storage.kv.put("test:identityMismatch", true);
+      await expect(instance.applyAction(ticket.id)).rejects.toThrow(/authority/i);
+      return [...state.storage.kv.list()];
+    });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(stored.some(([key]) => key === `mutation:pending:${ticket.id}`)).toBe(true);
+    expect(stored.some(([key]) => key === `mutation:result:${ticket.id}`)).toBe(false);
+  });
+
+  it("records a redacted uncertain result, rejects apply, and never retries", async () => {
     const secret = "private-provider-response";
     const submitted = session();
     const ticket = await submitted.value.createContact({ email: "person@example.com" });
@@ -555,11 +674,15 @@ describe("HubSpot approved CRM mutations", () => {
 
     const first = await runInDurableObject(gatekeeper, async (instance, state) => {
       for (const [key, value] of submitted.storage!.data) state.storage.kv.put(key, value);
-      await instance.applyAction(ticket.id);
+      const error = await instance.applyAction(ticket.id).catch((caught: unknown) => caught as Error);
+      expect(error.message).toMatch(/inspect/i);
+      expect(error.message).not.toContain(secret);
       return [...state.storage.kv.list()];
     });
     await runInDurableObject(gatekeeper, async instance => {
-      await expect(instance.applyAction(ticket.id)).rejects.toThrow(/unknown/i);
+      const error = await instance.applyAction(ticket.id).catch((caught: unknown) => caught as Error);
+      expect(error.message).toMatch(/inspect/i);
+      expect(error.message).not.toContain(secret);
     });
 
     expect(fetchMock).toHaveBeenCalledOnce();
@@ -568,9 +691,9 @@ describe("HubSpot approved CRM mutations", () => {
     const reader = session({ mutationKv: restored.kv });
     const result = await reader.value.getMutationResult(ticket) as Extract<
       HubSpotMutationResult,
-      { status: "failed" }
+      { status: "uncertain" }
     >;
-    expect(result.status).toBe("failed");
+    expect(result.status).toBe("uncertain");
     expect(result.message.length).toBeLessThan(200);
     expect(result.message).not.toContain(secret);
   });
@@ -586,7 +709,7 @@ describe("HubSpot approved CRM mutations", () => {
     const stored = await runInDurableObject(gatekeeper, async (instance, state) => {
       for (const [key, value] of submitted.storage!.data) state.storage.kv.put(key, value);
       state.storage.kv.put("test:failNotification", true);
-      await instance.applyAction(ticket.id);
+      await expect(instance.applyAction(ticket.id)).rejects.toThrow(/inspect/i);
       return [...state.storage.kv.list()];
     });
 
@@ -598,11 +721,81 @@ describe("HubSpot approved CRM mutations", () => {
     const reader = session({ mutationKv: restored.kv });
     const result = await reader.value.getMutationResult(ticket) as Extract<
       HubSpotMutationResult,
-      { status: "failed" }
+      { status: "uncertain" }
     >;
-    expect(result.status).toBe("failed");
+    expect(result.status).toBe("uncertain");
     expect(result.message).toContain("credentials expired");
     expect(result.message).not.toContain(secret);
+  });
+
+  it("recovers stale applying state in a fresh instance without another write", async () => {
+    const submitted = session();
+    const ticket = await submitted.value.createCompany({ name: "Company" });
+    const pendingKey = `mutation:pending:${ticket.id}`;
+    const pending = submitted.storage!.data.get(pendingKey) as Record<string, unknown>;
+    const fetchMock = vi.fn(async () => json(crmRecord("909", {}))) as typeof fetch;
+    vi.stubGlobal("fetch", fetchMock);
+    let gatekeeper = testEnv.HUBSPOT_GATEKEEPER.getByName("stale-fresh-apply");
+
+    await runInDurableObject(gatekeeper, (_instance, state) => {
+      for (const [key, value] of submitted.storage!.data) state.storage.kv.put(key, value);
+      state.storage.kv.put(pendingKey, { ...pending, applying: true });
+    });
+    await abortAllDurableObjects();
+    gatekeeper = testEnv.HUBSPOT_GATEKEEPER.getByName("stale-fresh-apply");
+    const stored = await runInDurableObject(gatekeeper, async (instance, state) => {
+      await expect(instance.applyAction(ticket.id)).rejects.toThrow(/outcome.*uncertain|inspect/i);
+      return [...state.storage.kv.list()];
+    });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(stored.some(([key]) => key === pendingKey)).toBe(false);
+    expect(stored).toContainEqual([
+      `mutation:result:${ticket.id}`,
+      expect.objectContaining({
+        outcome: expect.objectContaining({ status: "failed", message: expect.stringMatching(/inspect/i) }),
+      }),
+    ]);
+  });
+
+  it("recovers stale applying state during result lookup and rejection", async () => {
+    const lookup = session();
+    const lookupTicket = await lookup.value.createContact({ email: "person@example.com" });
+    const lookupKey = `mutation:pending:${lookupTicket.id}`;
+    lookup.storage!.data.set(lookupKey, {
+      ...(lookup.storage!.data.get(lookupKey) as object),
+      applying: true,
+    });
+
+    await expect(lookup.value.getMutationResult(lookupTicket)).resolves.toMatchObject({
+      status: "failed",
+      message: expect.stringMatching(/outcome.*uncertain|inspect/i),
+    });
+    expect(lookup.storage!.data.has(lookupKey)).toBe(false);
+
+    const rejected = session();
+    const rejectedTicket = await rejected.value.updateCompany("202", { name: "Company" });
+    const rejectedKey = `mutation:pending:${rejectedTicket.id}`;
+    const rejectedPending = rejected.storage!.data.get(rejectedKey) as object;
+    const gatekeeper = testEnv.HUBSPOT_GATEKEEPER.getByName("stale-reject");
+    const fetchMock = vi.fn(async () => json({})) as typeof fetch;
+    vi.stubGlobal("fetch", fetchMock);
+
+    const stored = await runInDurableObject(gatekeeper, async (instance, state) => {
+      for (const [key, value] of rejected.storage!.data) state.storage.kv.put(key, value);
+      state.storage.kv.put(rejectedKey, { ...rejectedPending, applying: true });
+      await expect(instance.rejectAction(rejectedTicket.id)).rejects.toThrow(
+        /outcome.*uncertain|inspect/i,
+      );
+      return [...state.storage.kv.list()];
+    });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(stored.some(([key]) => key === rejectedKey)).toBe(false);
+    expect(stored).toContainEqual([
+      `mutation:result:${rejectedTicket.id}`,
+      expect.objectContaining({ outcome: expect.objectContaining({ status: "failed" }) }),
+    ]);
   });
 
   it("rejects a pending mutation without a fetch and stores a rejected result", async () => {

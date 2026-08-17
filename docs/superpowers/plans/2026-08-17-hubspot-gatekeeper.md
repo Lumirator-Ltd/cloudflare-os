@@ -86,7 +86,7 @@ Expected: FAIL because the API helpers do not exist.
 
 - [ ] **Step 2: Implement OAuth helpers**
 
-Use `https://app.hubspot.com/oauth/authorize` and form-encoded `https://api.hubapi.com/oauth/2026-03/token`. Require `access_token`, `refresh_token` for initial exchange, positive `expires_in`, and numeric `hub_id`. Persist a refresh token returned during refresh and preserve the prior token only when HubSpot omits a replacement.
+Use `https://app.hubspot.com/oauth/authorize` and form-encoded `https://api.hubspot.com/oauth/2026-03/token`. Require `access_token`, `refresh_token` for initial exchange, positive `expires_in`, and numeric `hub_id`. If a token response includes scopes, require every configured OAuth scope before storing it. Persist a refresh token returned during refresh and preserve the prior token only when HubSpot omits a replacement.
 
 - [ ] **Step 3: Write failing CRM client tests**
 
@@ -99,11 +99,11 @@ POST /crm/objects/2026-03/{type}
 PATCH /crm/objects/2026-03/{type}/{id}
 ```
 
-Assert bearer auth, curated properties, page limit/cursor bounds, no DELETE/batch/association endpoint, bounded provider errors, and no automatic write retry.
+Assert bearer auth, curated properties, 32-digit record-ID and digit-string cursor bounds, no DELETE/batch/association endpoint, bounded provider errors, and no automatic write retry.
 
 - [ ] **Step 4: Implement the CRM client**
 
-Use one injected `fetch` and one async token provider. Parse only bounded JSON object responses. Classify `401` as credential expiry, `429` as rate limiting, and other non-2xx responses by status/category/correlation ID without including CRM values or raw bodies.
+Use one injected `fetch`, one async token provider, and `https://api.hubapi.com` for the CRM routes. Parse only bounded JSON object responses. Classify CRM `401` as credential expiry, `429` as rate limiting, and other non-2xx responses by status/category/correlation ID without including CRM values or raw bodies. For OAuth responses, only documented `invalid_grant` is credential expiry.
 
 - [ ] **Step 5: Verify and commit**
 
@@ -132,11 +132,11 @@ Assert initiation and OAuth state nonces are cryptographically random, one-time,
 
 - [ ] **Step 3: Implement HTTP entrypoint, vendor, and UserAccount**
 
-Follow the current Gatekeeper OAuth lifecycle. Store callback, tokens, scopes, Hub ID, and user/domain identity only in the Durable Object. Refresh before expiry, notify credential expiry once on invalid refresh, and support reconnect through the existing account capability.
+Follow the current Gatekeeper OAuth lifecycle. Store callback, tokens, scopes, Hub ID, and user/domain identity only in the Durable Object. Single-flight refresh per instance, notify credential expiry once only for OAuth `invalid_grant`, and support reconnect through the existing account capability only when the new grant has the original Hub ID.
 
 - [ ] **Step 4: Implement connected-account RPC and configurator**
 
-Return account description `HubSpot account <hubId>`, whole-account resource URL `https://app.hubspot.com/contacts/<hubId>`, and reject URLs for any other portal ID or hostname. Use a no-input configurator.
+Return account description `HubSpot account <hubId>`, whole-account resource URL `https://app.hubspot.com/contacts/<hubId>`, and reject URLs for any other portal ID or hostname. Pin the selected Hub ID into Gatekeeper capability props and re-check it before descriptions, sessions, provider calls, pending mutation use, and result lookup. Use a no-input configurator.
 
 - [ ] **Step 5: Verify and commit**
 
@@ -198,7 +198,7 @@ Add explicit create/update methods for all three objects plus `getMutationResult
 
 - [ ] **Step 4: Implement apply/reject/result lifecycle**
 
-`applyAction()` performs one POST/PATCH and stores a bounded ready/failed result; it never retries a write. `rejectAction()` records rejection with no fetch. `revertAction()` returns a manual-remediation message. Result reads require observation authorization.
+`applyAction()` moves pending state to applying before one POST/PATCH. It stores ready only for confirmed success; all application failures store a redacted terminal failed/uncertain result, remove pending state, and throw. Active duplicates fail without disturbing the first application. A stale applying state becomes terminal failed with outcome-uncertain/manual-inspection guidance and no fetch, including during result lookup or rejection. Normal pending rejection stores rejected with no fetch. Writes are never retried. `revertAction()` returns a manual-remediation message. Result reads require authority re-check and observation authorization.
 
 - [ ] **Step 5: Verify and commit**
 

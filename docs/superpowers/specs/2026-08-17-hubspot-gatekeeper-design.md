@@ -10,7 +10,7 @@ The connector targets HubSpot's current Developer Platform rather than legacy pu
 
 - Authorization endpoint: `https://app.hubspot.com/oauth/authorize`.
 - Token endpoint: `POST https://api.hubspot.com/oauth/2026-03/token`.
-- CRM endpoints: `/crm/objects/2026-03/{contacts|companies|deals}` and their `/search` endpoints.
+- CRM endpoints: `https://api.hubapi.com/crm/objects/2026-03/{contacts|companies|deals}` and their `/search` endpoints.
 - Required scopes: `oauth`, `crm.objects.contacts.read`, `crm.objects.contacts.write`, `crm.objects.companies.read`, `crm.objects.companies.write`, `crm.objects.deals.read`, and `crm.objects.deals.write`.
 - Installing users must be HubSpot Super Admins or have HubSpot Marketplace Access.
 - Production redirects require HTTPS and must be registered exactly in the app configuration.
@@ -46,13 +46,13 @@ The release manifest discovers every package with `wrangler.jsonc`, so the new p
 
 HubSpot does not document PKCE for this server-side flow, so the connector uses the confidential client secret at the token endpoint and a cryptographic state nonce for CSRF/replay protection. The token response supplies short-lived access credentials, a refresh token, scopes, and Hub ID. The Durable Object stores tokens and identity; credentials never leave it or enter logs.
 
-Before expiry, `getAccessToken()` refreshes through the 2026-03 endpoint and persists a returned rotated refresh token when present. An invalid/expired/revoked refresh token calls `credentialsExpired()` once and produces a reconnect-required error. Reconnect reuses the existing connected-account capability and calls `credentialsRestored()` after success.
+Before expiry, `getAccessToken()` single-flights refreshes through the 2026-03 endpoint per Durable Object instance and persists a returned rotated refresh token when present. Only OAuth `invalid_grant` marks credentials expired and calls `credentialsExpired()` once; provider/configuration failures remain distinct. Initial and refresh responses that include scopes must contain every required scope before credentials are stored. Reconnect reuses the existing connected-account capability, accepts only the original Hub ID, and calls `credentialsRestored()` only after that same-portal grant succeeds.
 
 Disconnect deletes local credentials and capabilities. Provider-side uninstall/revocation is deferred until HubSpot's current revoke contract is confirmed and tested; the README tells administrators how to remove the connected app in HubSpot if immediate provider-side revocation is required.
 
 ## Resource and privacy model
 
-The only supported resource is the connected HubSpot CRM account. The configurator returns `https://app.hubspot.com/contacts/{hubId}`. `getGatekeeperClassFor()` accepts only HubSpot app URLs whose portal identifier matches the OAuth token's Hub ID.
+The only supported resource is the connected HubSpot CRM account. The configurator returns `https://app.hubspot.com/contacts/{hubId}`. `getGatekeeperClassFor()` accepts only HubSpot app URLs whose portal identifier matches the OAuth token's Hub ID and pins that Hub ID into immutable Gatekeeper capability props. Resource descriptions, sessions, reads, mutations, applications, and mutation-result lookups re-check the account against the pinned authority and fail closed on mismatch.
 
 HubSpot documents that app access tokens reflect granted scopes rather than the installing user's object ownership restrictions. The API does not provide a reliable oracle proving another Cloudflare OS collaborator can read every record previously observed. Therefore the Gatekeeper uses the private-only observer strategy: `addObserver()` always rejects, preventing the binding from being shared beyond its owner.
 
@@ -65,7 +65,7 @@ Expose explicit methods rather than a generic arbitrary-object/property API:
 - `searchDeals`, `getDeal`, `createDeal`, `updateDeal`
 - `getMutationResult`
 
-Search accepts a bounded free-text query, page size up to 100, and HubSpot's integer `after` cursor. Responses include only curated standard properties.
+Search accepts a bounded free-text query, page size up to 100, and HubSpot's digit-string `after` cursor. Cursors remain strings end-to-end, and provider cursors and record IDs are limited to 32 digits. Responses include only curated standard properties.
 
 Writable properties are allowlisted per object:
 
@@ -79,7 +79,7 @@ Contacts must include at least one identifying field. Companies require name or 
 
 Every remote read completes before `authorizeObservation()` and returns data only after authorization succeeds. Descriptions include the object type, query or record ID, result count, and portal ID, but not full CRM contents.
 
-Create/update methods never call HubSpot directly. They persist a validated pending mutation in the Gatekeeper Durable Object, submit it to the approval queue with `awaitDecision: true`, and return a mutation ticket. `applyAction()` performs exactly one POST/PATCH and stores a bounded result. `rejectAction()` records rejection without remote side effects. Actions are never auto-approvable and declare no automatic revert; deletion is not implemented.
+Create/update methods never call HubSpot directly. They persist a validated pending mutation, including the immutable expected Hub ID, in the Gatekeeper Durable Object, submit it to the approval queue with `awaitDecision: true`, and return a mutation ticket. `applyAction()` claims `pending` as `applying` before exactly one POST/PATCH. Confirmed success stores `ready`; any application error stores a redacted terminal `failed` or `uncertain` result, removes pending state, and throws so the Overseer does not mark the action applied. A stale persisted `applying` state is terminalized with manual-inspection guidance and never retried. Concurrent duplicate applications and rejection of active, stale, or uncertain writes fail closed without changing the first or terminal outcome. A normal pre-application rejection stores `rejected` without remote side effects. Actions are never auto-approvable and declare no automatic revert; deletion is not implemented.
 
 Reads may retry a single `429`/transient failure only when HubSpot supplies a bounded retry delay. Writes are never retried automatically because a lost response could duplicate a create or replay an update. Provider errors expose status/category/correlation IDs but redact tokens, secrets, response bodies, and submitted CRM values from logs.
 
