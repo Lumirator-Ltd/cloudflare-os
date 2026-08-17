@@ -144,3 +144,23 @@ IMPORTANT: Frontend error reporting is a separate, opt-in path:
 ### Delivery decision
 
 - Review only consequential correctness, security, data-loss, and compatibility risks. Assign each blocking finding P0 or P1 with an exploit/failure path and a concrete remediation. If no P0/P1 findings remain, approve the PR; leave deterministic formatting, lint, type, and test checks to GitHub Actions.
+
+## Project intent: PoC / MVP (Lumirator)
+
+This work is a proof of concept and MVP for using Cloudflare OS to its full
+extent and offering it as a managed service to our clients.
+
+Priorities, in order:
+
+1. Fast implementation.
+2. A simple, working MVP.
+3. Everything else.
+
+Guidelines:
+
+- Prefer the simplest approach that works end to end; avoid speculative
+  complexity and heavyweight process.
+- Do not run supply-chain or downloaded-code audits unless explicitly
+  requested in chat.
+- Keep changes small and shippable; iterate instead of perfecting.
+- Still never commit secrets, tenant configuration, state, or credentials.
