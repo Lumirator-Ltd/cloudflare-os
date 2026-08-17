@@ -81,7 +81,9 @@ export default function AdminConnectorsPage() {
     try {
       await admin.api.configureConnector(connector.id, values)
       setDrafts((current) => ({ ...current, [connector.id]: {} }))
-      setConnectors(await admin.api.listConnectorConfigurations())
+      setConnectors((current) => current.map((item) =>
+        item.id === connector.id ? { ...item, configured: true } : item,
+      ))
       toasts.add({ title: `${connector.displayName} credentials saved`, variant: 'success' })
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to save connector credentials'
