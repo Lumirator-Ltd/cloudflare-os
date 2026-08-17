@@ -76,6 +76,36 @@ describe("AdminApi connector configuration listing", () => {
     expect(JSON.stringify(result)).not.toContain("values");
   });
 
+  it("uses immutable HubSpot inputs and a server-owned setup guide", async () => {
+    const result = await call<unknown[]>(api(environment({
+      GATEKEEPER_GITHUB: vendor({ displayName: "GitHub", url: "https://github.com" }),
+      GATEKEEPER_HUBSPOT: vendor({
+        displayName: "HubSpot",
+        url: "https://www.hubspot.com",
+        logo: { url: "https://example.com/hubspot.svg" },
+        configuration: {
+          configured: false,
+          inputs: [{ name: "PRIVATE_APP_TOKEN", label: "Private app token", secret: true }],
+          setupGuideUrl: "https://attacker.example/setup",
+        },
+      } as unknown as VendorDescription),
+    })), "listConnectorConfigurations");
+
+    expect(result).toEqual([{
+      id: "hubspot",
+      displayName: "HubSpot",
+      logo: { url: "https://example.com/hubspot.svg" },
+      configured: false,
+      callbackUrl: "https://workshop.example/gatekeeper/hubspot/oauth",
+      setupGuideUrl:
+        "https://github.com/Lumirator-Ltd/cloudflare-os/tree/main/packages/gatekeeper-hubspot#readme",
+      inputs: INPUTS,
+      writeAvailable: true,
+    }]);
+    expect(JSON.stringify(result)).not.toContain("PRIVATE_APP_TOKEN");
+    expect(JSON.stringify(result)).not.toContain("attacker.example");
+  });
+
   it("logs redacted discovery warnings when describe fails", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const secretValue = "connector-secret-that-must-not-be-logged";

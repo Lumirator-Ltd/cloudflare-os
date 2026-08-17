@@ -14,6 +14,7 @@ const connectors = [
   ["confluence", "confluence.ts"],
   ["github", "github.ts"],
   ["google", "google.ts"],
+  ["hubspot", "hubspot.ts"],
   ["linear", "linear.ts"],
   ["notion", "notion.ts"],
   ["slack", "slack.ts"],
@@ -38,7 +39,7 @@ for (const [vendorId, fileName] of connectors) {
     assert.match(source, /staticOauthConnectorConfiguration/);
     assert.match(
       source,
-      /configuration:\s*staticOauthConnectorConfiguration\(this\.env\)/,
+      /configuration:\s*staticOauthConnectorConfiguration\((?:this\.)?env\)/,
     );
   });
 
