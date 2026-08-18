@@ -1,9 +1,11 @@
 import type { GitHubIssueResponse } from "./github-api";
 import type { GitHubIssueSearch } from "./types";
 
-// The scope a search is confined to: a single repository, or every repository owned by
-// `owner` (GitHub's `user:` qualifier — note this does not cover org/collaborator repos the
-// account can merely access).
+/**
+ * The scope a search is confined to: a single repository, or every repository owned by
+ * `owner` (GitHub's `user:` qualifier — note this does not cover org/collaborator repos the
+ * account can merely access).
+ */
 export type GitHubSearchScope = { owner: string; repo?: string };
 
 function scopeQualifier(scope: GitHubSearchScope): string {
@@ -25,9 +27,11 @@ export function buildIssueSearchQuery(owner: string, repo: string, query: GitHub
   return buildScopedIssueSearchQuery({ owner, repo }, query);
 }
 
-// Builds a code search query. All caller-controlled fragments are quoted so search
-// qualifiers cannot be injected to escape the scope. Code search only covers the default
-// branch of each repository.
+/**
+ * Builds a code search query. All caller-controlled fragments are quoted so search
+ * qualifiers cannot be injected to escape the scope. Code search only covers the default
+ * branch of each repository.
+ */
 export function buildCodeSearchQuery(
   scope: GitHubSearchScope,
   query: { text: string; path?: string; extension?: string },
@@ -45,8 +49,10 @@ function repoInScope(scope: GitHubSearchScope, owner?: string, repo?: string): b
   return true;
 }
 
-// Search endpoints interpret qualifiers server-side, so even with quoted queries we verify
-// every result actually falls inside the requested scope before returning it.
+/**
+ * Search endpoints interpret qualifiers server-side, so even with quoted queries we verify
+ * every result actually falls inside the requested scope before returning it.
+ */
 export function assertCodeSearchResultsInScope(
   scope: GitHubSearchScope,
   results: readonly { repository: { full_name: string } }[],

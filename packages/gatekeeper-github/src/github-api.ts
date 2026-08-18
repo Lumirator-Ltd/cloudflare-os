@@ -539,9 +539,11 @@ export class GitHubApi {
     return result.data;
   }
 
-  // Fetches the full recursive tree for a ref (branch, tag, or commit SHA). Always
-  // recursive: one cached response serves every subtree/depth view. GitHub sets
-  // `truncated` when the listing exceeds its limits (100k entries / 7 MB).
+  /**
+   * Fetches the full recursive tree for a ref (branch, tag, or commit SHA). Always
+   * recursive: one cached response serves every subtree/depth view. GitHub sets
+   * `truncated` when the listing exceeds its limits (100k entries / 7 MB).
+   */
   async getTreeConditional(
     owner: string,
     repo: string,
@@ -555,8 +557,10 @@ export class GitHubApi {
     );
   }
 
-  // Fetches file or directory contents at a path. Directories return an array. Files
-  // over 1 MB come back without base64 content (`encoding: "none"`).
+  /**
+   * Fetches file or directory contents at a path. Directories return an array. Files
+   * over 1 MB come back without base64 content (`encoding: "none"`).
+   */
   async getContentsConditional(
     owner: string,
     repo: string,
@@ -572,8 +576,10 @@ export class GitHubApi {
     );
   }
 
-  // GitHub's code search endpoint. Only indexes the default branch of each repository.
-  // The text-match media type includes matching source fragments in the response.
+  /**
+   * GitHub's code search endpoint. Only indexes the default branch of each repository.
+   * The text-match media type includes matching source fragments in the response.
+   */
   async searchCode(options: {
     q: string;
     per_page: number;

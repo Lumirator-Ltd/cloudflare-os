@@ -14,9 +14,11 @@ export type ParsedGitHubResourceUrl =
   | { kind: "issue"; owner: string; repo: string; issueNumber: number }
   | { kind: "pull"; owner: string; repo: string; issueNumber: number };
 
-// Classifies a github.com URL into one of the supported resource kinds. The bare origin is
-// the account-wide resource; owner-only URLs are rejected; URLs with extra or non-numeric
-// trailing segments fall back to the enclosing repository.
+/**
+ * Classifies a github.com URL into one of the supported resource kinds. The bare origin is
+ * the account-wide resource; owner-only URLs are rejected; URLs with extra or non-numeric
+ * trailing segments fall back to the enclosing repository.
+ */
 export function parseGitHubResourceUrl(url: string): ParsedGitHubResourceUrl {
   const parsed = new URL(url);
   if (parsed.hostname !== "github.com") {
@@ -41,8 +43,10 @@ export function parseGitHubResourceUrl(url: string): ParsedGitHubResourceUrl {
   return { kind: "repo", owner, repo };
 }
 
-// Parses an "owner/name" pair or a github.com repository URL. Returns null when the input
-// does not name exactly one repository.
+/**
+ * Parses an "owner/name" pair or a github.com repository URL. Returns null when the input
+ * does not name exactly one repository.
+ */
 export function splitRepoFullName(input: string): { owner: string; repo: string } | null {
   let fullName = input.trim();
 
@@ -63,9 +67,11 @@ export function splitRepoFullName(input: string): { owner: string; repo: string 
   return { owner, repo };
 }
 
-// Decodes a base64-encoded repository file (as returned by the contents API, which wraps
-// base64 in newlines) into UTF-8 text. Files containing NUL bytes in their leading window
-// are reported as binary with empty text rather than decoded to garbage.
+/**
+ * Decodes a base64-encoded repository file (as returned by the contents API, which wraps
+ * base64 in newlines) into UTF-8 text. Files containing NUL bytes in their leading window
+ * are reported as binary with empty text rather than decoded to garbage.
+ */
 export function decodeRepoFileText(base64: string): { text: string; isBinary: boolean } {
   const binary = atob(base64.replace(/\s+/g, ""));
   const bytes = new Uint8Array(binary.length);
@@ -83,9 +89,11 @@ export function decodeRepoFileText(base64: string): { text: string; isBinary: bo
   return { text: new TextDecoder("utf-8").decode(bytes), isBinary: false };
 }
 
-// Filters a recursive tree listing down to the requested directory. The directory entry
-// itself is excluded; with `recursive` false only direct children remain. Paths are
-// compared segment-wise, so "src" never matches "src-extra".
+/**
+ * Filters a recursive tree listing down to the requested directory. The directory entry
+ * itself is excluded; with `recursive` false only direct children remain. Paths are
+ * compared segment-wise, so "src" never matches "src-extra".
+ */
 export function filterTreeEntries<T extends { path: string }>(
   entries: readonly T[],
   path?: string,

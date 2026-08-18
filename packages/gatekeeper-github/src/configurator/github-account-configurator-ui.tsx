@@ -4,8 +4,10 @@ import type {
   GitHubAccountConfiguratorValues,
 } from "./github-account-configurator-types";
 
-// The account resource covers the whole connected GitHub account, so there is nothing to
-// configure: this frame only explains what the connection grants.
+/**
+ * The account resource covers the whole connected GitHub account, so there is nothing to
+ * configure: this frame only explains what the connection grants.
+ */
 export default {
   initial: {},
 
