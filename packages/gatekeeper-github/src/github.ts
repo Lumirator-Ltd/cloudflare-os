@@ -102,10 +102,12 @@ import type {
 } from "./types";
 import TYPES_CODE from "./types.txt";
 import {
+  GitHubAccountConfiguratorUI,
   GitHubIssueConfiguratorUI,
   GitHubPullRequestConfiguratorUI,
   GitHubRepoConfiguratorUI,
 } from "./github-configurators";
+import GITHUB_ACCOUNT_CONFIGURATOR_HTML from "./generated/github-account-configurator-ui.txt";
 import GITHUB_ISSUE_CONFIGURATOR_HTML from "./generated/github-issue-configurator-ui.txt";
 import GITHUB_PULL_REQUEST_CONFIGURATOR_HTML from "./generated/github-pull-request-configurator-ui.txt";
 import GITHUB_REPO_CONFIGURATOR_HTML from "./generated/github-repo-configurator-ui.txt";
@@ -1383,6 +1385,13 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
       const account = this.ctx.exports.UserAccount.get(id);
       return await account.getAccessToken();
     };
+
+    if (resourceUrlPattern === ACCOUNT_RESOURCE.urlPattern) {
+      return {
+        iframeHtml: GITHUB_ACCOUNT_CONFIGURATOR_HTML,
+        ui: new RpcStub(new GitHubAccountConfiguratorUI()),
+      };
+    }
 
     if (resourceUrlPattern === REPO_RESOURCE.urlPattern) {
       return {

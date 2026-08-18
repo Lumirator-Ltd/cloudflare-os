@@ -7,6 +7,7 @@ import {
   type GitHubRepoResponse,
 } from "./github-api";
 import { splitRepoFullName } from "./github-code";
+import type { GitHubAccountConfiguratorRpc } from "./configurator/github-account-configurator-types";
 import type { GitHubIssueConfiguratorRpc } from "./configurator/github-issue-configurator-types";
 import type { GitHubPullRequestConfiguratorRpc } from "./configurator/github-pull-request-configurator-types";
 import type { GitHubRepoConfiguratorRpc } from "./configurator/github-repo-configurator-types";
@@ -95,6 +96,11 @@ function pullRequestSearchOption(pullRequest: GitHubIssueResponse) {
     meta: pullRequest.state,
   };
 }
+
+// Capability exposed to the account configurator iframe. The account resource has no
+// configuration inputs, so the capability carries no methods.
+@validateRpc()
+export class GitHubAccountConfiguratorUI extends RpcTarget implements GitHubAccountConfiguratorRpc {}
 
 // Capability exposed to the configurator iframe.
 @validateRpc()
