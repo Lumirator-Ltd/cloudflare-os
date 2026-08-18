@@ -318,6 +318,10 @@ const VIEWER_CACHE_TTL_MS = 5 * 60 * 1000;
 const CODE_SEARCH_CACHE_TTL_MS = 60 * 1000;
 // The contents API returns base64 content only for files up to 1 MB.
 const MAX_FILE_SIZE_BYTES = 1024 * 1024;
+// GitHub Search exposes only the first 1,000 results of any query.
+const GITHUB_SEARCH_RESULT_CAP = 1000;
+// The contents API returns at most 1,000 entries for a directory listing.
+const CONTENTS_DIRECTORY_LISTING_CAP = 1000;
 const DISCUSSION_SYNC_OVERLAP_MS = 5 * 1000;
 const DISCUSSION_SYNC_BAIL_LIMIT = 500;
 const MAX_REPLY_TARGET_HOPS = 50;
@@ -3790,7 +3794,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     // A truncated root listing cannot be narrowed locally: entries under `path` (or even
     // direct children) may be among the omitted ones. Recover the narrowed view remotely.
     if (tree.truncated && (options.path || options.recursive === false)) {
-      return await this.#codeTreeNarrowed(owner, repo, ref, tree.sha, options, pageSize);
+      return await this.#codeTreeNarrowed(owner, repo, ref, tree, options, pageSize);
     }
 
     const entries = filterTreeEntries(tree.entries, options.path, options.recursive ?? true);
@@ -3812,7 +3816,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     owner: string,
     repo: string,
     ref: string,
-    rootSha: string,
+    rootTree: { sha: string; entries: GitHubTreeEntry[] },
     options: { ref?: string; path?: string; recursive?: boolean },
     pageSize: number,
   ): Promise<GitHubRepoTree> {
@@ -3822,32 +3826,44 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
       const listing = await this.#getDirectoryListing(owner, repo, path, ref);
       return {
         ref,
-        sha: rootSha,
-        truncated: false,
+        sha: rootTree.sha,
+        // A listing at the contents API's cap may itself be incomplete — say so rather
+        // than silently truncate.
+        truncated: listing.length >= CONTENTS_DIRECTORY_LISTING_CAP,
         entries: new ArrayCursor(listing.map(treeEntryFromContentsItem), pageSize),
       };
     }
 
-    // Resolve the directory's tree SHA from its parent's listing, then fetch the subtree.
-    const lastSlash = path.lastIndexOf("/");
-    const parentPath = lastSlash >= 0 ? path.slice(0, lastSlash) : "";
-    const parentListing = await this.#getDirectoryListing(owner, repo, parentPath, ref);
-    const dirEntry = parentListing.find(item => item.path === path);
-    if (!dirEntry) {
-      throw new Error(`${path} does not exist in ${owner}/${repo} at ${ref}.`);
-    }
-    if (dirEntry.type !== "dir") {
-      throw new Error(`${path} in ${owner}/${repo} is a ${dirEntry.type}, not a directory; use readFile to read it.`);
+    // Resolve the directory's tree SHA — from the (truncated) root listing when it made the
+    // cut, else from its parent's contents listing — then fetch the subtree.
+    let dirSha = rootTree.entries.find(entry => entry.path === path && entry.type === "dir")?.sha;
+    if (!dirSha) {
+      const lastSlash = path.lastIndexOf("/");
+      const parentPath = lastSlash >= 0 ? path.slice(0, lastSlash) : "";
+      const parentListing = await this.#getDirectoryListing(owner, repo, parentPath, ref);
+      const dirEntry = parentListing.find(item => item.path === path);
+      if (!dirEntry) {
+        if (parentListing.length >= CONTENTS_DIRECTORY_LISTING_CAP) {
+          throw new Error(
+            `Could not resolve ${path} in ${owner}/${repo} at ${ref}: its parent directory ` +
+            `has more entries than GitHub's ${CONTENTS_DIRECTORY_LISTING_CAP}-entry listing limit.`);
+        }
+        throw new Error(`${path} does not exist in ${owner}/${repo} at ${ref}.`);
+      }
+      if (dirEntry.type !== "dir") {
+        throw new Error(`${path} in ${owner}/${repo} is a ${dirEntry.type}, not a directory; use readFile to read it.`);
+      }
+      dirSha = dirEntry.sha;
     }
 
-    const key = this.#cacheKey("tree", owner, repo, dirEntry.sha);
+    const key = this.#cacheKey("tree", owner, repo, dirSha);
     const subtree = await this.#loadCachedWithEtag<{
       sha: string;
       truncated: boolean;
       entries: GitHubTreeEntry[];
     }>(key, ENTITY_CACHE_TTL_MS, async etag => {
       const result = await this.#withApi(api =>
-        api.getTreeConditional(owner, repo, dirEntry.sha, { ifNoneMatch: etag }));
+        api.getTreeConditional(owner, repo, dirSha, { ifNoneMatch: etag }));
       if (result.status === 304) {
         return result;
       }
@@ -3867,7 +3883,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
 
     return {
       ref,
-      sha: rootSha,
+      sha: rootTree.sha,
       truncated: subtree.truncated,
       entries: new ArrayCursor(prefixTreeEntries(subtree.entries, path), pageSize),
     };
@@ -3956,6 +3972,8 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     const q = buildCodeSearchQuery(scope, query);
     return new StreamingCursor<GitHubCodeSearchResult>({
       fetchPage: async (page, perPage) => {
+        // GitHub Search only exposes the first 1,000 results; requesting beyond that fails.
+        if ((page - 1) * perPage >= GITHUB_SEARCH_RESULT_CAP) return [];
         const key = this.#cacheKey("codeSearch", stableKey({ q, page, perPage }));
         const cached = this.#loadCached<GitHubCodeSearchResult[]>(key, CODE_SEARCH_CACHE_TTL_MS);
         if (cached) return cached;
@@ -4021,6 +4039,8 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     const q = `${JSON.stringify(query.text)} ${scopeQualifier(scope)} fork:true`;
     return new StreamingCursor<GitHubRepoSummary>({
       fetchPage: async (page, perPage) => {
+        // GitHub Search only exposes the first 1,000 results; requesting beyond that fails.
+        if ((page - 1) * perPage >= GITHUB_SEARCH_RESULT_CAP) return [];
         const key = this.#cacheKey("repoSearch", stableKey({ q, page, perPage }));
         const cached = this.#loadCached<GitHubRepoSummary[]>(key, LIST_CACHE_TTL_MS);
         if (cached) return cached;
@@ -4054,6 +4074,8 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     const q = buildScopedIssueSearchQuery(scope, query);
     return new StreamingCursor<GitHubIssueSummary>({
       fetchPage: async (page, perPage) => {
+        // GitHub Search only exposes the first 1,000 results; requesting beyond that fails.
+        if ((page - 1) * perPage >= GITHUB_SEARCH_RESULT_CAP) return [];
         const key = this.#cacheKey("accountIssueSearch",
           stableKey({ q, page, perPage, sort: query.sort, direction: query.direction }));
         const cached = this.#loadCached<GitHubIssueSummary[]>(key, LIST_CACHE_TTL_MS);
