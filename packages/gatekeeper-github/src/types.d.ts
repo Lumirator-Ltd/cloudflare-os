@@ -4,11 +4,43 @@
  * A GitHub repo is a Git repo *plus* issues, pull requests, etc.
  */
 export interface GitHubRepo {
-  // TODO: Add methods to access code. Maybe represent that as `GitRepository`. For now we only
-  //   expose issues and PRs.
-
-  /** Returns basic metadata about the repository. */
+  /** Returns basic metadata about the repository, including its default branch. */
   getMetadata(): Promise<GitHubRepoMetadata>;
+
+  /**
+   * Lists the repository's branches.
+   *
+   * Results are streamed through the returned cursor. Call `next()` repeatedly on that
+   * same cursor until it returns `null`.
+   */
+  listBranches(options?: GitHubPageOptions): Promise<Cursor<GitHubBranch>>;
+
+  /**
+   * Reads the repository's file tree at a ref (default: the default branch).
+   *
+   * Use `path` to restrict the listing to one directory and `recursive: false` to list
+   * only its direct children. Entries are streamed through a cursor; very large repos may
+   * set `truncated` on the result, in which case narrow the listing with `path`.
+   */
+  readTree(options?: GitHubTreeOptions): Promise<GitHubRepoTree>;
+
+  /**
+   * Reads one file's content at a ref (default: the default branch).
+   *
+   * Only text files up to 1 MB can be read; larger files and directories throw, and
+   * binary files return `isBinary: true` with empty `text`.
+   */
+  readFile(path: string, options?: GitHubFileOptions): Promise<GitHubFileContent>;
+
+  /**
+   * Searches file contents in this repository.
+   *
+   * **Code search covers only the repository's default branch** (and only files GitHub
+   * has indexed, < 384 KB). To inspect another branch, use `readTree`/`readFile` with an
+   * explicit `ref` instead. `query.text` is matched as a literal phrase; search
+   * qualifiers in it are not interpreted.
+   */
+  searchCode(query: GitHubCodeSearch): Promise<Cursor<GitHubCodeSearchResult>>;
 
   /**
    * Creates a new issue in this repository.
@@ -157,6 +189,58 @@ export interface GitHubPullRequest extends GitHubIssue {
   merge(options?: GitHubPullRequestMergeOptions): Promise<void>;
 }
 
+/**
+ * Account-wide access to GitHub: discover repositories, search code and issues across
+ * them, and read any accessible repository's branches, file trees, and files.
+ *
+ * Typical flow: `searchCode`/`searchIssues`/`searchRepos` to find which repository is
+ * relevant, then `readTree`/`readFile` to understand its code. Search defaults to
+ * repositories owned by the connected account; pass `owner` or `repo` to reach
+ * organization or collaborator repositories (discover them via `listRepos`).
+ *
+ * This session is read-only and does not expose issue or pull request capabilities.
+ * To work with a repository's issues/PRs or make any changes, request a connection to
+ * that specific repository.
+ */
+export interface GitHubAccount {
+  /** Returns basic metadata about the connected account. */
+  getMetadata(): Promise<GitHubAccountMetadata>;
+
+  /**
+   * Lists repositories the account can access (owned, collaborating, or via an
+   * organization), most recently updated first.
+   */
+  listRepos(options?: GitHubRepoFilter): Promise<Cursor<GitHubRepoSummary>>;
+
+  /** Searches repositories by name/description. Scoped to `query.owner` (default: the
+   *  connected account's login). */
+  searchRepos(query: GitHubRepoSearch): Promise<Cursor<GitHubRepoSummary>>;
+
+  /**
+   * Searches file contents across repositories. **Default branches only** — see
+   * `GitHubAccountCodeSearch` for scoping rules.
+   */
+  searchCode(query: GitHubAccountCodeSearch): Promise<Cursor<GitHubCodeSearchResult>>;
+
+  /**
+   * Searches issues across repositories. Each result carries its repository, so this
+   * answers "which repo discusses X?".
+   */
+  searchIssues(query: GitHubAccountIssueSearch): Promise<Cursor<GitHubIssueSummary>>;
+
+  /** Returns metadata for one accessible repository. `repo` is `"owner/name"`. */
+  getRepoMetadata(repo: string): Promise<GitHubRepoMetadata>;
+
+  /** Lists branches of one accessible repository. `repo` is `"owner/name"`. */
+  listBranches(repo: string, options?: GitHubPageOptions): Promise<Cursor<GitHubBranch>>;
+
+  /** Reads the file tree of one accessible repository. `repo` is `"owner/name"`. */
+  readTree(repo: string, options?: GitHubTreeOptions): Promise<GitHubRepoTree>;
+
+  /** Reads one file from an accessible repository. `repo` is `"owner/name"`. */
+  readFile(repo: string, path: string, options?: GitHubFileOptions): Promise<GitHubFileContent>;
+}
+
 /** Basic information about a GitHub user or bot that appears in issue or review metadata. */
 export type GitHubActor = {
   login: string;
@@ -177,6 +261,141 @@ export type GitHubRepoRef = {
 export type GitHubRepoMetadata = GitHubRepoRef & {
   description?: string;
   visibility: "public" | "private" | "internal";
+  /** The repository's default branch (e.g. `"main"`). */
+  defaultBranch: string;
+}
+
+/** A branch in a repository. */
+export type GitHubBranch = {
+  name: string;
+  /** The commit SHA the branch currently points at. */
+  sha: string;
+  protected?: boolean;
+}
+
+/** Options for reading a repository file tree. */
+export type GitHubTreeOptions = GitHubPageOptions & {
+  /** Branch, tag, or commit SHA. Defaults to the repository's default branch. */
+  ref?: string;
+  /** Restrict the listing to this directory. */
+  path?: string;
+  /** When false, list only the direct children of `path`. Defaults to true. */
+  recursive?: boolean;
+}
+
+/** One entry in a repository file tree. */
+export type GitHubTreeEntry = {
+  /** Path relative to the repository root. */
+  path: string;
+  type: "file" | "dir" | "submodule" | "symlink";
+  sha: string;
+  /** File size in bytes (files only). */
+  size?: number;
+}
+
+/** A repository file tree pinned to a specific ref. */
+export type GitHubRepoTree = {
+  /** The ref the tree was read at. */
+  ref: string;
+  /** The SHA of the root tree object. */
+  sha: string;
+  /** True if GitHub truncated the listing (very large repos); narrow with `path`. */
+  truncated: boolean;
+  entries: Cursor<GitHubTreeEntry>;
+}
+
+/** Options for reading a file. */
+export type GitHubFileOptions = {
+  /** Branch, tag, or commit SHA. Defaults to the repository's default branch. */
+  ref?: string;
+}
+
+/** The content of one repository file. */
+export type GitHubFileContent = {
+  path: string;
+  /** The ref the file was read at. */
+  ref: string;
+  sha: string;
+  /** File size in bytes. */
+  size: number;
+  /** The decoded UTF-8 text. Empty when `isBinary`. */
+  text: string;
+  isBinary: boolean;
+  url?: string;
+}
+
+/**
+ * A code search query. Code search covers **only the default branch** of each repository;
+ * use `readTree`/`readFile` with an explicit `ref` for other branches.
+ */
+export type GitHubCodeSearch = GitHubPageOptions & {
+  /** Text to match in file contents, as a literal phrase. */
+  text: string;
+  /** Restrict matches to files under this path. */
+  path?: string;
+  /** Restrict matches to files with this extension (e.g. `"ts"`). */
+  extension?: string;
+}
+
+/** One code search match. */
+export type GitHubCodeSearchResult = {
+  repo: GitHubRepoRef;
+  /** Path of the matching file. */
+  path: string;
+  url: string;
+  /** Matching source fragments. */
+  matches: string[];
+}
+
+/** Basic metadata about the connected GitHub account. */
+export type GitHubAccountMetadata = {
+  login: string;
+  displayName?: string;
+  url: string;
+  avatarUrl?: string;
+}
+
+/** Filters for listing the account's repositories. */
+export type GitHubRepoFilter = GitHubPageOptions & {
+  /** Restrict by the account's relationship to the repo. Defaults to all of them. */
+  affiliation?: "owner" | "collaborator" | "organizationMember" | "all";
+}
+
+/** Filters for searching repositories. */
+export type GitHubRepoSearch = GitHubPageOptions & {
+  text: string;
+  /** A user or organization to search in. Defaults to the connected account's login. */
+  owner?: string;
+}
+
+/** A repository summary returned from account-level list and search operations. */
+export type GitHubRepoSummary = GitHubRepoMetadata & {
+  updatedAt?: Date;
+  archived?: boolean;
+  fork?: boolean;
+  /** The repository's primary language, if GitHub has detected one. */
+  language?: string;
+}
+
+/**
+ * An account-wide code search. Defaults to repositories **owned by** the connected
+ * account (`user:` scope). GitHub search cannot express "everything my account can
+ * access" in one query, so to search an organization's or collaborator's repository,
+ * pass `owner` or `repo` explicitly (discover them via `listRepos`).
+ */
+export type GitHubAccountCodeSearch = GitHubCodeSearch & {
+  /** A user or organization to search in. Defaults to the connected account's login. */
+  owner?: string;
+  /** A single repository (`"owner/name"`) to search in. Overrides `owner`. */
+  repo?: string;
+}
+
+/** An account-wide issue search. Scoping works like `GitHubAccountCodeSearch`. */
+export type GitHubAccountIssueSearch = GitHubIssueSearch & {
+  /** A user or organization to search in. Defaults to the connected account's login. */
+  owner?: string;
+  /** A single repository (`"owner/name"`) to search in. Overrides `owner`. */
+  repo?: string;
 }
 
 /** A GitHub label attached to an issue or pull request. */
