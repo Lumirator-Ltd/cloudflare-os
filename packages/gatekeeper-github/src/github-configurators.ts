@@ -6,6 +6,8 @@ import {
   type GitHubPullRequestResponse,
   type GitHubRepoResponse,
 } from "./github-api";
+import { splitRepoFullName } from "./github-code";
+import type { GitHubAccountConfiguratorRpc } from "./configurator/github-account-configurator-types";
 import type { GitHubIssueConfiguratorRpc } from "./configurator/github-issue-configurator-types";
 import type { GitHubPullRequestConfiguratorRpc } from "./configurator/github-pull-request-configurator-types";
 import type { GitHubRepoConfiguratorRpc } from "./configurator/github-repo-configurator-types";
@@ -13,8 +15,6 @@ import type { GitHubRepoConfiguratorRpc } from "./configurator/github-repo-confi
 type ConfiguratorOption = { value: string; title: string; subtitle?: string; meta?: string };
 
 const AUTOCOMPLETE_OPTION_LIMIT = 100;
-const GITHUB_OWNER_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/;
-const GITHUB_REPO_PATTERN = /^[A-Za-z0-9._-]+$/;
 
 const githubTokenGetters = new WeakMap<object, () => Promise<string>>();
 // Per-instance cache of the authenticated user's login. Used to scope `searchRepos` to repos
@@ -47,26 +47,6 @@ function repoToOption(repo: GitHubRepoResponse): ConfiguratorOption {
     subtitle: repo.description ?? undefined,
     meta: repo.visibility ?? (repo.private ? "private" : "public"),
   };
-}
-
-function splitRepoFullName(input: string): { owner: string; repo: string } | null {
-  let fullName = input.trim();
-
-  if (/^https?:\/\//i.test(fullName)) {
-    try {
-      const url = new URL(fullName);
-      if (url.hostname.toLowerCase() !== "github.com") return null;
-      fullName = url.pathname.replace(/^\/+|\/+$/g, "");
-    } catch {
-      return null;
-    }
-  }
-
-  const [owner, rawRepo, ...rest] = fullName.split("/");
-  if (!owner || !rawRepo || rest.length > 0) return null;
-  const repo = rawRepo.replace(/\.git$/i, "");
-  if (!GITHUB_OWNER_PATTERN.test(owner) || !GITHUB_REPO_PATTERN.test(repo)) return null;
-  return { owner, repo };
 }
 
 function optionMatches(parts: (string | undefined | null)[], query: string): boolean {
@@ -116,6 +96,11 @@ function pullRequestSearchOption(pullRequest: GitHubIssueResponse) {
     meta: pullRequest.state,
   };
 }
+
+// Capability exposed to the account configurator iframe. The account resource has no
+// configuration inputs, so the capability carries no methods.
+@validateRpc()
+export class GitHubAccountConfiguratorUI extends RpcTarget implements GitHubAccountConfiguratorRpc {}
 
 // Capability exposed to the configurator iframe.
 @validateRpc()

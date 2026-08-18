@@ -25,6 +25,50 @@ export type GitHubRepoResponse = {
   visibility?: "public" | "private" | "internal";
   private?: boolean;
   owner: GitHubSimpleUser;
+  default_branch?: string;
+  updated_at?: string;
+  archived?: boolean;
+  fork?: boolean;
+  language?: string | null;
+};
+
+export type GitHubBranchResponse = {
+  name: string;
+  commit: { sha: string };
+  protected?: boolean;
+};
+
+export type GitHubTreeEntryResponse = {
+  path: string;
+  mode: string;
+  type: "blob" | "tree" | "commit";
+  sha: string;
+  size?: number;
+};
+
+export type GitHubTreeResponse = {
+  sha: string;
+  truncated: boolean;
+  tree: GitHubTreeEntryResponse[];
+};
+
+export type GitHubContentsResponse = {
+  type: "file" | "dir" | "symlink" | "submodule";
+  name: string;
+  path: string;
+  sha: string;
+  size: number;
+  encoding?: "base64" | "none";
+  content?: string;
+  html_url?: string | null;
+};
+
+export type GitHubCodeSearchItemResponse = {
+  path: string;
+  sha: string;
+  html_url: string;
+  repository: { full_name: string };
+  text_matches?: { fragment?: string }[];
 };
 
 export type GitHubIssueResponse = {
@@ -480,6 +524,83 @@ export class GitHubApi {
     order?: "asc" | "desc";
   }): Promise<GitHubRepoResponse[]> {
     const result = await this.#request<{ items: GitHubRepoResponse[] }>("GET", "/search/repositories", { query: options });
+    return result.data.items;
+  }
+
+  /**
+   * Returns the account type (`"User"` or `"Organization"`) of a repository owner, used to
+   * pick the right search scope qualifier (`user:` vs `org:`).
+   */
+  async getOwnerType(owner: string): Promise<string | undefined> {
+    const result = await this.#request<{ type?: string }>(
+      "GET",
+      `/users/${encodeURIComponent(owner)}`,
+    );
+    return result.data.type;
+  }
+
+  async listBranches(owner: string, repo: string, options: {
+    per_page: number;
+    page: number;
+  }): Promise<GitHubBranchResponse[]> {
+    const result = await this.#request<GitHubBranchResponse[]>(
+      "GET",
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/branches`,
+      { query: options },
+    );
+    return result.data;
+  }
+
+  /**
+   * Fetches the full recursive tree for a ref (branch, tag, or commit SHA). Always
+   * recursive: one cached response serves every subtree/depth view. GitHub sets
+   * `truncated` when the listing exceeds its limits (100k entries / 7 MB).
+   */
+  async getTreeConditional(
+    owner: string,
+    repo: string,
+    ref: string,
+    options: ConditionalRequestOptions = {},
+  ): Promise<ConditionalRequestResult<GitHubTreeResponse>> {
+    return await this.#conditionalGet<GitHubTreeResponse>(
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/trees/${encodeURIComponent(ref)}`,
+      { recursive: "1" },
+      options,
+    );
+  }
+
+  /**
+   * Fetches file or directory contents at a path. Directories return an array. Files
+   * over 1 MB come back without base64 content (`encoding: "none"`).
+   */
+  async getContentsConditional(
+    owner: string,
+    repo: string,
+    path: string,
+    ref?: string,
+    options: ConditionalRequestOptions = {},
+  ): Promise<ConditionalRequestResult<GitHubContentsResponse | GitHubContentsResponse[]>> {
+    const encodedPath = path.split("/").map(encodeURIComponent).join("/");
+    return await this.#conditionalGet<GitHubContentsResponse | GitHubContentsResponse[]>(
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${encodedPath}`,
+      ref !== undefined ? { ref } : undefined,
+      options,
+    );
+  }
+
+  /**
+   * GitHub's code search endpoint. Only indexes the default branch of each repository.
+   * The text-match media type includes matching source fragments in the response.
+   */
+  async searchCode(options: {
+    q: string;
+    per_page: number;
+    page: number;
+  }): Promise<GitHubCodeSearchItemResponse[]> {
+    const result = await this.#request<{ items: GitHubCodeSearchItemResponse[] }>("GET", "/search/code", {
+      query: options,
+      headers: { Accept: "application/vnd.github.text-match+json" },
+    });
     return result.data.items;
   }
 

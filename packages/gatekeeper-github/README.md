@@ -10,6 +10,17 @@ This package provides GitHub OAuth integration for Gadgets. It serves two purpos
   (`repo read:user user:email`) are requested so gadgets can access repositories, issues, and pull
   requests on the user's behalf.
 
+Four resource types can be bound to a gadget:
+
+- **GitHub Account** — account-wide, read-only discovery: list/search repositories, search code
+  and issues across them, and read any accessible repository's branches, file trees, and files.
+  Code search covers only each repository's default branch. Account-wide connections cannot be
+  shared with collaborators; issues, pull requests, and write access require a repository-scoped
+  connection.
+- **GitHub Repository** — issues, pull requests, reviews, and discussions of one repository, plus
+  read-only code access (branches, file trees, files at any ref, and default-branch code search).
+- **GitHub Issue** / **GitHub Pull Request** — a single issue or pull request.
+
 > **Use a GitHub _OAuth App_, not a GitHub _App_.** Only OAuth Apps honor the OAuth `scope`
 > parameter, which is what makes the minimal-on-login / full-on-connect behavior work, and the
 > `user:email` scope is what grants access to the user's verified email. A **GitHub App** (client id
@@ -71,7 +82,7 @@ Users are keyed by their GitHub primary verified email, so the OAuth App must be
 2. Create or open a gadget.
 3. Navigate to the **Connections** tab.
 4. Click **+ New Connection**.
-5. Choose a GitHub resource type: repository, issue, or pull request.
+5. Choose a GitHub resource type: account, repository, issue, or pull request.
 6. If prompted, connect a GitHub account.
 7. You should be redirected to GitHub's authorization page in a new tab.
 8. After granting access, the tab closes, and you're back to Gadgets.
