@@ -3,6 +3,7 @@ import {
   decodeRepoFileText,
   filterTreeEntries,
   parseGitHubResourceUrl,
+  prefixTreeEntries,
   splitRepoFullName,
 } from "../src/github-code";
 
@@ -100,6 +101,18 @@ describe("decodeRepoFileText", () => {
   it("flags content containing NUL bytes as binary and omits text", () => {
     const base64 = toBase64(new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01]));
     expect(decodeRepoFileText(base64)).toEqual({ text: "", isBinary: true });
+  });
+});
+
+describe("prefixTreeEntries", () => {
+  it("prefixes subtree-relative paths with the subtree path", () => {
+    expect(prefixTreeEntries([{ path: "a.ts" }, { path: "lib/b.ts" }], "src"))
+      .toEqual([{ path: "src/a.ts" }, { path: "src/lib/b.ts" }]);
+  });
+
+  it("tolerates trailing slashes and empty paths", () => {
+    expect(prefixTreeEntries([{ path: "a.ts" }], "src/")).toEqual([{ path: "src/a.ts" }]);
+    expect(prefixTreeEntries([{ path: "a.ts" }], "")).toEqual([{ path: "a.ts" }]);
   });
 });
 

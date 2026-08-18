@@ -3,13 +3,16 @@ import type { GitHubIssueSearch } from "./types";
 
 /**
  * The scope a search is confined to: a single repository, or every repository owned by
- * `owner` (GitHub's `user:` qualifier — note this does not cover org/collaborator repos the
- * account can merely access).
+ * `owner` (GitHub's `user:`/`org:` qualifier — note this does not cover repos the account
+ * can merely access as a collaborator). `ownerIsOrg` selects the `org:` qualifier, which
+ * GitHub requires for organization owners.
  */
-export type GitHubSearchScope = { owner: string; repo?: string };
+export type GitHubSearchScope = { owner: string; repo?: string; ownerIsOrg?: boolean };
 
-function scopeQualifier(scope: GitHubSearchScope): string {
-  return scope.repo ? `repo:${scope.owner}/${scope.repo}` : `user:${scope.owner}`;
+/** The GitHub search qualifier that confines a query to `scope`. */
+export function scopeQualifier(scope: GitHubSearchScope): string {
+  if (scope.repo) return `repo:${scope.owner}/${scope.repo}`;
+  return scope.ownerIsOrg ? `org:${scope.owner}` : `user:${scope.owner}`;
 }
 
 export function buildScopedIssueSearchQuery(scope: GitHubSearchScope, query: GitHubIssueSearch): string {

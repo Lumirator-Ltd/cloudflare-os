@@ -98,6 +98,11 @@ describe("buildCodeSearchQuery", () => {
       .toBe('"alarm" user:cloudflare');
   });
 
+  it("uses the org qualifier for organization owners", () => {
+    expect(buildCodeSearchQuery({ owner: "cloudflare", ownerIsOrg: true }, { text: "alarm" }))
+      .toBe('"alarm" org:cloudflare');
+  });
+
   it("quotes qualifier-injection attempts in every caller field", () => {
     expect(buildCodeSearchQuery({ owner: "cloudflare", repo: "workerd" }, {
       text: "alarm repo:evil/repo",
@@ -159,6 +164,11 @@ describe("buildScopedIssueSearchQuery", () => {
   it("scopes owner-only searches with the user qualifier", () => {
     expect(buildScopedIssueSearchQuery({ owner: "cloudflare" }, { text: "bug", state: "open" }))
       .toBe('"bug" user:cloudflare is:issue state:open');
+  });
+
+  it("uses the org qualifier for organization owners", () => {
+    expect(buildScopedIssueSearchQuery({ owner: "cloudflare", ownerIsOrg: true }, { text: "bug" }))
+      .toBe('"bug" org:cloudflare is:issue');
   });
 });
 
@@ -226,6 +236,15 @@ describe("GitHubApi.getTreeConditional", () => {
 
     expect(requests[0].url.pathname).toBe("/repos/cloudflare/workerd/git/trees/feature%2Fx");
     expect(requests[0].url.searchParams.get("recursive")).toBe("1");
+  });
+});
+
+describe("GitHubApi.getOwnerType", () => {
+  it("reads the owner's account type from the users endpoint", async () => {
+    const requests = stubFetch({ type: "Organization" });
+    const api = new GitHubApi(async () => "test-token");
+    expect(await api.getOwnerType("cloudflare")).toBe("Organization");
+    expect(requests[0].url.pathname).toBe("/users/cloudflare");
   });
 });
 

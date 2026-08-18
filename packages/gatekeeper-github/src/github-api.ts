@@ -527,6 +527,18 @@ export class GitHubApi {
     return result.data.items;
   }
 
+  /**
+   * Returns the account type (`"User"` or `"Organization"`) of a repository owner, used to
+   * pick the right search scope qualifier (`user:` vs `org:`).
+   */
+  async getOwnerType(owner: string): Promise<string | undefined> {
+    const result = await this.#request<{ type?: string }>(
+      "GET",
+      `/users/${encodeURIComponent(owner)}`,
+    );
+    return result.data.type;
+  }
+
   async listBranches(owner: string, repo: string, options: {
     per_page: number;
     page: number;

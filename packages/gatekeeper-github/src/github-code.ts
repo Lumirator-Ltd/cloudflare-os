@@ -90,6 +90,16 @@ export function decodeRepoFileText(base64: string): { text: string; isBinary: bo
 }
 
 /**
+ * Prefixes subtree-relative entry paths with the subtree's own path, so entries fetched
+ * from a subtree object line up with entries of a root-level recursive listing.
+ */
+export function prefixTreeEntries<T extends { path: string }>(entries: readonly T[], path: string): T[] {
+  const normalizedPath = path.replace(/\/+$/, "");
+  if (normalizedPath.length === 0) return [...entries];
+  return entries.map(entry => ({ ...entry, path: `${normalizedPath}/${entry.path}` }));
+}
+
+/**
  * Filters a recursive tree listing down to the requested directory. The directory entry
  * itself is excluded; with `recursive` false only direct children remain. Paths are
  * compared segment-wise, so "src" never matches "src-extra".

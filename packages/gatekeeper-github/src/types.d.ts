@@ -195,8 +195,8 @@ export interface GitHubPullRequest extends GitHubIssue {
  *
  * Typical flow: `searchCode`/`searchIssues`/`searchRepos` to find which repository is
  * relevant, then `readTree`/`readFile` to understand its code. Search defaults to
- * repositories owned by the connected account; pass `owner` or `repo` to reach
- * organization or collaborator repositories (discover them via `listRepos`).
+ * repositories owned by the connected account; pass `owner` (a user or organization) or
+ * `repo` to reach other repositories (discover them via `listRepos`).
  *
  * This session is read-only and does not expose issue or pull request capabilities.
  * To work with a repository's issues/PRs or make any changes, request a connection to
@@ -379,9 +379,10 @@ export type GitHubRepoSummary = GitHubRepoMetadata & {
 
 /**
  * An account-wide code search. Defaults to repositories **owned by** the connected
- * account (`user:` scope). GitHub search cannot express "everything my account can
- * access" in one query, so to search an organization's or collaborator's repository,
- * pass `owner` or `repo` explicitly (discover them via `listRepos`).
+ * account. GitHub search cannot express "everything my account can access" in one query,
+ * so to search another user's or an organization's repositories, pass `owner` (user or
+ * organization — detected automatically) or a single `repo` explicitly (discover them via
+ * `listRepos`).
  */
 export type GitHubAccountCodeSearch = GitHubCodeSearch & {
   /** A user or organization to search in. Defaults to the connected account's login. */

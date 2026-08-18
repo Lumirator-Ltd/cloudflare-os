@@ -31,6 +31,7 @@ import {
   type GitHubLabelResponse,
   type GitHubPullFileResponse,
   type GitHubPullRequestResponse,
+  type GitHubContentsResponse,
   type GitHubPullRequestReviewCommentResponse,
   type GitHubRepoResponse,
   type GitHubTreeEntryResponse,
@@ -43,12 +44,14 @@ import {
   buildCodeSearchQuery,
   buildIssueSearchQuery,
   buildScopedIssueSearchQuery,
+  scopeQualifier,
   type GitHubSearchScope,
 } from "./github-search";
 import {
   decodeRepoFileText,
   filterTreeEntries,
   parseGitHubResourceUrl,
+  prefixTreeEntries,
   splitRepoFullName,
 } from "./github-code";
 import GITHUB_LOGO_SVG from "./github-logo.svg";
@@ -487,6 +490,18 @@ function branchFromResponse(branch: GitHubBranchResponse): GitHubBranch {
     name: branch.name,
     sha: branch.commit.sha,
     protected: branch.protected,
+  };
+}
+
+function treeEntryFromContentsItem(item: GitHubContentsResponse): GitHubTreeEntry {
+  return {
+    path: item.path,
+    type: item.type === "dir" ? "dir"
+      : item.type === "submodule" ? "submodule"
+      : item.type === "symlink" ? "symlink"
+      : "file",
+    sha: item.sha,
+    size: item.type === "file" ? item.size : undefined,
   };
 }
 
@@ -2270,7 +2285,9 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
   }
 
   async #getRepoMetadataFor(owner: string, repo: string): Promise<GitHubRepoMetadata> {
-    const key = this.#cacheKey("repo", owner, repo);
+    // "v2": older records lack `defaultBranch`, and reusing their key would let an ETag 304
+    // refresh the stale shape indefinitely.
+    const key = this.#cacheKey("repo", "v2", owner, repo);
     return await this.#loadCachedWithEtag<GitHubRepoMetadata>(key, ENTITY_CACHE_TTL_MS, async etag => {
       const result = await this.#withApi(api =>
         api.getRepoConditional(owner, repo, { ifNoneMatch: etag })
@@ -3770,6 +3787,12 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
       };
     });
 
+    // A truncated root listing cannot be narrowed locally: entries under `path` (or even
+    // direct children) may be among the omitted ones. Recover the narrowed view remotely.
+    if (tree.truncated && (options.path || options.recursive === false)) {
+      return await this.#codeTreeNarrowed(owner, repo, ref, tree.sha, options, pageSize);
+    }
+
     const entries = filterTreeEntries(tree.entries, options.path, options.recursive ?? true);
     return {
       ref,
@@ -3777,6 +3800,110 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
       truncated: tree.truncated,
       entries: new ArrayCursor(entries, pageSize),
     };
+  }
+
+  /**
+   * Serves a narrowed `codeTree` view when the recursive root listing was truncated.
+   * Non-recursive views come from the contents API (a complete direct-children listing);
+   * recursive subtree views resolve the directory's own tree SHA via the contents API and
+   * fetch that subtree recursively.
+   */
+  async #codeTreeNarrowed(
+    owner: string,
+    repo: string,
+    ref: string,
+    rootSha: string,
+    options: { ref?: string; path?: string; recursive?: boolean },
+    pageSize: number,
+  ): Promise<GitHubRepoTree> {
+    const path = options.path?.replace(/\/+$/, "") ?? "";
+
+    if (options.recursive === false) {
+      const listing = await this.#getDirectoryListing(owner, repo, path, ref);
+      return {
+        ref,
+        sha: rootSha,
+        truncated: false,
+        entries: new ArrayCursor(listing.map(treeEntryFromContentsItem), pageSize),
+      };
+    }
+
+    // Resolve the directory's tree SHA from its parent's listing, then fetch the subtree.
+    const lastSlash = path.lastIndexOf("/");
+    const parentPath = lastSlash >= 0 ? path.slice(0, lastSlash) : "";
+    const parentListing = await this.#getDirectoryListing(owner, repo, parentPath, ref);
+    const dirEntry = parentListing.find(item => item.path === path);
+    if (!dirEntry) {
+      throw new Error(`${path} does not exist in ${owner}/${repo} at ${ref}.`);
+    }
+    if (dirEntry.type !== "dir") {
+      throw new Error(`${path} in ${owner}/${repo} is a ${dirEntry.type}, not a directory; use readFile to read it.`);
+    }
+
+    const key = this.#cacheKey("tree", owner, repo, dirEntry.sha);
+    const subtree = await this.#loadCachedWithEtag<{
+      sha: string;
+      truncated: boolean;
+      entries: GitHubTreeEntry[];
+    }>(key, ENTITY_CACHE_TTL_MS, async etag => {
+      const result = await this.#withApi(api =>
+        api.getTreeConditional(owner, repo, dirEntry.sha, { ifNoneMatch: etag }));
+      if (result.status === 304) {
+        return result;
+      }
+
+      const entries: GitHubTreeEntry[] = [];
+      for (const entry of result.data.tree) {
+        const mapped = treeEntryFromResponse(entry);
+        if (mapped) entries.push(mapped);
+      }
+
+      return {
+        status: 200,
+        headers: result.headers,
+        data: { sha: result.data.sha, truncated: result.data.truncated, entries },
+      };
+    });
+
+    return {
+      ref,
+      sha: rootSha,
+      truncated: subtree.truncated,
+      entries: new ArrayCursor(prefixTreeEntries(subtree.entries, path), pageSize),
+    };
+  }
+
+  /** Fetches a directory's direct children via the contents API (`""` lists the root). */
+  async #getDirectoryListing(
+    owner: string,
+    repo: string,
+    path: string,
+    ref: string,
+  ): Promise<GitHubContentsResponse[]> {
+    const result = await this.#withApi(api =>
+      api.getContentsConditional(owner, repo, path, ref));
+    if (result.status === 304) {
+      throw new Error("GitHub unexpectedly returned 304 for an unconditional contents request.");
+    }
+    if (!Array.isArray(result.data)) {
+      throw new Error(`${path || "/"} in ${owner}/${repo} is a ${result.data.type}, not a directory; use readFile to read it.`);
+    }
+    return result.data;
+  }
+
+  /**
+   * Resolves whether an owner-only search scope names an organization (GitHub requires the
+   * `org:` qualifier for those). Repo scopes and already-qualified scopes pass through.
+   */
+  async #qualifyScope(scope: GitHubSearchScope): Promise<GitHubSearchScope> {
+    if (scope.repo || scope.ownerIsOrg !== undefined) return scope;
+    const key = this.#cacheKey("ownerType", scope.owner);
+    let ownerType = this.#loadCached<string>(key, VIEWER_CACHE_TTL_MS);
+    if (ownerType === undefined) {
+      ownerType = (await this.#withApi(api => api.getOwnerType(scope.owner))) ?? "User";
+      this.#storeCached(key, ownerType);
+    }
+    return { ...scope, ownerIsOrg: ownerType === "Organization" };
   }
 
   async codeFile(owner: string, repo: string, path: string, ref?: string): Promise<GitHubFileContent> {
@@ -3825,6 +3952,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     query: { text: string; path?: string; extension?: string },
     pageSize: number,
   ): Promise<Cursor<GitHubCodeSearchResult>> {
+    scope = await this.#qualifyScope(scope);
     const q = buildCodeSearchQuery(scope, query);
     return new StreamingCursor<GitHubCodeSearchResult>({
       fetchPage: async (page, perPage) => {
@@ -3889,7 +4017,8 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     query: GitHubRepoSearch,
     pageSize: number,
   ): Promise<Cursor<GitHubRepoSummary>> {
-    const q = `${JSON.stringify(query.text)} user:${scope.owner} fork:true`;
+    scope = await this.#qualifyScope(scope);
+    const q = `${JSON.stringify(query.text)} ${scopeQualifier(scope)} fork:true`;
     return new StreamingCursor<GitHubRepoSummary>({
       fetchPage: async (page, perPage) => {
         const key = this.#cacheKey("repoSearch", stableKey({ q, page, perPage }));
@@ -3921,10 +4050,12 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     query: GitHubAccountIssueSearch,
     pageSize: number,
   ): Promise<Cursor<GitHubIssueSummary>> {
+    scope = await this.#qualifyScope(scope);
     const q = buildScopedIssueSearchQuery(scope, query);
     return new StreamingCursor<GitHubIssueSummary>({
       fetchPage: async (page, perPage) => {
-        const key = this.#cacheKey("accountIssueSearch", stableKey({ q, page, perPage }));
+        const key = this.#cacheKey("accountIssueSearch",
+          stableKey({ q, page, perPage, sort: query.sort, direction: query.direction }));
         const cached = this.#loadCached<GitHubIssueSummary[]>(key, LIST_CACHE_TTL_MS);
         if (cached) return cached;
 
