@@ -179,6 +179,68 @@ describe("assertIssueSearchResultsInScope", () => {
   });
 });
 
+type StubbedRequest = { url: URL; headers: Headers };
+
+function stubFetch(body: unknown): StubbedRequest[] {
+  const requests: StubbedRequest[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+    requests.push({ url: new URL(String(input)), headers: new Headers(init?.headers) });
+    return new Response(JSON.stringify(body), {
+      headers: { "content-type": "application/json" },
+    });
+  }));
+  return requests;
+}
+
+describe("GitHubApi.searchCode", () => {
+  it("requests text-match fragments and passes query and paging params", async () => {
+    const requests = stubFetch({ items: [] });
+    const api = new GitHubApi(async () => "test-token");
+    await api.searchCode({ q: '"alarm" repo:cloudflare/workerd', per_page: 30, page: 2 });
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0].url.pathname).toBe("/search/code");
+    expect(requests[0].url.searchParams.get("q")).toBe('"alarm" repo:cloudflare/workerd');
+    expect(requests[0].url.searchParams.get("per_page")).toBe("30");
+    expect(requests[0].url.searchParams.get("page")).toBe("2");
+    expect(requests[0].headers.get("Accept")).toBe("application/vnd.github.text-match+json");
+  });
+});
+
+describe("GitHubApi.getContentsConditional", () => {
+  it("encodes path segments individually and passes the ref", async () => {
+    const requests = stubFetch({ type: "file", content: "", encoding: "base64" });
+    const api = new GitHubApi(async () => "test-token");
+    await api.getContentsConditional("cloudflare", "workerd", "src/a b/c#d.ts", "feature/x");
+
+    expect(requests[0].url.pathname).toBe("/repos/cloudflare/workerd/contents/src/a%20b/c%23d.ts");
+    expect(requests[0].url.searchParams.get("ref")).toBe("feature/x");
+  });
+});
+
+describe("GitHubApi.getTreeConditional", () => {
+  it("requests the recursive tree for an encoded ref", async () => {
+    const requests = stubFetch({ sha: "abc", truncated: false, tree: [] });
+    const api = new GitHubApi(async () => "test-token");
+    await api.getTreeConditional("cloudflare", "workerd", "feature/x");
+
+    expect(requests[0].url.pathname).toBe("/repos/cloudflare/workerd/git/trees/feature%2Fx");
+    expect(requests[0].url.searchParams.get("recursive")).toBe("1");
+  });
+});
+
+describe("GitHubApi.listBranches", () => {
+  it("pages through the branches endpoint", async () => {
+    const requests = stubFetch([]);
+    const api = new GitHubApi(async () => "test-token");
+    await api.listBranches("cloudflare", "workerd", { per_page: 100, page: 3 });
+
+    expect(requests[0].url.pathname).toBe("/repos/cloudflare/workerd/branches");
+    expect(requests[0].url.searchParams.get("per_page")).toBe("100");
+    expect(requests[0].url.searchParams.get("page")).toBe("3");
+  });
+});
+
 describe("GitHubApi.searchIssuesConditional", () => {
   it("enables GitHub advanced search parsing", async () => {
     let requestUrl: URL | undefined;
