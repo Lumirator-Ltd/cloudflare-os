@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, type ChangeEvent } from 'react'
+import { useNavigate } from '@tanstack/react-router'
 import { RpcStub } from 'capnweb'
 import { Switch, Textarea, Input, Button, Tabs, useKumoToastManager } from '@cloudflare/kumo'
 import { Hexagon, ShieldWarning, UserPlus } from '@phosphor-icons/react'
@@ -9,6 +10,7 @@ import { cacheBustSiteLogoUrl, prepareSiteLogo } from './siteLogoUtils'
 import SiteLogo from './components/SiteLogo'
 import { useDocumentTitle } from './useDocumentTitle'
 import AdminFormatsPanel from './components/format/AdminFormatsPanel'
+import { adminTabFromSearch, type AdminTab } from './adminNavigation'
 
 // Preset accent colors offered in the Theme section ('' = default brand).
 const ACCENT_PRESETS: { label: string; value: string }[] = [
@@ -30,8 +32,9 @@ const BANNER_SWATCH: Record<BannerColor, string> = {
   brand: 'var(--color-accent-100)',
 }
 
-export default function AdminPage() {
+export default function AdminPage({ activeTab = 'general' }: { activeTab?: AdminTab }) {
   const { authenticatedApi, isAdmin } = useAuthenticatedApi()
+  const navigate = useNavigate()
   const toasts = useKumoToastManager()
   useDocumentTitle('Admin')
 
@@ -79,8 +82,6 @@ export default function AdminPage() {
   // Gatekeeper resource config, and the set of resource keys ("vendorId\u0000urlPattern") busy toggling.
   const [resourceVendors, setResourceVendors] = useState<AdminResourceVendor[]>([])
   const [resourceBusy, setResourceBusy] = useState<Set<string>>(new Set())
-
-  const [activeTab, setActiveTab] = useState('general')
 
   // Promoted output formats, in menu order (see AdminFormatsPanel).
   const [formats, setFormats] = useState<AdminFormat[]>([])
@@ -398,7 +399,14 @@ export default function AdminPage() {
       <Tabs
         variant="underline"
         value={activeTab}
-        onValueChange={setActiveTab}
+        onValueChange={(value) => {
+          const tab = adminTabFromSearch(value)
+          navigate({
+            to: '/admin',
+            search: tab === 'general' ? {} : { tab },
+            replace: true,
+          })
+        }}
         tabs={[
           { value: 'general', label: 'General' },
           { value: 'gatekeepers', label: 'Gatekeepers' },

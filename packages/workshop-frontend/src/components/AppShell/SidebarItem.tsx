@@ -4,16 +4,19 @@ import type { ReactNode } from 'react'
 /**
  * A single nav row in the sidebar. Renders as a TanStack <Link>. Active state is computed from the
  * current router pathname so we can also tint the icon (TanStack's activeProps only swaps top-level
- * className, not child styles). When `collapsed` is true the label is hidden but kept in the DOM for
- * screen readers / hover-tooltips.
+ * className, not child styles). Collapsed rows expose the label through an accessible name and
+ * hover tooltip.
  */
 export type SidebarItemProps = {
   icon: ReactNode
   label: string
   to: LinkProps['to']
   params?: LinkProps['params']
+  search?: LinkProps['search']
   trailing?: ReactNode
   collapsed?: boolean
+  /** Overrides the pathname-based active state when provided. */
+  active?: boolean
   /** When true, match this item active when the current path starts with `to`. */
   matchPrefix?: boolean
 }
@@ -23,8 +26,10 @@ export default function SidebarItem({
   label,
   to,
   params,
+  search,
   trailing,
   collapsed = false,
+  active,
   matchPrefix = false,
 }: SidebarItemProps) {
   // Resolve the active path manually so we can style the icon as well as the row. For parameterized
@@ -36,16 +41,23 @@ export default function SidebarItem({
       target = target.replaceAll(`$${key}`, String(value))
     }
   }
-  const isActive = matchPrefix
+  const isActive = active ?? (matchPrefix
     ? pathname === target || pathname.startsWith(target + '/')
-    : pathname === target
+    : pathname === target)
 
   // Kept loose: the generated route-tree union is stricter than is convenient for a generic row.
-  const linkProps = { to, params } as unknown as LinkProps
+  const linkProps = (search === undefined ? { to, params } : { to, params, search }) as unknown as LinkProps
+  // When a caller supplies a controlled active state, make TanStack's accessible active state use
+  // the same exact path/search semantics instead of its default fuzzy, subset search matching.
+  const activeOptions = active === undefined
+    ? undefined
+    : { exact: true, includeSearch: true, explicitUndefined: true }
 
   return (
     <Link
       {...linkProps}
+      activeOptions={activeOptions}
+      aria-label={collapsed ? label : undefined}
       title={collapsed ? label : undefined}
       className={[
         'group relative flex h-8 items-center gap-2.5 rounded-lg px-2.5 text-[13px] leading-[18px] tracking-[-0.25px] transition-colors',
