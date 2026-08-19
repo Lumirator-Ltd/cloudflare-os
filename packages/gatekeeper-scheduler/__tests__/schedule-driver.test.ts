@@ -725,7 +725,20 @@ describe("ScheduleDriver", () => {
       });
     });
 
-    await runDurableObjectAlarm(driver);
+    // Hold callbacks open until the driver fills its concurrency window. A short timer here was
+    // scheduler-dependent and sometimes observed only three concurrent callbacks on CI runners.
+    await testEnv.TEST_HOOKS.blockAt("callback");
+    const alarm = runDurableObjectAlarm(driver);
+    try {
+      await vi.waitFor(async () => {
+        const events = (await testEnv.TEST_HOOKS.read()).events;
+        expect(events.filter((event) => event.startsWith("callback:"))).toHaveLength(4);
+      });
+      expect((await testEnv.TEST_HOOKS.read()).maxActiveCallbacks).toBe(4);
+    } finally {
+      await testEnv.TEST_HOOKS.release();
+      await alarm;
+    }
     await vi.waitFor(async () => {
       const events = (await testEnv.TEST_HOOKS.read()).events;
       expect(events.filter((event) => event.startsWith("callback:"))).toHaveLength(21);

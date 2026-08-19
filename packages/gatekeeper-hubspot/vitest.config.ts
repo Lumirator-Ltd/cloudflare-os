@@ -25,6 +25,6 @@ export default defineConfig({
   ],
   test: {
     include: ["__tests__/*.test.ts"],
-    setupFiles: ["../../test-setup/assert-workerd.ts"],
+    setupFiles: ["../../scripts/assert-workerd.ts"],
   },
 });
