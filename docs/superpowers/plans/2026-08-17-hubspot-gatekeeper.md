@@ -25,7 +25,7 @@
 - Create: `packages/gatekeeper-hubspot/src/configurator/account-configurator-types.d.ts`
 - Create: `packages/gatekeeper-hubspot/src/configurator/account-configurator-types.txt`
 - Create: `packages/gatekeeper-hubspot/src/configurator/account-configurator-ui.tsx`
-- Create: `scripts/testdata/fixture-bundles/gatekeeper-hubspot/hubspot.js`
+- Create: `scripts/release/testdata/fixture-bundles/gatekeeper-hubspot/hubspot.js`
 - Modify: `pnpm-lock.yaml`
 - Test: `scripts/release-manifest.test.js`
 
@@ -66,7 +66,7 @@ Expected: PASS and installable HubSpot entry with `CLIENT_ID`, `CLIENT_SECRET`, 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add packages/gatekeeper-hubspot pnpm-lock.yaml scripts/testdata
+git add packages/gatekeeper-hubspot pnpm-lock.yaml scripts/release/testdata
 git commit -m "feat: scaffold HubSpot gatekeeper"
 ```
 

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 import test from "node:test";
 
 const packageJson = JSON.parse(
@@ -8,8 +8,17 @@ const packageJson = JSON.parse(
 
 test("test script builds format blueprints before workspace tests", () => {
   assert.deepEqual(packageJson.scripts.test.split(" && "), [
-    "node --test scripts/*.test.js",
-    "pnpm --filter @gadgets/workshop-backend build:format-blueprints",
+    "node --test 'scripts/**/*.test.ts' scripts/*.test.js",
+    "vp run --filter @gadgets/workshop-backend --no-cache build:format-blueprints",
     "vp run --filter '!cloudflare-os' --cache test",
   ]);
+});
+
+test("fork cannot expose upstream preview deployment paths", async () => {
+  assert.deepEqual(
+    Object.keys(packageJson.scripts).filter((name) => name.startsWith("preview:")),
+    [],
+  );
+  await assert.rejects(access(new URL("../.github/workflows/preview.yml", import.meta.url)));
+  await assert.rejects(access(new URL("./preview", import.meta.url)));
 });
