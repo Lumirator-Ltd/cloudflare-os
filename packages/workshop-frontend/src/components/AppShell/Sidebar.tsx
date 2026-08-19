@@ -15,6 +15,7 @@ import SiteLogo from '../SiteLogo'
 import { useGatekeeperApps } from '../../useGatekeeperApps'
 import { openCommandPalette } from './commandPaletteBus'
 import SidebarItem from './SidebarItem'
+import AdminSidebarSection from './AdminSidebarSection'
 import {
   SidebarWorkspacesProvider,
   SidebarWorkspacesTools,
@@ -187,6 +188,8 @@ export default function Sidebar({
               collapsed={collapsed}
             />
           </nav>
+
+          <AdminSidebarSection collapsed={collapsed} />
 
           {/* Workspace tools: search. Pinned so it's always reachable. */}
           <SidebarWorkspacesTools collapsed={collapsed} />
