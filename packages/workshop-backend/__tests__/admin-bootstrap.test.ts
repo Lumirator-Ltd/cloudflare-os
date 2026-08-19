@@ -1,6 +1,7 @@
 import { MAX_SITE_NAME_LENGTH } from "@gadgets/workshop-shared/api";
 import { describe, expect, it } from "vitest";
 import {
+  adminConfigAdoptionDigest,
   initialAdminConfigDigest,
   parseInitialAdminConfig,
   toAdminConfigPatch,
@@ -17,9 +18,25 @@ const valid = {
   },
 } as const;
 
+const adoptionDigest = "a".repeat(64);
+const validWithAdoption = {
+  ...valid,
+  adoptExistingConfigDigest: adoptionDigest,
+} as const;
+
 describe("parseInitialAdminConfig", () => {
-  it("accepts the closed version 1 payload", () => {
+  it("accepts the closed version 1 payload with or without an adoption proof", () => {
     expect(parseInitialAdminConfig(valid)).toEqual(valid);
+    expect(parseInitialAdminConfig(validWithAdoption)).toEqual(validWithAdoption);
+  });
+
+  it("rejects malformed adoption proofs", () => {
+    for (const digest of ["", "A".repeat(64), "g".repeat(64), "a".repeat(63), "a".repeat(65)]) {
+      expect(parseInitialAdminConfig({
+        ...valid,
+        adoptExistingConfigDigest: digest,
+      })).toBeNull();
+    }
   });
 
   it("rejects unknown keys at every level", () => {
@@ -77,6 +94,13 @@ describe("parseInitialAdminConfig", () => {
 });
 
 describe("initialAdminConfigDigest", () => {
+  it("shares the deployment pipeline's purpose- and tenant-bound adoption vector", async () => {
+    await expect(adminConfigAdoptionDigest(
+      "tenant-immutable-id",
+      '{"signupsEnabled":true}',
+    )).resolves.toBe("bb8ff4e29138d0f10b548133f892ce2384e0dc73c2289a0f651569db9fc59abf");
+  });
+
   it("hashes the canonical payload rather than input property order", async () => {
     const reordered = parseInitialAdminConfig({
       config: {
@@ -91,6 +115,8 @@ describe("initialAdminConfigDigest", () => {
 
     expect(reordered).not.toBeNull();
     await expect(initialAdminConfigDigest(reordered!))
+        .resolves.toBe(await initialAdminConfigDigest(valid));
+    await expect(initialAdminConfigDigest(validWithAdoption))
         .resolves.toBe(await initialAdminConfigDigest(valid));
     await expect(initialAdminConfigDigest(valid)).resolves.toMatch(/^[0-9a-f]{64}$/);
   });

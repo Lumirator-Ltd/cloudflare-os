@@ -37,6 +37,7 @@ const FAILING_CONFIG = {
   ...INITIAL_CONFIG,
   tenantId: "private-tenant-admin@example.com",
   config: {...INITIAL_CONFIG.config, siteName: "Private Brand"},
+  adoptExistingConfigDigest: "a".repeat(64),
 } as const satisfies InitialAdminConfigV1;
 
 type BootstrapEnv = Cloudflare.Env & {
@@ -260,6 +261,7 @@ describe("Workshop admin bootstrap gate", () => {
     const logged = JSON.stringify(error.mock.calls);
     expect(logged).not.toContain(FAILING_CONFIG.tenantId);
     expect(logged).not.toContain(FAILING_CONFIG.config.siteName);
+    expect(logged).not.toContain(FAILING_CONFIG.adoptExistingConfigDigest);
     expect(logged).not.toContain("secret initialization details");
   });
 
@@ -359,6 +361,7 @@ describe("ExternalMessageGateway admin bootstrap gate", () => {
     const logged = JSON.stringify(error.mock.calls);
     expect(logged).not.toContain(FAILING_CONFIG.tenantId);
     expect(logged).not.toContain(FAILING_CONFIG.config.siteName);
+    expect(logged).not.toContain(FAILING_CONFIG.adoptExistingConfigDigest);
     expect(logged).not.toContain(EXTERNAL_MESSAGE.callerEmail);
     expect(logged).not.toContain(EXTERNAL_MESSAGE.prompt);
     expect(logged).not.toContain("secret initialization details");

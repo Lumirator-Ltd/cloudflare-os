@@ -7,7 +7,7 @@ import { collection, createTypedStorage } from '@gadgets/typed-storage';
 import { createWorkshopLogger } from "./observability";
 import { ADMIN_CONFIG_KEY, FEATURED_BLUEPRINTS_KEY, isReservedBlueprintKey, parseBlueprintKvRecord, readBlueprintKvRecord, sanitizeBlueprintOutput, serializeFeaturedBlueprints } from './blueprint-archive.js';
 import { AdminConfig, DEFAULT_ADMIN_CONFIG, FormatCuration, MAX_AGENT_HINT, defaultOutputFormatId, listPromotedFormats, reorderFormats, sanitizeOutputOverrides, serializeAdminConfig } from './admin-config.js';
-import { initialAdminConfigDigest, parseInitialAdminConfig, toAdminConfigPatch } from './admin-bootstrap.js';
+import { adminConfigAdoptionDigest, initialAdminConfigDigest, parseInitialAdminConfig, toAdminConfigPatch } from './admin-bootstrap.js';
 import { SITE_LOGO_R2_KEY, siteLogoImage, validateSiteLogo } from './site-logo.js';
 import { ambientGatekeeperMode, DEFAULT_AMBIENT_GATEKEEPER_MODE } from './provisioning-policy.js';
 import { buildGatekeeperVendorMap } from './auth/auth-vendors.js';
@@ -316,7 +316,10 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
     let expectedConfigSerialized = serializeAdminConfig(expectedConfig);
 
     await this.#serializeAdminConfigMutation(async () => {
-      let priorConfig = this.#config();
+      // Keep the raw persisted representation for legacy adoption: #config() fills fields added by
+      // newer releases, while the KV mirror contains the exact older serialized shape.
+      let persistedConfig = this.storage.adminConfig.get();
+      let priorConfig = {...DEFAULT_ADMIN_CONFIG, ...persistedConfig};
       let priorMarker = this.storage.adminBootstrapMarker.get();
       let pendingMarker: AdminBootstrapMarker = {
         tenantId: initial.tenantId,
@@ -338,9 +341,28 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
           throw new Error("Pending admin settings initialization is inconsistent.");
         }
       } else {
-        if (serializeAdminConfig(priorConfig) !== serializeAdminConfig(DEFAULT_ADMIN_CONFIG)) {
+        let persistedConfigSerialized = serializeAdminConfig(persistedConfig);
+        let priorConfigSerialized = serializeAdminConfig(priorConfig);
+        let defaultConfigSerialized = serializeAdminConfig(DEFAULT_ADMIN_CONFIG);
+        let adoptionDigest = initial.adoptExistingConfigDigest;
+
+        if (adoptionDigest !== undefined) {
+          let mirroredConfig = await this.env.BLUEPRINTS.get(ADMIN_CONFIG_KEY);
+          if (mirroredConfig === null || mirroredConfig !== persistedConfigSerialized ||
+              await adminConfigAdoptionDigest(initial.tenantId, mirroredConfig) !== adoptionDigest) {
+            throw new Error("Admin settings adoption proof does not match authoritative state.");
+          }
+          // A matching proof means preserve the approved legacy state exactly, including an exact
+          // default-valued state. Only the marker is new; neither authoritative nor mirrored config
+          // is rewritten.
+          this.storage.adminBootstrapMarker.put({...pendingMarker, status: "complete"});
+          return;
+        }
+
+        if (priorConfigSerialized !== defaultConfigSerialized) {
           throw new Error("Admin settings contain unmarked non-default configuration.");
         }
+
         this.storage.transaction(() => {
           this.storage.adminConfig.put(expectedConfig);
           this.storage.adminBootstrapMarker.put(pendingMarker);
@@ -351,7 +373,9 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
         await this.env.BLUEPRINTS.put(ADMIN_CONFIG_KEY, expectedConfigSerialized);
       } catch (error) {
         this.storage.transaction(() => {
-          this.storage.adminConfig.put(priorConfig);
+          // Preserve the exact persisted shape. A normalized replacement could no longer match an
+          // older KV mirror and would make a later proof-bound legacy adoption impossible.
+          this.storage.adminConfig.put(persistedConfig);
           this.storage.adminBootstrapMarker.put(priorMarker);
         });
         throw error;

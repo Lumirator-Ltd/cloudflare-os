@@ -13,6 +13,11 @@ const CUSTOM_VENDOR_ID = "custom";
 export type InitialAdminConfigV1 = {
   tenantId: string;
   schemaVersion: 1;
+  /**
+   * One-time proof authorizing adoption of unmarked legacy AdminSettings state.
+   * Excluded from the canonical bootstrap digest so it can be omitted after adoption.
+   */
+  adoptExistingConfigDigest?: string;
   config: {
     siteName: string;
     accentColor: string;
@@ -30,13 +35,30 @@ function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[])
   return keys.length === allowed.length && keys.every(key => allowed.includes(key));
 }
 
+function hasRequiredAndOptionalKeys(
+    value: Record<string, unknown>,
+    required: readonly string[],
+    optional: readonly string[]): boolean {
+  let keys = Object.keys(value);
+  let allowed = new Set([...required, ...optional]);
+  return required.every(key => Object.hasOwn(value, key)) &&
+      keys.every(key => allowed.has(key));
+}
+
 /** Validates and copies an initial admin configuration, returning null for any unsupported input. */
 export function parseInitialAdminConfig(value: unknown): InitialAdminConfigV1 | null {
-  if (!isRecord(value) || !hasOnlyKeys(value, ["tenantId", "schemaVersion", "config"])) {
+  if (!isRecord(value) || !hasRequiredAndOptionalKeys(
+    value,
+    ["tenantId", "schemaVersion", "config"],
+    ["adoptExistingConfigDigest"],
+  )) {
     return null;
   }
   if (typeof value.tenantId !== "string" || value.tenantId.length === 0 ||
       value.tenantId.length > MAX_TENANT_ID_LENGTH || value.schemaVersion !== 1 ||
+      (value.adoptExistingConfigDigest !== undefined &&
+        (typeof value.adoptExistingConfigDigest !== "string" ||
+          !/^[0-9a-f]{64}$/.test(value.adoptExistingConfigDigest))) ||
       !isRecord(value.config) || !hasOnlyKeys(value.config, [
         "siteName",
         "accentColor",
@@ -57,6 +79,9 @@ export function parseInitialAdminConfig(value: unknown): InitialAdminConfigV1 | 
   return {
     tenantId: value.tenantId,
     schemaVersion: 1,
+    ...(value.adoptExistingConfigDigest === undefined
+      ? {}
+      : {adoptExistingConfigDigest: value.adoptExistingConfigDigest}),
     config: {
       siteName: config.siteName,
       accentColor: config.accentColor,
@@ -80,10 +105,24 @@ function canonicalInitialAdminConfig(value: InitialAdminConfigV1): string {
 }
 
 /** Returns the lowercase SHA-256 digest of the canonical version 1 payload. */
-export async function initialAdminConfigDigest(value: InitialAdminConfigV1): Promise<string> {
-  let bytes = new TextEncoder().encode(canonicalInitialAdminConfig(value));
+async function sha256(value: string): Promise<string> {
+  let bytes = new TextEncoder().encode(value);
   let digest = await crypto.subtle.digest("SHA-256", bytes);
   return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
+}
+
+export function adminConfigAdoptionDigest(
+    tenantId: string,
+    serializedAdminConfig: string): Promise<string> {
+  return sha256(JSON.stringify({
+    purpose: "cloudflare-os-admin-config-adoption-v1",
+    tenantId,
+    serializedAdminConfig,
+  }));
+}
+
+export function initialAdminConfigDigest(value: InitialAdminConfigV1): Promise<string> {
+  return sha256(canonicalInitialAdminConfig(value));
 }
 
 /** Converts a validated payload into the restricted deployment admin configuration patch. */

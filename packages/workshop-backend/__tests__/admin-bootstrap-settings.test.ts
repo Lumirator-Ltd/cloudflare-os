@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  adminConfigAdoptionDigest,
   initialAdminConfigDigest,
   toAdminConfigPatch,
 } from "../src/admin-bootstrap.js";
@@ -45,8 +46,10 @@ type AdminBootstrapMarker = {
 function makeAdminSettings(
     durableStorage = makeMockStorage(),
     put = vi.fn<(key: string, value: string) => Promise<void>>()
-        .mockResolvedValue(undefined)) {
-  let env = {BLUEPRINTS: {put}} as unknown as Cloudflare.Env;
+        .mockResolvedValue(undefined),
+    get = vi.fn<(key: string) => Promise<string | null>>()
+        .mockResolvedValue(null)) {
+  let env = {BLUEPRINTS: {put, get}} as unknown as Cloudflare.Env;
   let makeInstance = () => {
     let ctx = {
       storage: durableStorage,
@@ -54,7 +57,7 @@ function makeAdminSettings(
     } as unknown as DurableObjectState;
     return new AdminSettings(ctx, env);
   };
-  return {admin: makeInstance(), durableStorage, makeInstance, put};
+  return {admin: makeInstance(), durableStorage, makeInstance, put, get};
 }
 
 async function marker(status: AdminBootstrapMarker["status"]): Promise<AdminBootstrapMarker> {
@@ -191,7 +194,7 @@ describe("AdminSettings.ensureInitialAdminConfig", () => {
   });
 
   it("rejects unmarked non-default authoritative state after restart", async () => {
-    let {durableStorage, makeInstance, put} = makeAdminSettings();
+    let {durableStorage, makeInstance, put, get} = makeAdminSettings();
     let existing = {...DEFAULT_ADMIN_CONFIG, announcement: "Configured by an admin"};
     durableStorage.kv.put("adminConfig", existing);
 
@@ -201,6 +204,240 @@ describe("AdminSettings.ensureInitialAdminConfig", () => {
     expect(restartedAdmin.getAdminConfig()).toEqual(existing);
     expect(durableStorage.kv.get("adminBootstrapMarker")).toBeUndefined();
     expect(put).not.toHaveBeenCalled();
+    expect(get).not.toHaveBeenCalled();
+  });
+
+  it("adopts matching unmarked authoritative and KV state without overwriting either", async () => {
+    let existing = {
+      ...DEFAULT_ADMIN_CONFIG,
+      announcement: "Configured by an admin",
+      formats: [{blueprintId: "existing-format", enabled: true}],
+    };
+    let serialized = serializeAdminConfig(existing);
+    let digest = await adminConfigAdoptionDigest(valid.tenantId, serialized);
+    let get = vi.fn<(key: string) => Promise<string | null>>().mockResolvedValue(serialized);
+    let {durableStorage, makeInstance, put} = makeAdminSettings(
+      makeMockStorage(),
+      undefined,
+      get,
+    );
+    durableStorage.kv.put("adminConfig", existing);
+
+    let restartedAdmin = makeInstance();
+    await restartedAdmin.ensureInitialAdminConfig({
+      ...valid,
+      adoptExistingConfigDigest: digest,
+    });
+
+    expect(restartedAdmin.getAdminConfig()).toEqual(existing);
+    expect(durableStorage.kv.get("adminBootstrapMarker")).toEqual(await marker("complete"));
+    expect(get).toHaveBeenCalledOnce();
+    expect(get).toHaveBeenCalledWith(ADMIN_CONFIG_KEY);
+    expect(put).not.toHaveBeenCalled();
+  });
+
+  it("adopts an exact legacy representation missing newer defaulted fields", async () => {
+    let legacy = {
+      signupsEnabled: true,
+      siteName: "Legacy OS",
+      accentColor: "#123456",
+      disabledResources: {},
+      disabledGatekeepers: [],
+      ambientGatekeeperModes: {context: "optional"},
+    };
+    let serialized = JSON.stringify(legacy);
+    let digest = await adminConfigAdoptionDigest(valid.tenantId, serialized);
+    let get = vi.fn<(key: string) => Promise<string | null>>().mockResolvedValue(serialized);
+    let {durableStorage, makeInstance, put} = makeAdminSettings(
+      makeMockStorage(),
+      undefined,
+      get,
+    );
+    durableStorage.kv.put("adminConfig", legacy);
+
+    let restartedAdmin = makeInstance();
+    await restartedAdmin.ensureInitialAdminConfig({
+      ...valid,
+      adoptExistingConfigDigest: digest,
+    });
+
+    expect(durableStorage.kv.get("adminConfig")).toEqual(legacy);
+    expect(restartedAdmin.getAdminConfig()).toEqual({...DEFAULT_ADMIN_CONFIG, ...legacy});
+    expect(durableStorage.kv.get("adminBootstrapMarker")).toEqual(await marker("complete"));
+    expect(put).not.toHaveBeenCalled();
+  });
+
+  it("preserves an explicitly adopted default-valued legacy configuration", async () => {
+    let serialized = serializeAdminConfig(DEFAULT_ADMIN_CONFIG);
+    let digest = await adminConfigAdoptionDigest(valid.tenantId, serialized);
+    let get = vi.fn<(key: string) => Promise<string | null>>().mockResolvedValue(serialized);
+    let {admin, durableStorage, put} = makeAdminSettings(
+      makeMockStorage(),
+      undefined,
+      get,
+    );
+
+    await admin.ensureInitialAdminConfig({
+      ...valid,
+      adoptExistingConfigDigest: digest,
+    });
+
+    expect(admin.getAdminConfig()).toEqual(DEFAULT_ADMIN_CONFIG);
+    expect(durableStorage.kv.get("adminBootstrapMarker")).toEqual(await marker("complete"));
+    expect(put).not.toHaveBeenCalled();
+  });
+
+  it("rejects a proof generated for another tenant", async () => {
+    let existing = {...DEFAULT_ADMIN_CONFIG, announcement: "Configured by an admin"};
+    let serialized = serializeAdminConfig(existing);
+    let otherTenantDigest = await adminConfigAdoptionDigest("other-tenant", serialized);
+    let get = vi.fn<(key: string) => Promise<string | null>>().mockResolvedValue(serialized);
+    let {durableStorage, makeInstance, put} = makeAdminSettings(
+      makeMockStorage(),
+      undefined,
+      get,
+    );
+    durableStorage.kv.put("adminConfig", existing);
+
+    await expect(makeInstance().ensureInitialAdminConfig({
+      ...valid,
+      adoptExistingConfigDigest: otherTenantDigest,
+    })).rejects.toThrow(/adoption proof/i);
+
+    expect(durableStorage.kv.get("adminBootstrapMarker")).toBeUndefined();
+    expect(put).not.toHaveBeenCalled();
+  });
+
+  it("serializes adoption against a concurrent admin update", async () => {
+    let existing = {...DEFAULT_ADMIN_CONFIG, announcement: "Legacy"};
+    let serialized = serializeAdminConfig(existing);
+    let digest = await adminConfigAdoptionDigest(valid.tenantId, serialized);
+    let release!: () => void;
+    let mirror = new Promise<string>((resolve) => { release = () => resolve(serialized); });
+    let get = vi.fn<(key: string) => Promise<string | null>>().mockReturnValue(mirror);
+    let {durableStorage, makeInstance, put} = makeAdminSettings(
+      makeMockStorage(),
+      undefined,
+      get,
+    );
+    durableStorage.kv.put("adminConfig", existing);
+    let admin = makeInstance();
+
+    let adoption = admin.ensureInitialAdminConfig({...valid, adoptExistingConfigDigest: digest});
+    await vi.waitFor(() => expect(get).toHaveBeenCalledOnce());
+    let update = admin.updateAdminConfig({announcement: "Updated after adoption"});
+    expect(put).not.toHaveBeenCalled();
+
+    release();
+    await Promise.all([adoption, update]);
+
+    expect(admin.getAdminConfig().announcement).toBe("Updated after adoption");
+    expect(durableStorage.kv.get("adminBootstrapMarker")).toEqual(await marker("complete"));
+    expect(put).toHaveBeenCalledOnce();
+  });
+
+  it("rejects a stale adoption proof without changing state", async () => {
+    let existing = {...DEFAULT_ADMIN_CONFIG, announcement: "Configured by an admin"};
+    let serialized = serializeAdminConfig(existing);
+    let get = vi.fn<(key: string) => Promise<string | null>>().mockResolvedValue(serialized);
+    let {durableStorage, makeInstance, put} = makeAdminSettings(
+      makeMockStorage(),
+      undefined,
+      get,
+    );
+    durableStorage.kv.put("adminConfig", existing);
+
+    await expect(makeInstance().ensureInitialAdminConfig({
+      ...valid,
+      adoptExistingConfigDigest: "0".repeat(64),
+    })).rejects.toThrow(/adoption proof/i);
+
+    expect(durableStorage.kv.get("adminConfig")).toEqual(existing);
+    expect(durableStorage.kv.get("adminBootstrapMarker")).toBeUndefined();
+    expect(put).not.toHaveBeenCalled();
+  });
+
+  it("rejects adoption when the KV mirror is missing or differs from authoritative state", async () => {
+    let existing = {...DEFAULT_ADMIN_CONFIG, announcement: "Configured by an admin"};
+    let serialized = serializeAdminConfig(existing);
+    let digest = await adminConfigAdoptionDigest(valid.tenantId, serialized);
+
+    for (const mirror of [null, serializeAdminConfig({...existing, announcement: "Other"})]) {
+      let get = vi.fn<(key: string) => Promise<string | null>>().mockResolvedValue(mirror);
+      let {durableStorage, makeInstance, put} = makeAdminSettings(
+        makeMockStorage(),
+        undefined,
+        get,
+      );
+      durableStorage.kv.put("adminConfig", existing);
+
+      await expect(makeInstance().ensureInitialAdminConfig({
+        ...valid,
+        adoptExistingConfigDigest: digest,
+      })).rejects.toThrow(/adoption proof/i);
+
+      expect(durableStorage.kv.get("adminBootstrapMarker")).toBeUndefined();
+      expect(put).not.toHaveBeenCalled();
+    }
+  });
+
+  it("does not let an adoption proof hide mismatched default DO and non-default KV state", async () => {
+    let mirror = serializeAdminConfig({...DEFAULT_ADMIN_CONFIG, announcement: "Legacy"});
+    let digest = await adminConfigAdoptionDigest(valid.tenantId, mirror);
+    let get = vi.fn<(key: string) => Promise<string | null>>().mockResolvedValue(mirror);
+    let {admin, durableStorage, put} = makeAdminSettings(
+      makeMockStorage(),
+      undefined,
+      get,
+    );
+
+    await expect(admin.ensureInitialAdminConfig({
+      ...valid,
+      adoptExistingConfigDigest: digest,
+    })).rejects.toThrow(/adoption proof/i);
+
+    expect(admin.getAdminConfig()).toEqual(DEFAULT_ADMIN_CONFIG);
+    expect(durableStorage.kv.get("adminBootstrapMarker")).toBeUndefined();
+    expect(put).not.toHaveBeenCalled();
+  });
+
+  it("ignores an obsolete adoption proof after bootstrap is complete", async () => {
+    let {admin, get, put} = makeAdminSettings();
+    await admin.ensureInitialAdminConfig(valid);
+
+    await admin.ensureInitialAdminConfig({
+      ...valid,
+      adoptExistingConfigDigest: "0".repeat(64),
+    });
+
+    expect(get).not.toHaveBeenCalled();
+    expect(put).toHaveBeenCalledOnce();
+  });
+
+  it("preserves a partial legacy representation across a failed fresh bootstrap", async () => {
+    let legacy = {
+      signupsEnabled: true,
+      siteName: "",
+      accentColor: "",
+      disabledResources: {},
+      disabledGatekeepers: [],
+      ambientGatekeeperModes: {},
+    };
+    let serialized = JSON.stringify(legacy);
+    let digest = await adminConfigAdoptionDigest(valid.tenantId, serialized);
+    let put = vi.fn<(key: string, value: string) => Promise<void>>()
+      .mockRejectedValueOnce(new Error("KV unavailable"));
+    let get = vi.fn<(key: string) => Promise<string | null>>().mockResolvedValue(serialized);
+    let {admin, durableStorage} = makeAdminSettings(makeMockStorage(), put, get);
+    durableStorage.kv.put("adminConfig", legacy);
+
+    await expect(admin.ensureInitialAdminConfig(valid)).rejects.toThrow("KV unavailable");
+    expect(durableStorage.kv.get("adminConfig")).toEqual(legacy);
+
+    await admin.ensureInitialAdminConfig({...valid, adoptExistingConfigDigest: digest});
+    expect(durableStorage.kv.get("adminConfig")).toEqual(legacy);
+    expect(durableStorage.kv.get("adminBootstrapMarker")).toEqual(await marker("complete"));
+    expect(put).toHaveBeenCalledOnce();
   });
 
   it("transactionally restores the exact prior state when the KV mirror write fails", async () => {
