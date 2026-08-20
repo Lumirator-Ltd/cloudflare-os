@@ -54,6 +54,16 @@ const CONNECTORS: AdminConnectorConfiguration[] = [
     ],
     writeAvailable: true,
   },
+  {
+    id: 'mcp_portal',
+    displayName: 'Cloudflare MCP Server Portal',
+    configured: false,
+    setupGuideUrl: 'https://developers.cloudflare.com/cloudflare-one/access-controls/ai-controls/mcp-portals/',
+    inputs: [
+      { name: 'MCP_PORTAL_URL', label: 'Portal URL', secret: false },
+    ],
+    writeAvailable: true,
+  },
 ]
 
 function auth(admin: Partial<AdminApi> | null, isAdmin = true) {
@@ -149,8 +159,8 @@ describe('/admin/connectors', () => {
     expect(rendered.querySelector('img')?.getAttribute('src')).toBe(CONNECTORS[0].logo?.url)
 
     const inputs = [...rendered.querySelectorAll('input')] as HTMLInputElement[]
-    expect(inputs).toHaveLength(4)
-    for (const input of inputs) {
+    expect(inputs).toHaveLength(5)
+    for (const input of inputs.slice(0, 4)) {
       expect(input.type).toBe('password')
       expect(input.autocomplete).toBe('off')
       expect(input.getAttribute('data-1p-ignore')).toBe('true')
@@ -158,15 +168,39 @@ describe('/admin/connectors', () => {
       expect(input.getAttribute('data-form-type')).toBe('other')
       expect(input.value).toBe('')
     }
+    expect(inputs[4].type).toBe('url')
+    expect(inputs[4].getAttribute('data-1p-ignore')).toBeNull()
     expect(rendered.textContent).not.toContain('existing-client-id')
-    expect(rendered.textContent).toContain('Rotate credentials')
-    expect(rendered.textContent).toContain('Save credentials')
+    expect(rendered.textContent).toContain('Update configuration')
+    expect(rendered.textContent).toContain('Save configuration')
   })
 
-  it('marks the connector configured immediately after saving credentials', async () => {
+  it('renders discovery-only MCP setup without OAuth callback instructions', async () => {
+    auth({
+      listConnectorConfigurations:
+        vi.fn<() => Promise<AdminConnectorConfiguration[]>>(async () => [CONNECTORS[2]]),
+    })
+    const rendered = await render()
+
+    expect(rendered.textContent).toContain('Connector configuration')
+    expect(rendered.textContent).toContain('Cloudflare MCP Server Portal')
+    expect(rendered.textContent).not.toContain('Callback URL')
+    expect(rendered.textContent).not.toContain('register the callback URL')
+    const guide = [...rendered.querySelectorAll('a')].find(
+      (link) => link.textContent === 'View setup guide',
+    )
+    expect(guide?.getAttribute('href')).toBe(CONNECTORS[2].setupGuideUrl)
+    const input = rendered.querySelector('input[name="mcp_portal-MCP_PORTAL_URL"]') as HTMLInputElement
+    expect(input.type).toBe('url')
+    expect(input.autocomplete).toBe('url')
+  })
+
+  it('reloads authoritative connector status after saving configuration', async () => {
     const configureConnector = vi.fn<() => Promise<void>>(async () => {})
     const listConnectorConfigurations = vi
-      .fn<() => Promise<AdminConnectorConfiguration[]>>(async () => [CONNECTORS[1]])
+      .fn<() => Promise<AdminConnectorConfiguration[]>>()
+      .mockResolvedValueOnce([CONNECTORS[1]])
+      .mockResolvedValueOnce([{ ...CONNECTORS[1], configured: true }])
     auth({ listConnectorConfigurations, configureConnector })
     const rendered = await render()
 
@@ -177,7 +211,7 @@ describe('/admin/connectors', () => {
       setInput(secretInput, 'new-client-secret')
     })
     const save = [...rendered.querySelectorAll('button')].find((button) =>
-      button.textContent?.includes('Save credentials')) as HTMLButtonElement
+      button.textContent?.includes('Save configuration')) as HTMLButtonElement
     await act(async () => {
       save.click()
       await Promise.resolve()
@@ -190,11 +224,43 @@ describe('/admin/connectors', () => {
     })
     expect(idInput.value).toBe('')
     expect(secretInput.value).toBe('')
-    expect(listConnectorConfigurations).toHaveBeenCalledOnce()
+    expect(listConnectorConfigurations).toHaveBeenCalledTimes(2)
     expect(rendered.textContent).toContain('Configured')
-    expect(rendered.textContent).toContain('Rotate credentials')
+    expect(rendered.textContent).toContain('Update configuration')
     expect(addToast).toHaveBeenCalledWith({
-      title: 'Notion credentials saved',
+      title: 'Notion configuration saved. It may take a moment to become available.',
+      variant: 'success',
+    })
+  })
+
+  it('submits the MCP portal URL and reloads readiness', async () => {
+    const configureConnector = vi.fn<() => Promise<void>>(async () => {})
+    const listConnectorConfigurations = vi
+      .fn<() => Promise<AdminConnectorConfiguration[]>>()
+      .mockResolvedValueOnce([CONNECTORS[2]])
+      .mockResolvedValueOnce([{ ...CONNECTORS[2], configured: true }])
+    auth({ listConnectorConfigurations, configureConnector })
+    const rendered = await render()
+
+    const urlInput = rendered.querySelector(
+      'input[name="mcp_portal-MCP_PORTAL_URL"]',
+    ) as HTMLInputElement
+    await act(async () => setInput(urlInput, 'https://portal.example.com/mcp'))
+    const save = [...rendered.querySelectorAll('button')].find((button) =>
+      button.textContent?.includes('Save configuration')) as HTMLButtonElement
+    await act(async () => {
+      save.click()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(configureConnector).toHaveBeenCalledWith('mcp_portal', {
+      MCP_PORTAL_URL: 'https://portal.example.com/mcp',
+    })
+    expect(listConnectorConfigurations).toHaveBeenCalledTimes(2)
+    expect(rendered.textContent).toContain('Configured')
+    expect(addToast).toHaveBeenCalledWith({
+      title: 'Cloudflare MCP Server Portal configuration saved. It may take a moment to become available.',
       variant: 'success',
     })
   })
@@ -207,10 +273,10 @@ describe('/admin/connectors', () => {
     })
     const rendered = await render()
 
-    expect(rendered.textContent).toContain('Connector credential management is not enabled')
+    expect(rendered.textContent).toContain('Connector configuration management is not enabled')
     expect([...rendered.querySelectorAll('input')].every((input) => input.disabled)).toBe(true)
-    expect(rendered.textContent).not.toContain('Save credentials')
-    expect(rendered.textContent).not.toContain('Rotate credentials')
+    expect(rendered.textContent).not.toContain('Save configuration')
+    expect(rendered.textContent).not.toContain('Update configuration')
   })
 
   it('shows empty and failed list states', async () => {
