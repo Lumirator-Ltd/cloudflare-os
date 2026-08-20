@@ -45,7 +45,6 @@ import type {
   HubSpotSession,
 } from "./types";
 import TYPES_CODE from "./types.txt";
-import HUBSPOT_LOGO_SVG from "./hubspot-logo.svg";
 import HUBSPOT_ACCOUNT_CONFIGURATOR_HTML from "./generated/account-configurator-ui.txt";
 import type { HubSpotAccountConfiguratorRpc } from "./configurator/account-configurator-types";
 
@@ -78,12 +77,10 @@ const MAX_CREDENTIAL_GENERATION = 0xffff_ffff;
 const REVOCATION_IN_PROGRESS_MESSAGE = "HubSpot account disconnect is in progress.";
 const REVOCATION_FAILED_MESSAGE =
   "HubSpot disconnect is incomplete. Retry disconnect or manually uninstall the app in HubSpot.";
-const HUBSPOT_LOGO_URL = `data:image/svg+xml,${encodeURIComponent(HUBSPOT_LOGO_SVG)}`;
 const ACCOUNT_RESOURCE: SupportedResource = {
   urlPattern: "https://app.hubspot.com/contacts/:hubId",
   title: "HubSpot account",
   description: "Whole-account access to contacts, companies, and deals in the connected HubSpot CRM.",
-  icon: { url: HUBSPOT_LOGO_URL },
 };
 const SUPPORTED_RESOURCES = [ACCOUNT_RESOURCE];
 const INVALID_FLOW_MESSAGE = "This HubSpot authorization link is invalid or has expired. Start again from Cloudflare OS.";
@@ -166,8 +163,6 @@ export function hubSpotVendorDescription(
   return {
     displayName: "HubSpot",
     url: "https://www.hubspot.com",
-    logo: { url: HUBSPOT_LOGO_URL },
-    color: "#ff7a59",
     tagline: "Search and manage CRM contacts, companies, and deals",
     description:
       "Connect a HubSpot account so Cloudflare OS can work with contacts, companies, and deals " +
@@ -592,7 +587,6 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
     return {
       displayName: `HubSpot account ${hubId}`,
       uniqueName: String(hubId),
-      avatar: { url: HUBSPOT_LOGO_URL },
     };
   }
 

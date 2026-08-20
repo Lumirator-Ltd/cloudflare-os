@@ -153,7 +153,7 @@ afterEach(async () => {
 });
 
 describe("HubSpot vendor metadata", () => {
-  it("reports static OAuth readiness, branding, and one whole-account resource", async () => {
+  it("reports static OAuth readiness and one unbranded whole-account resource", async () => {
     const description = await vendor().describe();
     const resources = await vendor().getSupportedResources();
 
@@ -163,12 +163,13 @@ describe("HubSpot vendor metadata", () => {
       configuration: { configured: true },
     });
     expect(description.providesAuth).toBeUndefined();
-    expect(description.logo).toMatchObject({ url: expect.stringMatching(/^data:image\/svg\+xml,/) });
+    expect(description.logo).toBeUndefined();
+    expect(description.color).toBeUndefined();
     expect(resources).toEqual([expect.objectContaining({
       urlPattern: ACCOUNT_PATTERN,
       title: "HubSpot account",
-      icon: description.logo,
     })]);
+    expect(resources[0]?.icon).toBeUndefined();
     expect(hubSpotVendorDescription({})).toMatchObject({
       configuration: { configured: false },
     });
@@ -752,10 +753,11 @@ describe("HubSpot connected account", () => {
   it("describes the portal, serves its canonical no-input configurator, and validates URLs", async () => {
     await completeFlow(24680);
 
-    expect(await callback.describeConnected()).toMatchObject({
+    const connectedDescription = await callback.describeConnected();
+    expect(connectedDescription).toMatchObject({
       displayName: "HubSpot account 24680",
-      avatar: { url: expect.stringMatching(/^data:image\/svg\+xml,/) },
     });
+    expect(connectedDescription.avatar).toBeUndefined();
     expect(await callback.configuredResourceUrl(ACCOUNT_PATTERN)).toBe(
       "https://app.hubspot.com/contacts/24680",
     );
