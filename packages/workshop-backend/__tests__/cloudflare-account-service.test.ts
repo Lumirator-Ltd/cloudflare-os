@@ -68,8 +68,14 @@ it("keeps the accounts gathered before a mid-walk failure", async () => {
   expect(await listAccounts(TOKEN)).toHaveLength(50);
 });
 
-it("returns no accounts when the first page fails", async () => {
+it("returns unknown when account discovery throws", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("network unavailable"); }));
+
+  expect(await listAccounts(TOKEN)).toBeNull();
+});
+
+it("returns unknown when the first page fails", async () => {
   vi.stubGlobal("fetch", vi.fn(async () => new Response("denied", { status: 403 })));
 
-  expect(await listAccounts(TOKEN)).toEqual([]);
+  expect(await listAccounts(TOKEN)).toBeNull();
 });

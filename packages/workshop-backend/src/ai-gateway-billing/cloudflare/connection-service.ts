@@ -35,10 +35,14 @@ export interface CloudflareConnectionStatus {
   accountName?: string;
   balance: number | null;
   /**
-   * True when connected but the grant sees multiple Cloudflare accounts and none is chosen yet.
-   * The client must prompt the user to select one via selectAccount().
+   * True when connected but no eligible billing account is selected. The client must load the
+   * eligible accounts and offer selection or reconnection when the list is empty.
    */
   needsAccountSelection?: boolean;
+  /** True when the connected OAuth grant is unusable and must be re-authenticated. */
+  needsReconnect?: boolean;
+  /** True when Cloudflare account discovery failed and the client should offer a retry. */
+  accountDiscoveryFailed?: boolean;
 }
 
 /** A Cloudflare account the connected grant can access. */
@@ -93,8 +97,7 @@ export async function resolveConnection(
 
     const accessToken = await account.getUsableAccessToken();
     if (!accessToken) {
-      // Connected, but the token is broken/expired — treat as connected with unknown balance.
-      return { status: { connected: true, balance: null } };
+      return { status: { connected: true, balance: null, needsReconnect: true } };
     }
 
     const billing = await userStub.getCloudflareBilling();
@@ -106,18 +109,31 @@ export async function resolveConnection(
     }
 
     let needsAccountSelection = false;
+    let accountDiscoveryFailed = false;
     if (!accountId) {
-      const accounts = customerAccounts(env, await listAccounts(accessToken));
-      if (accounts.length === 1) {
-        accountId = accounts[0].accountId;
-        accountName = accounts[0].accountName;
-        await userStub.setCloudflareAccountSelection(accountId, accountName);
-      } else if (accounts.length > 1) {
+      const discovered = await listAccounts(accessToken);
+      if (discovered === null) {
         needsAccountSelection = true;
+        accountDiscoveryFailed = true;
+      } else {
+        const accounts = customerAccounts(env, discovered);
+        if (accounts.length === 1) {
+          accountId = accounts[0].accountId;
+          accountName = accounts[0].accountName;
+          await userStub.setCloudflareAccountSelection(accountId, accountName);
+        } else {
+          needsAccountSelection = true;
+        }
       }
     }
 
-    const base = { connected: true as const, accountId, accountName, needsAccountSelection };
+    const base = {
+      connected: true as const,
+      accountId,
+      accountName,
+      needsAccountSelection,
+      accountDiscoveryFailed,
+    };
     const extra = { accessToken, accountId };
 
     // Serve a fresh cached balance without hitting the API.
@@ -187,17 +203,33 @@ export async function refreshCachedBalance(env: Cloudflare.Env, userStub: UserSt
   }
 }
 
+/** Runs user-gateway inference and refreshes its balance afterward, including on failure. */
+export async function runWithUserGatewayBalanceRefresh<T>(
+  env: Cloudflare.Env,
+  userStub: UserStub,
+  operation: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await operation();
+  } finally {
+    await refreshCachedBalance(env, userStub);
+  }
+}
+
 /** List the Cloudflare accounts the connected grant can access. Empty if not connected/usable. */
 export async function listConnectedAccounts(
   env: Cloudflare.Env, userStub: UserStub,
 ): Promise<CloudflareAccountOption[]> {
+  let token: string | null;
   try {
-    const token = await getUsableAccessToken(userStub);
-    if (!token) return [];
-    return customerAccounts(env, await listAccounts(token));
+    token = await getUsableAccessToken(userStub);
   } catch {
     return [];
   }
+  if (!token) return [];
+  const accounts = await listAccounts(token);
+  if (accounts === null) throw new Error("Cloudflare account discovery is unavailable.");
+  return customerAccounts(env, accounts);
 }
 
 /** Select which Cloudflare account to bill. Validates it's accessible by the connected grant. */
@@ -210,6 +242,7 @@ export async function selectAccount(
   const token = await getUsableAccessToken(userStub);
   if (!token) throw new Error("No usable Cloudflare connection.");
   const accounts = await listAccounts(token);
+  if (accounts === null) throw new Error("Cloudflare account discovery is unavailable.");
   const found = accounts.find(a => a.accountId === accountId);
   if (!found) throw new Error("That Cloudflare account was not found in the connected grant.");
   await userStub.setCloudflareAccountSelection(found.accountId, found.accountName);

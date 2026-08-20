@@ -22,4 +22,24 @@ describe("UserDurableObject Cloudflare credit cache", () => {
 
     expect(put).not.toHaveBeenCalled();
   });
+
+  it("reconnects the Cloudflare account used by billing", async () => {
+    const reconnectAccount = vi.fn().mockResolvedValue({ url: "https://connect.example" });
+    const user = Object.assign(Object.create(UserDurableObject.prototype), {
+      reconnectAccount,
+      storage: {
+        nextAccountId: { get: vi.fn().mockReturnValue(3) },
+        connectedAccounts: {
+          get: vi.fn((id: number) => id === 1
+            ? { id, vendorId: "cloudflare" }
+            : undefined),
+        },
+      },
+    }) as UserDurableObject;
+
+    await expect(user.reconnectCloudflareBillingAccount()).resolves.toEqual({
+      url: "https://connect.example",
+    });
+    expect(reconnectAccount).toHaveBeenCalledWith(1);
+  });
 });

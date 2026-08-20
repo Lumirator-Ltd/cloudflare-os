@@ -7,6 +7,7 @@ import {
   listConnectedAccounts,
   refreshCachedBalance,
   resolveConnection,
+  runWithUserGatewayBalanceRefresh,
   selectAccount,
 } from "../src/ai-gateway-billing/cloudflare/connection-service.js";
 
@@ -17,6 +18,27 @@ vi.mock("../src/ai-gateway-billing/cloudflare/account-service.js", () => ({
 
 describe("resolveConnection balance cache", () => {
   beforeEach(() => vi.clearAllMocks());
+
+  it("surfaces an unusable OAuth grant as needing re-authentication", async () => {
+    const account = {
+      getUsableAccessToken: vi.fn().mockResolvedValue(null),
+      [Symbol.dispose]: vi.fn(),
+    };
+    const userStub = {
+      getCloudflareGatekeeperAccount: vi.fn().mockResolvedValue(account),
+    };
+
+    const result = await resolveConnection(
+      {} as Cloudflare.Env,
+      userStub as unknown as DurableObjectStub<import("../src/user.js").UserDurableObject>,
+    );
+
+    expect(result.status).toMatchObject({
+      connected: true,
+      balance: null,
+      needsReconnect: true,
+    });
+  });
 
   it("does not reuse an expired positive balance when refresh fails", async () => {
     const account = {
@@ -92,6 +114,58 @@ describe("resolveConnection balance cache", () => {
     ]);
   });
 
+  it("surfaces a connection with no eligible customer account", async () => {
+    const account = {
+      getUsableAccessToken: vi.fn().mockResolvedValue("user-token"),
+      [Symbol.dispose]: vi.fn(),
+    };
+    const userStub = {
+      getCloudflareGatekeeperAccount: vi.fn().mockResolvedValue(account),
+      getCloudflareBilling: vi.fn().mockResolvedValue(null),
+      setCloudflareAccountSelection: vi.fn(),
+    };
+    vi.mocked(listAccounts).mockResolvedValue([
+      { accountId: "platform-account", accountName: "Platform" },
+    ]);
+
+    const resolved = await resolveConnection(
+      { CF_AI_GATEWAY_ACCOUNT_ID: "platform-account" } as Cloudflare.Env,
+      userStub as unknown as DurableObjectStub<import("../src/user.js").UserDurableObject>,
+    );
+
+    expect(resolved.status).toMatchObject({
+      connected: true,
+      balance: null,
+      needsAccountSelection: true,
+    });
+    expect(resolved.status.accountId).toBeUndefined();
+    expect(fetchCreditBalance).not.toHaveBeenCalled();
+  });
+
+  it("distinguishes account discovery failure from zero eligible accounts", async () => {
+    const account = {
+      getUsableAccessToken: vi.fn().mockResolvedValue("user-token"),
+      [Symbol.dispose]: vi.fn(),
+    };
+    const userStub = {
+      getCloudflareGatekeeperAccount: vi.fn().mockResolvedValue(account),
+      getCloudflareBilling: vi.fn().mockResolvedValue(null),
+    };
+    vi.mocked(listAccounts).mockResolvedValue(null as never);
+
+    const resolved = await resolveConnection(
+      {} as Cloudflare.Env,
+      userStub as unknown as DurableObjectStub<import("../src/user.js").UserDurableObject>,
+    );
+
+    expect(resolved.status).toMatchObject({
+      connected: true,
+      balance: null,
+      needsAccountSelection: true,
+      accountDiscoveryFailed: true,
+    });
+  });
+
   it("rejects manual selection of the platform account", async () => {
     const account = {
       getUsableAccessToken: vi.fn().mockResolvedValue("user-token"),
@@ -111,6 +185,48 @@ describe("resolveConnection balance cache", () => {
       "platform-account",
     )).rejects.toThrow("platform Cloudflare account cannot fund user inference");
     expect(userStub.setCloudflareAccountSelection).not.toHaveBeenCalled();
+  });
+
+  it("refreshes the balance after user-gateway auxiliary inference", async () => {
+    const account = {
+      getUsableAccessToken: vi.fn().mockResolvedValue("user-token"),
+      [Symbol.dispose]: vi.fn(),
+    };
+    const userStub = {
+      getCloudflareGatekeeperAccount: vi.fn().mockResolvedValue(account),
+      getCloudflareBilling: vi.fn().mockResolvedValue({ accountId: "customer-account" }),
+      updateCloudflareCredits: vi.fn(),
+    };
+    vi.mocked(fetchCreditBalance).mockResolvedValue(8);
+
+    const result = await runWithUserGatewayBalanceRefresh(
+      { REQUIRE_USER_FUNDED_AI: "true" } as Cloudflare.Env,
+      userStub as unknown as DurableObjectStub<import("../src/user.js").UserDurableObject>,
+      async () => "result",
+    );
+
+    expect(result).toBe("result");
+    expect(userStub.updateCloudflareCredits).toHaveBeenCalledWith(8, "customer-account");
+  });
+
+  it("refreshes the balance when user-gateway auxiliary inference fails", async () => {
+    const account = {
+      getUsableAccessToken: vi.fn().mockResolvedValue("user-token"),
+      [Symbol.dispose]: vi.fn(),
+    };
+    const userStub = {
+      getCloudflareGatekeeperAccount: vi.fn().mockResolvedValue(account),
+      getCloudflareBilling: vi.fn().mockResolvedValue({ accountId: "customer-account" }),
+      updateCloudflareCredits: vi.fn(),
+    };
+    vi.mocked(fetchCreditBalance).mockResolvedValue(7);
+
+    await expect(runWithUserGatewayBalanceRefresh(
+      { REQUIRE_USER_FUNDED_AI: "true" } as Cloudflare.Env,
+      userStub as unknown as DurableObjectStub<import("../src/user.js").UserDurableObject>,
+      async () => { throw new Error("inference failed"); },
+    )).rejects.toThrow("inference failed");
+    expect(userStub.updateCloudflareCredits).toHaveBeenCalledWith(7, "customer-account");
   });
 
   it("invalidates a positive cache when required-mode refresh fails", async () => {

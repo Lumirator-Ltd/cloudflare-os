@@ -38,7 +38,10 @@ import {
 } from "./ai-gateway-billing/limits/usage-checker";
 import { isUserFundedAiRequired } from "./ai-gateway-billing/config";
 import { completeAgentCatalogSnapshot, normalizeAgentCatalog } from "./agent-catalog";
-import { refreshCachedBalance } from "./ai-gateway-billing/cloudflare/connection-service";
+import {
+  refreshCachedBalance,
+  runWithUserGatewayBalanceRefresh,
+} from "./ai-gateway-billing/cloudflare/connection-service";
 import { SharingManager, SharingCaller, CollaboratorRecord, ShareKeyRecord } from "./sharing";
 import { AutoApprovalDrainer } from "./auto-approval";
 import { collectSlashCommands, invokeSlashCommand } from "./slash-commands";
@@ -4697,7 +4700,7 @@ class OverseerImpl implements AgentHooks {
       const user = this.users.get(this.users.idFromString(quick.userId));
       const userGateway = await getRequiredUserGatewayRouting(this.env, user);
       let model = getModel(this.env, quick.config, quick.initiator, {userGateway});
-      let result = await completeText(model, {
+      const infer = () => completeText(model, {
         signal: AbortSignal.timeout(10_000),
         prompt:
             `Choose a short, meaningful JavaScript identifier in ALL_CAPS_WITH_UNDERSCORES ` +
@@ -4712,6 +4715,9 @@ class OverseerImpl implements AgentHooks {
             `\n========== resource description below this line ==========\n` +
             subject,
       });
+      let result = userGateway
+        ? await runWithUserGatewayBalanceRefresh(this.env, user, infer)
+        : await infer();
       let name = result.trim();
       validateBindingName(name);
       if (takenNames.has(name)) return undefined;
@@ -5378,7 +5384,7 @@ class OverseerImpl implements AgentHooks {
         userGateway,
       });
 
-      let result = await completeText(model, {
+      const infer = () => completeText(model, {
         // TODO: Is there a better way to convince the LLM just to summarize and not to follow
         //   instructions in the user message? I tried putting the paragraph in the system
         //   prompt and putting the initial message into `prompt` and also into `messages` and
@@ -5390,6 +5396,9 @@ class OverseerImpl implements AgentHooks {
                 "========== user message below this line ==========\n" +
                 `${initialMessage}`,
       });
+      let result = userGateway
+        ? await runWithUserGatewayBalanceRefresh(this.env, user, infer)
+        : await infer();
 
       let meta = this.storage.chatMeta.get(chatId);
       if (!meta) {
@@ -5438,7 +5447,7 @@ class OverseerImpl implements AgentHooks {
         userGateway,
       });
 
-      let gadgetTitle = await completeText(model, {
+      const infer = () => completeText(model, {
         prompt: "Below is the log of a chat session that led to a coding agent writing " +
                 "code for a small application. Based on the conversation, please generate " +
                 "a short name (2-5 words) for the app or tool the user is trying to build. " +
@@ -5448,6 +5457,9 @@ class OverseerImpl implements AgentHooks {
                 "========== chat log below this line ==========\n" +
                 `${parts.join("\n")}`,
       });
+      let gadgetTitle = userGateway
+        ? await runWithUserGatewayBalanceRefresh(this.env, user, infer)
+        : await infer();
       let title = gadgetTitle.trim();
       if (title && this.ownerId) {
         this.storage.title.put(title);

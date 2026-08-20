@@ -196,6 +196,8 @@ export async function getUsageInfo(
       accountId: status.accountId,
       accountName: status.accountName,
       needsAccountSelection: status.needsAccountSelection,
+      needsReconnect: status.needsReconnect,
+      accountDiscoveryFailed: status.accountDiscoveryFailed,
     };
   }
 
@@ -219,5 +221,7 @@ export async function getUsageInfo(
     accountId: status.accountId,
     accountName: status.accountName,
     needsAccountSelection: status.needsAccountSelection,
+    needsReconnect: status.needsReconnect,
+    accountDiscoveryFailed: status.accountDiscoveryFailed,
   };
 }

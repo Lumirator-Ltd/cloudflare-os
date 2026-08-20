@@ -638,6 +638,17 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return null;
   }
 
+  /** Re-authenticate the first connected Cloudflare account used by the billing flow. */
+  async reconnectCloudflareBillingAccount(): Promise<{url: string}> {
+    let nextAccountId = this.storage.nextAccountId.get();
+    for (let id = 0; id < nextAccountId; id++) {
+      let rec: ConnectedAccountRecord | undefined;
+      try { rec = this.storage.connectedAccounts.get(id); } catch { continue; }
+      if (rec?.vendorId === CLOUDFLARE_VENDOR_ID) return this.reconnectAccount(id);
+    }
+    throw new Error("No connected Cloudflare account.");
+  }
+
   /** The AI Gateway billing state (selected account + cached balance), or null if unset. */
   async getCloudflareBilling(): Promise<CloudflareBilling | null> {
     return this.storage.cloudflareBilling.get();

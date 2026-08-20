@@ -24,19 +24,28 @@ export interface CloudflareAccount {
 }
 
 async function cfRequest<T>(token: string, path: string): Promise<CfEnvelope<T> | null> {
-  const resp = await fetch(`${API_BASE}${path}`, {
-    headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
-  });
-  if (!resp.ok) {
+  try {
+    const resp = await fetch(`${API_BASE}${path}`, {
+      headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
+    });
+    if (!resp.ok) {
+      logger.error("cf-account GET failed", {
+        event: "cloudflare.account.get.failed",
+        path, status: resp.status, statusText: resp.statusText,
+      });
+      return null;
+    }
+    const data = await resp.json() as CfEnvelope<T>;
+    if (!data.success || data.result === undefined) return null;
+    return data;
+  } catch (error) {
     logger.error("cf-account GET failed", {
       event: "cloudflare.account.get.failed",
-      path, status: resp.status, statusText: resp.statusText,
+      path,
+      error,
     });
     return null;
   }
-  const data = await resp.json() as CfEnvelope<T>;
-  if (!data.success || data.result === undefined) return null;
-  return data;
 }
 
 async function cfGet<T>(token: string, path: string): Promise<T | null> {
@@ -49,8 +58,11 @@ const ACCOUNTS_PER_PAGE = 50;
 // Bounds the walk at 500 accounts, since the loop is driven by the provider's own paging.
 const MAX_ACCOUNT_PAGES = 10;
 
-/** List every account the token can access. Requires the `account-settings.read` OAuth scope. */
-export async function listAccounts(token: string): Promise<CloudflareAccount[]> {
+/**
+ * List every account the token can access. Returns null when the first page is unavailable, while a
+ * later failure returns the partial list gathered so far.
+ */
+export async function listAccounts(token: string): Promise<CloudflareAccount[] | null> {
   let accounts: CloudflareAccount[] = [];
   for (let page = 1; page <= MAX_ACCOUNT_PAGES; page++) {
     let query = new URLSearchParams({
@@ -60,9 +72,9 @@ export async function listAccounts(token: string): Promise<CloudflareAccount[]> 
     let envelope = await cfRequest<Array<{ id: string; name: string }>>(
       token, `/accounts?${query}`,
     );
-    // A page that fails mid-walk yields what was gathered: a partial list beats none, and cfRequest
-    // has already logged the failure.
-    if (!envelope?.result) break;
+    // A page that fails mid-walk yields what was gathered: a partial list beats none. A first-page
+    // failure is unknown rather than a confirmed empty account list.
+    if (!envelope?.result) return accounts.length > 0 ? accounts : null;
     let result = envelope.result;
     accounts.push(...result.map((a) => ({ accountId: a.id, accountName: a.name })));
     let perPage = envelope.result_info?.per_page ?? ACCOUNTS_PER_PAGE;

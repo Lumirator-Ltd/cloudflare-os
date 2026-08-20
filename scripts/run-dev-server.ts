@@ -21,7 +21,10 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse } from "jsonc-parser";
 import { resolveBinEntry } from "./bin-entry.ts";
-import { getDevServerConfig } from "./dev-server-config.ts";
+import {
+  getDevServerConfig,
+  WORKSHOP_BACKEND_OPTIONAL_FEATURE_VARS,
+} from "./dev-server-config.ts";
 import { killProcessTree } from "./kill-process-tree.ts";
 import { pnpmCommand } from "./pnpm-command.ts";
 import type { ServiceBinding, WranglerBuild } from "./release/manifest-lib.ts";
@@ -477,21 +480,11 @@ for (const gk of gatekeepers) {
   // environment, so you can run e.g.
   //   ENABLE_CLOUDFLARE_LIMITS=true DAILY_LLM_CALL_LIMIT=1 pnpm dev-server
   // without editing any config files.
-  const OPTIONAL_FEATURE_VARS = [
-    "DISABLE_PASSWORD_AUTH", "AUTH_GATEKEEPERS", "ENABLE_CLOUDFLARE_LIMITS", "PUBLIC_BASE_URL",
-    "DAILY_LLM_CALL_LIMIT", "MINIMUM_CLOUDFLARE_BALANCE",
-    // Platform AI Gateway — makes the cross-provider model catalog available. CF_AI_GATEWAY
-    // always needs CF_AI_GATEWAY_ACCOUNT_ID plus one transport: the WORKERS_AI binding
-    // (start with --use-workers-ai-binding; CF_AI_GATEWAY_USE_BINDING=false opts out, e.g.
-    // when the gateway lives in a different account than the dev binding) or
-    // CF_AI_GATEWAY_API_TOKEN over HTTPS. The google provider can't ride the binding and
-    // needs the token even when the binding is present.
-    "CF_AI_GATEWAY", "CF_AI_GATEWAY_PROVIDERS", "CF_AI_GATEWAY_ACCOUNT_ID",
-    "CF_AI_GATEWAY_API_TOKEN", "CF_AI_GATEWAY_USE_BINDING",
-  ];
+  // Platform AI Gateway variables make the cross-provider model catalog available. CF_AI_GATEWAY
+  // requires an account ID and either the Workers AI binding or an API token transport.
   // OAuth app credentials (GOOGLE_/GITHUB_/CLOUDFLARE_OAUTH_*) are NOT passed to the backend anymore;
   // they are injected into the gatekeeper Workers (see SHARED_GATEKEEPER_CREDS below).
-  for (const name of OPTIONAL_FEATURE_VARS) {
+  for (const name of WORKSHOP_BACKEND_OPTIONAL_FEATURE_VARS) {
     if (process.env[name] !== undefined) config.vars[name] = process.env[name];
   }
 

@@ -21,8 +21,9 @@ export default function UsageSettings() {
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
 
-  // Account-selection state (only used when the user has multiple Cloudflare accounts).
+  // Account-selection state used when no eligible billing account is selected.
   const [accounts, setAccounts] = useState<CloudflareAccountOption[] | null>(null)
+  const [accountLoadFailed, setAccountLoadFailed] = useState(false)
   const [selecting, setSelecting] = useState<string | null>(null)
 
   const refresh = useCallback(() => {
@@ -39,17 +40,28 @@ export default function UsageSettings() {
     }
     refresh()
     // Re-check when the tab regains focus (e.g. after connecting / topping up elsewhere).
-    const onFocus = () => refresh()
+    const onFocus = () => {
+      setAccounts(null)
+      setAccountLoadFailed(false)
+      refresh()
+    }
     window.addEventListener('focus', onFocus)
     return () => window.removeEventListener('focus', onFocus)
   }, [limitsEnabled, refresh])
 
   // When the server says the user must pick an account, load the list of accounts to choose from.
   useEffect(() => {
-    if (usage?.connected && usage.needsAccountSelection && accounts === null) {
+    if (usage?.connected && usage.needsAccountSelection &&
+        !usage.accountDiscoveryFailed && accounts === null) {
       authenticatedApi.listCloudflareAccounts()
-        .then((list: CloudflareAccountOption[]) => setAccounts(list))
-        .catch(() => setAccounts([]))
+        .then((list: CloudflareAccountOption[]) => {
+          setAccountLoadFailed(false)
+          setAccounts(list)
+        })
+        .catch(() => {
+          setAccountLoadFailed(true)
+          setAccounts([])
+        })
     }
   }, [usage, accounts, authenticatedApi])
 
@@ -71,6 +83,29 @@ export default function UsageSettings() {
     } finally {
       setBusy(false)
     }
+  }
+
+  const reconnect = async () => {
+    setBusy(true)
+    try {
+      const { url } = await authenticatedApi.reconnectCloudflareBillingAccount()
+      setAccounts(null)
+      setAccountLoadFailed(false)
+      window.open(url, '_blank', 'noopener,noreferrer')
+    } catch (error) {
+      toasts.add({
+        title: connectionErrorMessage(error, 'Failed to reconnect Cloudflare'),
+        variant: 'error',
+      })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const retryAccountDiscovery = () => {
+    setAccounts(null)
+    setAccountLoadFailed(false)
+    refresh()
   }
 
   const selectAccount = async (accountId: string) => {
@@ -142,23 +177,50 @@ export default function UsageSettings() {
                   </Button>
                 </div>
               </div>
-            ) : usage.needsAccountSelection ? (
-              // Connected, but multiple accounts — force the user to choose which one to bill.
+            ) : usage.needsReconnect ? (
               <div className="space-y-3">
                 <div className="flex items-center gap-2 text-sm text-kumo-default">
                   <Warning size={18} weight="bold" className="text-kumo-warning" />
-                  <span>Choose which Cloudflare account to bill</span>
+                  <span>Cloudflare connection needs re-authentication</span>
                 </div>
                 <p className="text-sm text-kumo-subtle">
-                  Your connection has access to multiple Cloudflare accounts. Select the one whose
-                  AI Gateway credits should be used.
+                  Re-authenticate the connected Cloudflare account before AI inference can continue.
                 </p>
-                {accounts === null ? (
+                <Button variant="primary" size="sm" onClick={reconnect} loading={busy}>
+                  <Lightning size={14} weight="bold" className="mr-1" />
+                  Re-authenticate Cloudflare
+                </Button>
+              </div>
+            ) : usage.needsAccountSelection ? (
+              <div className="space-y-3">
+                <div className="flex items-center gap-2 text-sm text-kumo-default">
+                  <Warning size={18} weight="bold" className="text-kumo-warning" />
+                  <span>
+                    {usage.accountDiscoveryFailed || accountLoadFailed
+                      ? 'Unable to load Cloudflare accounts'
+                      : accounts?.length === 0
+                        ? 'No eligible Cloudflare account'
+                        : 'Choose which Cloudflare account to bill'}
+                  </span>
+                </div>
+                <p className="text-sm text-kumo-subtle">
+                  {usage.accountDiscoveryFailed || accountLoadFailed
+                    ? 'Cloudflare account discovery is temporarily unavailable. Try again.'
+                    : accounts?.length === 0
+                      ? 'This connection has no eligible customer account. Re-authenticate it with access to your own Cloudflare account.'
+                      : 'Select the Cloudflare account whose AI Gateway credits should be used.'}
+                </p>
+                {usage.accountDiscoveryFailed || accountLoadFailed ? (
+                  <Button variant="secondary" size="sm" onClick={retryAccountDiscovery}>
+                    Try again
+                  </Button>
+                ) : accounts === null ? (
                   <p className="text-sm text-kumo-subtle">Loading accounts…</p>
                 ) : accounts.length === 0 ? (
-                  <p className="text-sm text-kumo-subtle">
-                    No accounts available on this connection.
-                  </p>
+                  <Button variant="primary" size="sm" onClick={reconnect} loading={busy}>
+                    <Lightning size={14} weight="bold" className="mr-1" />
+                    Re-authenticate Cloudflare
+                  </Button>
                 ) : (
                   <div className="flex flex-col gap-2">
                     {accounts.map((a) => (

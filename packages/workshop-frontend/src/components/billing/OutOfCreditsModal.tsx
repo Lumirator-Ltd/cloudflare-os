@@ -23,6 +23,7 @@ export default function OutOfCreditsModal({ open, onClose }: OutOfCreditsModalPr
   const [usage, setUsage] = useState<CloudflareUsageInfo | null>(null)
   const [connecting, setConnecting] = useState(false)
   const [accounts, setAccounts] = useState<CloudflareAccountOption[] | null>(null)
+  const [accountLoadFailed, setAccountLoadFailed] = useState(false)
   const [selecting, setSelecting] = useState<string | null>(null)
 
   const refresh = useCallback(() => {
@@ -36,11 +37,13 @@ export default function OutOfCreditsModal({ open, onClose }: OutOfCreditsModalPr
     if (!open || !auth) return
     setUsage(null)
     setAccounts(null)
+    setAccountLoadFailed(false)
     refresh()
     // Re-check when the tab regains focus, so returning from the "Connect Cloudflare" OAuth pop-up
     // updates the modal (connected state / balance / account list) without reopening it.
     const onFocus = () => {
       setAccounts(null)
+      setAccountLoadFailed(false)
       refresh()
     }
     window.addEventListener('focus', onFocus)
@@ -50,10 +53,17 @@ export default function OutOfCreditsModal({ open, onClose }: OutOfCreditsModalPr
   // Load the account list when the server says the user must pick one.
   useEffect(() => {
     if (!auth) return
-    if (usage?.connected && usage.needsAccountSelection && accounts === null) {
+    if (usage?.connected && usage.needsAccountSelection &&
+        !usage.accountDiscoveryFailed && accounts === null) {
       auth.authenticatedApi.listCloudflareAccounts()
-        .then((list: CloudflareAccountOption[]) => setAccounts(list))
-        .catch(() => setAccounts([]))
+        .then((list: CloudflareAccountOption[]) => {
+          setAccountLoadFailed(false)
+          setAccounts(list)
+        })
+        .catch(() => {
+          setAccountLoadFailed(true)
+          setAccounts([])
+        })
     }
   }, [auth, usage, accounts])
 
@@ -73,6 +83,30 @@ export default function OutOfCreditsModal({ open, onClose }: OutOfCreditsModalPr
     }
   }
 
+  const reconnect = async () => {
+    if (!auth) return
+    setConnecting(true)
+    try {
+      const { url } = await auth.authenticatedApi.reconnectCloudflareBillingAccount()
+      setAccounts(null)
+      setAccountLoadFailed(false)
+      window.open(url, '_blank', 'noopener,noreferrer')
+    } catch (error) {
+      toasts.add({
+        title: connectionErrorMessage(error, 'Failed to reconnect Cloudflare'),
+        variant: 'error',
+      })
+    } finally {
+      setConnecting(false)
+    }
+  }
+
+  const retryAccountDiscovery = () => {
+    setAccounts(null)
+    setAccountLoadFailed(false)
+    refresh()
+  }
+
   const selectAccount = async (accountId: string) => {
     if (!auth) return
     setSelecting(accountId)
@@ -89,8 +123,10 @@ export default function OutOfCreditsModal({ open, onClose }: OutOfCreditsModalPr
   }
 
   const connected = usage?.connected ?? false
+  const needsReconnect = connected && (usage?.needsReconnect ?? false)
   const needsSelection = connected && (usage?.needsAccountSelection ?? false)
   const userFundingRequired = usage?.userFundingRequired ?? false
+  const accountDiscoveryFailed = usage?.accountDiscoveryFailed || accountLoadFailed
 
   return (
     <Dialog.Root open={open} onOpenChange={(o) => { if (!o) onClose() }}>
@@ -122,10 +158,17 @@ export default function OutOfCreditsModal({ open, onClose }: OutOfCreditsModalPr
                   </>
                 )}
               </p>
+            ) : needsReconnect ? (
+              <p className="text-sm text-kumo-subtle">
+                Re-authenticate the connected Cloudflare account before AI inference can continue.
+              </p>
             ) : needsSelection ? (
               <p className="text-sm text-kumo-subtle">
-                Your Cloudflare connection has access to multiple accounts. Choose which one's AI
-                Gateway credits should be billed{userFundingRequired ? '.' : ' beyond the free tier.'}
+                {accountDiscoveryFailed
+                  ? 'Cloudflare account discovery is temporarily unavailable. Try again.'
+                  : accounts?.length === 0
+                    ? 'This connection has no eligible customer account. Re-authenticate it with access to your own Cloudflare account.'
+                    : `Choose which Cloudflare account's AI Gateway credits should be billed${userFundingRequired ? '.' : ' beyond the free tier.'}`}
               </p>
             ) : (
               <p className="text-sm text-kumo-subtle">
@@ -146,10 +189,12 @@ export default function OutOfCreditsModal({ open, onClose }: OutOfCreditsModalPr
 
             {needsSelection && (
               <div className="flex flex-col gap-2">
-                {accounts === null ? (
+                {accountDiscoveryFailed ? (
+                  <Button variant="secondary" onClick={retryAccountDiscovery}>Try again</Button>
+                ) : accounts === null ? (
                   <p className="text-sm text-kumo-subtle">Loading accounts…</p>
                 ) : accounts.length === 0 ? (
-                  <p className="text-sm text-kumo-subtle">No accounts available on this connection.</p>
+                  <p className="text-sm text-kumo-subtle">No eligible accounts are available on this connection.</p>
                 ) : (
                   accounts.map((a) => (
                     <Button
@@ -189,8 +234,24 @@ export default function OutOfCreditsModal({ open, onClose }: OutOfCreditsModalPr
                     Connect Cloudflare
                   </Button>
                 </>
+              ) : needsReconnect ? (
+                <>
+                  <Button variant="secondary" onClick={onClose}>Close</Button>
+                  <Button variant="primary" onClick={reconnect} loading={connecting}>
+                    <Lightning size={16} weight="bold" />
+                    Re-authenticate Cloudflare
+                  </Button>
+                </>
               ) : needsSelection ? (
-                <Button variant="secondary" onClick={onClose}>Close</Button>
+                <>
+                  <Button variant="secondary" onClick={onClose}>Close</Button>
+                  {!accountDiscoveryFailed && accounts?.length === 0 && (
+                    <Button variant="primary" onClick={reconnect} loading={connecting}>
+                      <Lightning size={16} weight="bold" />
+                      Re-authenticate Cloudflare
+                    </Button>
+                  )}
+                </>
               ) : (
                 <>
                   <Button variant="secondary" onClick={onClose}>Close</Button>
