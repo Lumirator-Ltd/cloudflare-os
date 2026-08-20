@@ -193,8 +193,8 @@ export type AccountDescription = {
    */
   uniqueName?: string;
 
-  /** User's avatar image. */
-  avatar: AvatarImage;
+  /** Optional avatar image for the external account. */
+  avatar?: AvatarImage;
 
   /**
    * `urlPattern`s of the grantable resource types (those with `grantable`; see
