@@ -351,6 +351,10 @@ export abstract class McpAccountBase<E extends AccountEnv, P = unknown>
       if (generation !== this.connectionGeneration()) {
         throw new Error("This connection attempt was replaced by a newer one.");
       }
+      if (server.auth === "oauth") {
+        this.restoreSelection(initiationNonce);
+        throw new Error("This MCP server must require OAuth authorization.");
+      }
       // A `"token"` endpoint is probed *with* its preissued bearer (see `probe`), so completing the
       // handshake says nothing about whether it is public; recording `"none"` here would drop that
       // token from every later request. Only an endpoint that answered with no credential at all is.

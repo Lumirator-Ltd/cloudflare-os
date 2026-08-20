@@ -95,6 +95,15 @@ class UnconfiguredTokenAccount extends McpAccountBase<AccountEnv> {
   }
 }
 
+class PublicProbeAccount extends McpAccountBase<AccountEnv> {
+  protected baseUrl(): string { return "https://gatekeeper.example"; }
+  protected log(): never { return testLog as never; }
+  protected mintAccount(): never { throw new Error("not reached"); }
+  protected override async probe(): Promise<never> {
+    return { serverInfo: { name: "Public" } } as never;
+  }
+}
+
 class AuthChallengeAccount extends McpAccountBase<AccountEnv> {
   protected baseUrl(): string { return "https://gatekeeper.example"; }
   protected log(): never { return testLog as never; }
@@ -369,6 +378,19 @@ describe("connect initiation nonce", () => {
     expect(context.storage.kv.get("server")).toBeUndefined();
     expect(context.storage.kv.get("connected")).toBeUndefined();
     expect(account.isWaiting(nonce)).toBe(true);
+  });
+
+  it("refuses an OAuth-configured endpoint that answers without authorization", async () => {
+    const context = fakeContext();
+    context.storage.kv.put("callback", { credentialsRestored: async () => undefined });
+    const account = new PublicProbeAccount(context as never, {});
+    const nonce = "7".repeat(64);
+    await account.prepareReconnect(nonce);
+
+    await expect(account.beginConnect(nonce, {
+      ...server("https://portal.example/mcp"), auth: "oauth", provenance: "deployment",
+    })).rejects.toThrow(/must require OAuth/i);
+    expect(context.storage.kv.get("connected")).toBeUndefined();
   });
 
   it("adopts OAuth but refuses a private authorization redirect", async () => {
