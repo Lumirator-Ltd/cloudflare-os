@@ -1575,6 +1575,13 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       resourceUrlPattern: string): Promise<ResourceConfiguratorFrame> {
     let record = this.storage.connectedAccounts.get(accountId);
     if (!record) throw new Error("No such account.");
+    const resource = (await record.account.getSupportedResources())
+        .find(candidate => candidate.urlPattern === resourceUrlPattern);
+    if (!resource) throw new Error("Unsupported resource configurator.");
+    if (!resourceAllowsNewConnections(resource)) {
+      throw new Error(
+          `The "${resource.title}" resource is no longer available for new connections.`);
+    }
     return record.account.startResourceConfigurator(resourceUrlPattern);
   }
 

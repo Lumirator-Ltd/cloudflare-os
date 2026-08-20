@@ -76,6 +76,9 @@ describe("kind-aware issue and pull-request search validation", () => {
     "https://github.com/cloudflare//workerd/pull/12",
     "https://user@github.com/cloudflare/workerd/pull/12",
     "https://github.com:8443/cloudflare/workerd/pull/12",
+    "https://github.com:443/cloudflare/workerd/pull/12",
+    "https://github.com/cloudflare/workerd/pull/12?source=api",
+    "https://github.com/cloudflare/workerd/pull/12#discussion",
   ])("rejects malformed or out-of-scope pull-request result %s", htmlUrl => {
     expect(() => assertPullRequestSearchResultsInScope(issueScope, [{
       html_url: htmlUrl,

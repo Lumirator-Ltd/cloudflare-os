@@ -22,13 +22,13 @@ Replace the GitHub repository, issue, and pull-request choices in **Create New C
 
 `getSupportedResources()` is a compatibility and admin-policy catalog used by blueprints, disabled-resource controls, and persisted binding metadata. It continues returning all four GitHub resource types.
 
-Add an optional, backward-compatible `newConnectionsAllowed` property to `SupportedResource`, defaulting to `true`. Repository, issue, and pull-request resources set it to `false`; the account resource uses the default. Every new-binding surface filters this policy: `ResourcePicker` (including existing OAuth-account choices and URL refinement), `GatekeeperModal`, and agent discovery/request flows. `UserDurableObject.getGatekeeperClassFor()` enforces it again at the capability-minting chokepoint so a crafted client cannot bypass the filters.
+Add an optional, backward-compatible `newConnectionsAllowed` property to `SupportedResource`, defaulting to `true`. Repository, issue, and pull-request resources set it to `false`; the account resource uses the default. Every new-binding surface filters this policy: `ResourcePicker` (including existing OAuth-account choices and URL refinement), `GatekeeperModal`, agent discovery/request flows, and direct resource-configurator startup. `UserDurableObject.getGatekeeperClassFor()` enforces it again at the capability-minting chokepoint so a crafted client cannot bypass the filters.
 
 Existing persisted scoped gatekeepers retain their stored classes and rehydrate without calling the new-capability chokepoint, preserving their scoped reads and mutations. The full catalog remains available to admin and compatibility consumers, but scoped blueprint references cannot mint a new scoped binding. No storage migration is required.
 
 ## Authorization model
 
-The OAuth grant has the existing `repo`, `read:user`, and `user:email` scopes, but the capability exposed by `GitHubAccount` is read-only. Every account operation, including repository resolution and cursor creation, authorizes an observation with `prohibitAllSharing: true` before any read occurs. The Overseer rejects the observation when the workspace is already shared; otherwise it permanently disables future sharing and actions for that workspace. Lockdown is serialized against every mutation that can create or extend non-owner access: the transition that starts first may finish and the other fails closed. Sharing revocation starts before graph reachability changes and blocks both account observations and action application through observer cleanup and live-session invalidation. The durability barrier must complete and the delayed abort must be registered with `waitUntil` before revocation reports success; sync failure reports failure and schedules a fail-closed abort. When anyone is affected, only the Overseer restart clears that in-memory transition. Lazy cursor page fetches remain behind the authorized operation and all remote calls use the credential-aware API boundary.
+The OAuth grant has the existing `repo`, `read:user`, and `user:email` scopes, but the capability exposed by `GitHubAccount` is read-only. Every account operation, including repository resolution and cursor creation, authorizes an observation with `prohibitAllSharing: true` before any read occurs. The Overseer rejects the observation when the workspace is already shared; otherwise it permanently disables future sharing and actions for that workspace. Lockdown is serialized against every mutation that can create or extend non-owner access: the transition that starts first may finish and the other fails closed. Sharing revocation starts before graph reachability changes and blocks both account observations and action application through observer cleanup and live-session invalidation. Each permission-graph revocation and its affected-user computation run in one synchronous Durable Object storage transaction, so a post-write exception rolls the complete graph mutation back before the transition can be released. The durability barrier must complete and the delayed abort must be registered with `waitUntil` before a committed revocation reports success; sync failure reports failure and schedules a fail-closed abort. When anyone is affected, only the Overseer restart clears that in-memory transition. Lazy cursor page fetches remain behind the authorized operation and all remote calls use the credential-aware API boundary.
 
 Existing persisted repository/issue/pull-request connections retain their scoped mutation methods for compatibility. No new scoped connection can be created through UI, agent, blueprint, or direct capability-minting paths. A future just-in-time write authorization flow is out of scope.
 
@@ -36,7 +36,7 @@ Existing persisted repository/issue/pull-request connections retain their scoped
 
 Add `resolveRepo(input)` to the account capability. It returns a discriminated result: `resolved`, `notFound`, or `ambiguous`. Ambiguous results contain only canonical accessible repository summaries so the agent can ask the user to choose.
 
-Exact qualified names and canonical repository URLs use direct authenticated repository lookup, including repositories that would fall beyond any listing bound. Inputs are literal: qualified identifiers are not trimmed and `.git` is not silently removed. Bare names use exact, case-insensitive matching over the all-affiliations repository listing with a hard page/result limit. Reaching the limit before proving uniqueness returns a bounded-resolution error instructing the user to provide `owner/name`; it must not return a potentially incorrect result.
+Exact qualified names and canonical repository URLs use direct authenticated repository lookup, including repositories that would fall beyond any listing bound. Inputs are literal: qualified identifiers are not trimmed and `.git` is not silently removed. Bare names use exact, case-insensitive matching over the all-affiliations repository listing ordered stably by ascending `full_name`, with a hard page/result limit. Reaching the limit before proving uniqueness returns a bounded-resolution error instructing the user to provide `owner/name`; it must not return a potentially incorrect result.
 
 Explicit repository identifiers and URLs use the strict GitHub parser. Resource URLs must be canonical `https://github.com` URLs with no userinfo, port, query, fragment, duplicate slash, trailing segment, or invalid owner/repository/number. Issue and PR numbers are positive safe integers. Non-GitHub, whitespace-normalized, and malformed inputs fail without widening scope.
 
@@ -61,7 +61,7 @@ All multi-repository account caches include case-normalized owner, repository, e
 
 ## Credential behavior
 
-All account reads execute through the existing `GitHubGatekeeperImpl.#withApi()` boundary. A GitHub `401` marks the connected account expired and returns the reconnect message instead of exposing raw `Bad credentials`.
+All account reads and legacy observer verification execute through the credential-aware API boundary. Each request uses a snapshot containing the token and its monotonically increasing credential generation. A delayed `401` can mark only the generation that issued the request, so it cannot expire a later reconnect. Expiry delivery is latched only after the Workshop callback succeeds; callback failure remains internal, returns stable reconnect guidance, and allows a later `401` to retry notification instead of exposing raw `Bad credentials`.
 
 The deployment does not rotate or rewrite OAuth grants. Shared connector Worker identity and Durable Object storage remain unchanged by tenant deployment.
 
@@ -71,15 +71,16 @@ Tests establish:
 
 1. the full supported-resource catalog still contains account/repository/issue/PR, while only account permits new bindings;
 2. all UI and agent new-binding surfaces filter blocked types, direct capability minting rejects them, persisted scoped gatekeepers still rehydrate, and admin/compatibility catalogs remain complete;
-3. the repository resolver handles URLs, `owner/name`, all affiliations/pages, zero matches, ambiguity, and the hard bound without guessing;
+3. the repository resolver handles URLs, `owner/name`, stable all-affiliations pagination, zero matches, ambiguity, and the hard bound without guessing;
 4. issue/PR query builders quote user input and cannot escape owner/repository scope;
-5. validators reject cross-owner, cross-repository, wrong-host, malformed, and issue-vs-PR mismatches;
+5. validators reject cross-owner, cross-repository, wrong-host, non-canonical URL, malformed, and issue-vs-PR mismatches;
 6. account reads validate repository names and positive integer numbers and isolate same-number cache entries across repositories;
 7. account capability types expose no mutation methods;
-8. every account operation forces `prohibitAllSharing`, rejection prevents reads, and deferred backend tests cover sharing grants, key redemption, action application, revocations, durability failure, and restart registration in both race orderings with lockdown;
-9. account cursor page sizes reject non-finite, non-positive, fractional, and greater-than-200 values before approval or cached/uncached cursor creation;
-10. `src/types.txt` remains the tracked symlink to `types.d.ts`, so runtime-served agent types include the new account methods;
-11. package tests, frontend tests, repository lint/typecheck, and build pass.
+8. every account operation forces `prohibitAllSharing`, rejection prevents reads, and deferred backend tests cover sharing grants, key redemption, action application, atomic revocation rollback, durability failure, and restart registration in both race orderings with lockdown;
+9. credential tests cover generation-bound stale `401`s, retry after callback failure, verifier expiry handling, and reconnect guidance;
+10. account cursor page sizes reject non-finite, non-positive, fractional, and greater-than-200 values before approval or cached/uncached cursor creation;
+11. `src/types.txt` remains the tracked symlink to `types.d.ts`, so runtime-served agent types include the new account methods;
+12. package tests, frontend tests, repository lint/typecheck, and build pass.
 
 ## Documentation
 

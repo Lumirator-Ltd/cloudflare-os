@@ -127,16 +127,22 @@ describe("resolveGitHubRepo", () => {
     });
     expect(resolverCallbacks.listRepos).toHaveBeenNthCalledWith(1, {
       affiliation: "owner,collaborator,organization_member",
+      sort: "full_name",
+      direction: "asc",
       page: 1,
       perPage: GITHUB_REPO_RESOLUTION_PAGE_SIZE,
     });
     expect(resolverCallbacks.listRepos).toHaveBeenNthCalledWith(2, {
       affiliation: "owner,collaborator,organization_member",
+      sort: "full_name",
+      direction: "asc",
       page: 2,
       perPage: GITHUB_REPO_RESOLUTION_PAGE_SIZE,
     });
     expect(resolverCallbacks.listRepos).toHaveBeenNthCalledWith(3, {
       affiliation: "owner,collaborator,organization_member",
+      sort: "full_name",
+      direction: "asc",
       page: 3,
       perPage: GITHUB_REPO_RESOLUTION_PAGE_SIZE,
     });

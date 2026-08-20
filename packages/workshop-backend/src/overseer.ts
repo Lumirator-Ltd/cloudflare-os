@@ -2705,7 +2705,8 @@ class OverseerImpl implements AgentHooks {
   }
 
   async runSharingRevocation(
-      mutation: () => AffectedCollaborator[] | Promise<AffectedCollaborator[]>,
+      prepareMutation: () => (() => AffectedCollaborator[])
+          | Promise<() => AffectedCollaborator[]>,
       cleanup: (affected: AffectedCollaborator[]) => Promise<void>)
       : Promise<AffectedCollaborator[]> {
     this.#assertSharingMutationAllowed();
@@ -2718,7 +2719,10 @@ class OverseerImpl implements AgentHooks {
     this.#activeSharingRevocations += 1;
     let remainFailClosed = false;
     try {
-      let affected = await mutation();
+      // Resolve the sharing manager only after registering the transition, but keep the complete
+      // permission-graph mutation (including affected-user computation) synchronous and atomic.
+      const mutation = await prepareMutation();
+      let affected = this.ctx.storage.transactionSync(mutation);
       if (affected.length === 0) return affected;
 
       // Existing sessions retain their old capability until the abort, so this instance must never
@@ -9113,8 +9117,10 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async removeCollaborator(profileId: string, keepUsers: string[]): Promise<AffectedCollaborator[]> {
     return await this.impl.runSharingRevocation(
-        async () => (await this.impl.getSharingManager())
-            .removeCollaborator(this.#sharingCaller(), profileId, keepUsers),
+        async () => {
+          let sharing = await this.impl.getSharingManager();
+          return () => sharing.removeCollaborator(this.#sharingCaller(), profileId, keepUsers);
+        },
         async affected => {
           await this.impl.tearDownLostObservers(affected);
           await this.impl.refreshAffectedCollaboratorListings(affected);
@@ -9128,8 +9134,10 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async revokeShareLink(linkId: string, keepUsers: string[]): Promise<AffectedCollaborator[]> {
     return await this.impl.runSharingRevocation(
-        async () => (await this.impl.getSharingManager())
-            .revokeShareLink(this.#sharingCaller(), linkId, keepUsers),
+        async () => {
+          let sharing = await this.impl.getSharingManager();
+          return () => sharing.revokeShareLink(this.#sharingCaller(), linkId, keepUsers);
+        },
         async affected => {
           await this.impl.tearDownLostObservers(affected);
           await this.impl.refreshAffectedCollaboratorListings(affected);

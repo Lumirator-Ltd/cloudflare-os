@@ -15,7 +15,11 @@ type SharingPolicyOverseer = {
     prohibitAllSharing: { get(): boolean; put(value: boolean): void };
   };
   ctx: {
-    storage: { sync(): Promise<void> };
+    storage: {
+      sync(): Promise<void>;
+      transactionSync<T>(callback: () => T): T;
+      kv: { get<T>(key: string): T | undefined; put<T>(key: string, value: T): void };
+    };
     waitUntil(promise: Promise<unknown>): void;
     abort(reason: string): void;
   };
@@ -35,7 +39,8 @@ type SharingPolicyOverseer = {
   refreshAffectedCollaboratorListings(affected: AffectedCollaborator[]): Promise<void>;
   scheduleRevocationRestart(): Promise<void>;
   runSharingRevocation(
-    mutation: () => AffectedCollaborator[] | Promise<AffectedCollaborator[]>,
+    prepareMutation: () => (() => AffectedCollaborator[])
+      | Promise<() => AffectedCollaborator[]>,
     cleanup: (affected: AffectedCollaborator[]) => Promise<void>,
   ): Promise<AffectedCollaborator[]>;
   applyPendingAction(
@@ -495,7 +500,10 @@ describe("Overseer sharing transition concurrency", () => {
       target.getGatekeeperFacet = () => ({ applyAction });
 
       const revoking = target.runSharingRevocation(
-        () => revocationGate.promise,
+        async () => {
+          const affected = await revocationGate.promise;
+          return () => affected;
+        },
         async () => undefined,
       );
       await expect(target.applyPendingAction(pendingAction(), RESOLVER, autoApproved))
@@ -512,7 +520,7 @@ describe("Overseer sharing transition concurrency", () => {
     async autoApproved => {
       const target = overseer(false);
       const applyGate = deferred<void>();
-      const mutation = vi.fn(() => affectedCollaborator());
+      const mutation = vi.fn(() => () => affectedCollaborator());
       target.getGatekeeperFacet = () => ({ applyAction: () => applyGate.promise });
 
       const applying = target.applyPendingAction(pendingAction(), RESOLVER, autoApproved);
@@ -616,14 +624,18 @@ describe("Overseer sharing transition concurrency", () => {
     await expect(sensitiveObservation(target)).rejects.toThrow("sharing access is being revoked");
   });
 
-  it("releases a revocation transition when graph mutation fails before changing access", async () => {
+  it("rolls back a partial graph mutation before releasing a failed revocation", async () => {
     const target = overseer(false);
     const cleanup = vi.fn(async () => undefined);
 
     await expect(target.runSharingRevocation(
-      async () => { throw new Error("revocation failed"); },
+      () => () => {
+        target.ctx.storage.kv.put("sharing/partial-revocation", true);
+        throw new Error("revocation failed after write");
+      },
       cleanup,
-    )).rejects.toThrow("revocation failed");
+    )).rejects.toThrow("revocation failed after write");
+    expect(target.ctx.storage.kv.get("sharing/partial-revocation")).toBeUndefined();
     expect(cleanup).not.toHaveBeenCalled();
     await expect(sensitiveObservation(target)).resolves.toBeUndefined();
     expect(target.storage.prohibitAllSharing.get()).toBe(true);

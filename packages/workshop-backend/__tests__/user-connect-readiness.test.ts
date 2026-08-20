@@ -53,6 +53,48 @@ function connectedUser(newConnectionsAllowed: boolean | undefined = undefined) {
   };
 }
 
+function configuratorUser() {
+  let configuratorCalls = 0;
+  const resources = [
+    {
+      urlPattern: "https://github.com",
+      title: "GitHub account",
+      description: "An account",
+    },
+    {
+      urlPattern: "https://github.com/:owner/:repo",
+      title: "GitHub repository",
+      description: "A repository",
+      newConnectionsAllowed: false,
+    },
+    {
+      urlPattern: "https://github.com/:owner/:repo/issues/:number",
+      title: "GitHub issue",
+      description: "An issue",
+      newConnectionsAllowed: false,
+    },
+    {
+      urlPattern: "https://github.com/:owner/:repo/pull/:number",
+      title: "GitHub pull request",
+      description: "A pull request",
+      newConnectionsAllowed: false,
+    },
+  ];
+  const account = {
+    async getSupportedResources() { return resources; },
+    async startResourceConfigurator() {
+      configuratorCalls++;
+      return { url: "https://example.com/configurator" };
+    },
+  };
+  const record = { id: 7, account, vendorId: "github", description: { avatar: { url: "" } } };
+  const user = Object.create(UserDurableObject.prototype) as UserDurableObject;
+  Object.assign(user, {
+    storage: { connectedAccounts: { get: (id: number) => id === 7 ? record : undefined } },
+  });
+  return { user, calls: () => configuratorCalls };
+}
+
 describe("UserDurableObject connector readiness", () => {
   it("rejects an unconfigured connector before allocating account state or connecting", async () => {
     let nextAccountId = 12;
@@ -130,5 +172,23 @@ describe("UserDurableObject connector readiness", () => {
     await expect(user.getGatekeeperClassFor(7, "https://github.com/cloudflare/workers-sdk"))
       .rejects.toThrow("no longer available for new connections");
     expect(calls().capabilityCalls).toBe(1);
+  });
+
+  it("starts only configurators that allow new connections", async () => {
+    const { user, calls } = configuratorUser();
+
+    await expect(user.startResourceConfigurator(7, "https://github.com"))
+      .resolves.toEqual({ url: "https://example.com/configurator" });
+    for (const pattern of [
+      "https://github.com/:owner/:repo",
+      "https://github.com/:owner/:repo/issues/:number",
+      "https://github.com/:owner/:repo/pull/:number",
+    ]) {
+      await expect(user.startResourceConfigurator(7, pattern))
+        .rejects.toThrow("no longer available for new connections");
+    }
+    await expect(user.startResourceConfigurator(7, "https://github.com/:unknown"))
+      .rejects.toThrow("Unsupported resource configurator");
+    expect(calls()).toBe(1);
   });
 });

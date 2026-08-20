@@ -125,6 +125,7 @@ export function assertGitHubAccountEntityResponse(
   const expectedPathKind = kind === "issue" ? "issues" : "pull";
   if (url.protocol !== "https:" || url.host.toLowerCase() !== "github.com"
       || url.username !== "" || url.password !== ""
+      || response.html_url !== `https://github.com${url.pathname}`
       || segments.length !== 4
       || url.pathname !== `/${owner}/${repoName}/${pathKind}/${rawNumber}`
       || owner?.toLowerCase() !== repo.owner.toLowerCase()

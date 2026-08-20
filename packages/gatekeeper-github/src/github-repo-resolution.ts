@@ -12,6 +12,8 @@ export type GitHubRepoResolutionCallbacks = {
   getRepo(owner: string, repo: string): Promise<GitHubRepoSummary | null>;
   listRepos(options: {
     affiliation: typeof ALL_REPO_AFFILIATIONS;
+    sort: "full_name";
+    direction: "asc";
     page: number;
     perPage: number;
   }): Promise<readonly GitHubRepoSummary[]>;
@@ -95,6 +97,8 @@ export async function resolveGitHubRepo(
   for (let page = 1; page <= GITHUB_REPO_RESOLUTION_MAX_PAGES; page++) {
     const repos = await callbacks.listRepos({
       affiliation: ALL_REPO_AFFILIATIONS,
+      sort: "full_name",
+      direction: "asc",
       page,
       perPage: GITHUB_REPO_RESOLUTION_PAGE_SIZE,
     });

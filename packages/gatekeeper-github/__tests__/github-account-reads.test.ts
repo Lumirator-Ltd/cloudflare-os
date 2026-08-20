@@ -122,6 +122,9 @@ describe("account entity response validation", () => {
     ["pull", 12, "https://github.com/cloudflare//workerd/pull/12"],
     ["pull", 12, "https://user@github.com/cloudflare/workerd/pull/12"],
     ["pull", 12, "https://github.com:8443/cloudflare/workerd/pull/12"],
+    ["pull", 12, "https://github.com:443/cloudflare/workerd/pull/12"],
+    ["pull", 12, "https://github.com/cloudflare/workerd/pull/12?source=api"],
+    ["pull", 12, "https://github.com/cloudflare/workerd/pull/12#discussion"],
     ["pull", 12, "not a URL"],
   ] as const)("rejects wrong-kind, wrong-number, or wrong-repository responses", (kind, number, htmlUrl) => {
     expect(() => assertGitHubAccountEntityResponse(

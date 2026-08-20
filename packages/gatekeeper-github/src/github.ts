@@ -20,7 +20,6 @@ import {
 } from "@gadgets/workshop-shared/gatekeeper";
 import {
   GitHubApi,
-  GitHubApiError,
   exchangeAuthCode,
   revokeOAuthGrant,
   type ConditionalRequestResult,
@@ -35,7 +34,11 @@ import {
   type GitHubRepoResponse,
   type GitHubTreeEntryResponse,
 } from "./github-api";
-import { withAuthenticatedGitHubApi } from "./github-auth";
+import {
+  checkAuthenticatedGitHubRepoAccess,
+  notifyGitHubCredentialsExpired,
+  withAuthenticatedGitHubApi,
+} from "./github-auth";
 import {
   assertCodeSearchResultsInScope,
   assertIssueSearchResultsInRepo,
@@ -1125,6 +1128,20 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
 }
 
 export class UserAccount extends DurableObject<Env> {
+  #credentialTransition: Promise<void> = Promise.resolve();
+
+  async #serializeCredentialTransition<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.#credentialTransition;
+    let release!: () => void;
+    this.#credentialTransition = new Promise<void>(resolve => { release = resolve; });
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  }
+
   async setCallback(callback: Fetcher<GatekeeperConnectCallback>, initiationNonce: string,
                     requestedScopes?: string[], ephemeral?: boolean): Promise<void> {
     if (!this.ctx.storage.kv.get<string>("accessToken")) {
@@ -1190,58 +1207,70 @@ export class UserAccount extends DurableObject<Env> {
 
     const grant = await exchangeAuthCode(code, clientId, clientSecret, `${getBaseUrl(this.env)}/oauth`);
 
-    this.ctx.storage.kv.put("accessToken", grant.accessToken);
-    this.ctx.storage.kv.put("scopes", grant.scopes);
-    this.ctx.storage.kv.put("expiredNotified", false);
+    return await this.#serializeCredentialTransition(async () => {
+      const generation = (this.ctx.storage.kv.get<number>("credentialGeneration") ?? 0) + 1;
+      this.ctx.storage.kv.put("credentialGeneration", generation);
+      this.ctx.storage.kv.put("accessToken", grant.accessToken);
+      this.ctx.storage.kv.put("scopes", grant.scopes);
+      this.ctx.storage.kv.put("expiredNotified", false);
 
-    const reconnecting = this.ctx.storage.kv.get<boolean>("reconnecting");
-    if (reconnecting) {
-      this.ctx.storage.kv.delete("reconnecting");
-      await callback.credentialsRestored();
-    } else {
-      try {
-        const props = { userObjectId: this.ctx.id.toString() };
-        await callback.complete(this.ctx.exports.GatekeeperUserImpl({ props }));
-      } catch (error) {
-        this.ctx.storage.kv.delete("accessToken");
-        this.ctx.storage.kv.delete("scopes");
-        throw error;
+      const reconnecting = this.ctx.storage.kv.get<boolean>("reconnecting");
+      if (reconnecting) {
+        this.ctx.storage.kv.delete("reconnecting");
+        await callback.credentialsRestored();
+      } else {
+        try {
+          const props = { userObjectId: this.ctx.id.toString() };
+          await callback.complete(this.ctx.exports.GatekeeperUserImpl({ props }));
+        } catch (error) {
+          this.ctx.storage.kv.delete("accessToken");
+          this.ctx.storage.kv.delete("scopes");
+          throw error;
+        }
+        // Auth-only sign-in grants are transient: the caller read the email via complete(), so
+        // schedule a prompt self-destruct. We do NOT call the provider revoke endpoint (it could
+        // invalidate the user's other grants for this OAuth app); we just drop our local copy.
+        if (this.ctx.storage.kv.get<boolean>("ephemeral")) {
+          await this.ctx.storage.setAlarm(Date.now() + 2 * 60 * 1000);
+          return true;
+        }
       }
-      // Auth-only sign-in grants are transient: the caller read the email via complete(), so
-      // schedule a prompt self-destruct. We do NOT call the provider revoke endpoint (it could
-      // invalidate the user's other grants for this OAuth app); we just drop our local copy.
-      if (this.ctx.storage.kv.get<boolean>("ephemeral")) {
-        await this.ctx.storage.setAlarm(Date.now() + 2 * 60 * 1000);
-        return true;
-      }
-    }
 
-    await this.ctx.storage.deleteAlarm();
-    return true;
+      await this.ctx.storage.deleteAlarm();
+      return true;
+    });
   }
 
-  getAccessToken(): string {
+  getCredentials(): { accessToken: string; generation: number } {
     const accessToken = this.ctx.storage.kv.get<string>("accessToken");
     if (!accessToken) {
       throw new Error("GitHub credentials have not been configured for this account.");
     }
-    return accessToken;
+    return {
+      accessToken,
+      generation: this.ctx.storage.kv.get<number>("credentialGeneration") ?? 0,
+    };
+  }
+
+  getAccessToken(): string {
+    return this.getCredentials().accessToken;
   }
 
   getScopes(): string[] {
     return this.ctx.storage.kv.get<string[]>("scopes") ?? [];
   }
 
-  async noteCredentialsExpired(): Promise<void> {
-    if (this.ctx.storage.kv.get<boolean>("expiredNotified")) {
-      return;
-    }
-
-    this.ctx.storage.kv.put("expiredNotified", true);
-    const callback = this.ctx.storage.kv.get<Fetcher<GatekeeperConnectCallback>>("callback");
-    if (callback) {
-      await callback.credentialsExpired();
-    }
+  async noteCredentialsExpired(expectedGeneration: number): Promise<void> {
+    await this.#serializeCredentialTransition(async () => {
+      const callback = this.ctx.storage.kv.get<Fetcher<GatekeeperConnectCallback>>("callback");
+      await notifyGitHubCredentialsExpired({
+        getGeneration: () => this.ctx.storage.kv.get<number>("credentialGeneration") ?? 0,
+        getNotified: () => this.ctx.storage.kv.get<boolean>("expiredNotified") ?? false,
+        setNotified: value => this.ctx.storage.kv.put("expiredNotified", value),
+      }, expectedGeneration, callback
+        ? async () => await callback.credentialsExpired()
+        : undefined);
+    });
   }
 
   async alarm(): Promise<void> {
@@ -1444,18 +1473,7 @@ export class GitHubVerifier extends WorkerEntrypoint<Env, GitHubVerifierProps>
   async hasRepoAccess(owner: string, repo: string): Promise<boolean> {
     const id = this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId);
     const account = this.ctx.exports.UserAccount.get(id);
-    const api = new GitHubApi(async () => await account.getAccessToken());
-    try {
-      await api.getRepo(owner, repo);
-      return true;
-    } catch (error) {
-      // GitHub returns 404 for private repos the token cannot see (to avoid leaking existence), and
-      // 403 in some org-policy cases — either way the observer lacks read access.
-      if (error instanceof GitHubApiError && (error.status === 404 || error.status === 403)) {
-        return false;
-      }
-      throw error;
-    }
+    return await checkAuthenticatedGitHubRepoAccess(account, owner, repo);
   }
 }
 
@@ -3932,8 +3950,8 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
       listRepos: async options => {
         const repos = await this.#withApi(api => api.listRepos({
           affiliation: options.affiliation,
-          sort: "updated",
-          direction: "desc",
+          sort: options.sort,
+          direction: options.direction,
           per_page: options.perPage,
           page: options.page,
         }));

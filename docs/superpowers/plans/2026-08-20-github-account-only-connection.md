@@ -2,7 +2,7 @@
 
 **Goal:** Show one GitHub Account choice for new connections and extend its read-only capability so agents can resolve repositories and inspect code, issues, and pull requests without scoped pickers.
 
-**Architecture:** Keep the complete supported-resource catalog for compatibility, add an enforceable `newConnectionsAllowed` policy, and deny new GitHub scoped bindings at UI, agent, and capability-minting boundaries while persisted scoped classes remain usable. Add a bounded account resolver plus explicit read-only issue/PR operations. Every account observation forces sharing lockdown, and all remote reads use the credential-aware API boundary and repository-qualified caches.
+**Architecture:** Keep the complete supported-resource catalog for compatibility, add an enforceable `newConnectionsAllowed` policy, and deny new GitHub scoped bindings at UI, agent, configurator, and capability-minting boundaries while persisted scoped classes remain usable. Add a bounded account resolver plus explicit read-only issue/PR operations. Every account observation forces sharing lockdown, permission-graph revocations are atomic, and all remote reads use a generation-bound credential-aware API boundary and repository-qualified caches.
 
 **Tech stack:** TypeScript, React, Cloudflare Workers RPC/Durable Objects, Vitest, pnpm/Vite+.
 
@@ -38,7 +38,7 @@
 1. Define a discriminated `GitHubRepoResolution` result and `resolveRepo(input)` account method.
 2. Write failing unit tests for literal `owner/name`, canonical repository URLs, preserved `.git` suffixes, rejected surrounding whitespace, case-insensitive exact bare-name matches, owner/collaborator/organization pages, zero matches, duplicate names across owners, malformed input, and the hard pagination bound.
 3. Implement direct credentialed repository lookup for exact qualified `owner/name` values and canonical repository URLs without trimming or suffix removal; it must not depend on listing pagination.
-4. Implement callback-driven bounded all-affiliations pagination only for bare repository names so ambiguity behavior is testable without Worker runtime mocks.
+4. Implement callback-driven bounded all-affiliations pagination ordered by ascending `full_name` only for bare repository names so ambiguity behavior is testable without Worker runtime mocks.
 5. Never return a bare-name unique result until all bounded pages prove uniqueness; a bound failure asks for qualified `owner/name`.
 6. Test direct qualified lookup even when the repository would lie beyond the listing bound.
 7. Add account-session approval and delegation with `prohibitAllSharing: true`; return canonical repository summaries only and prevent reads when authorization rejects.
@@ -73,7 +73,7 @@
 6. Extract/reuse diff-file normalization so account and legacy sessions return the same shape.
 7. Add account-session methods that validate page size before approval, force `prohibitAllSharing: true` on every observation/cursor creation, and delegate only after authorization.
 8. Preserve existing non-atomic cursor semantics and document concurrent PR-update behavior.
-9. Add the strongest feasible tests for approval and `401` expiry handling; if Worker integration is required, add a focused integration fixture rather than bypassing the invariant.
+9. Add tests for approval and generation-bound `401` expiry handling, including delayed old-token responses, callback failure/retry, stable reconnect guidance, and legacy verifier reads.
 10. Verify `src/types.txt` remains a symlink to `types.d.ts` and therefore serves the updated public agent types.
 11. Run focused tests and typecheck.
 
@@ -99,6 +99,6 @@
 5. Run repository lint/typecheck required by `AGENTS.md`.
 6. Run relevant builds, including GitHub configurator and Workshop frontend.
 7. Inspect `git diff --check`, status, and complete diff for generated/private artifacts.
-8. Request independent code-quality, security, and spec reviews; address findings test-first.
+8. Request independent code-quality, security, and spec reviews; address findings test-first, including atomic revocation rollback and direct configurator-policy enforcement.
 9. Re-run all verification.
 10. Commit and open a focused runtime PR if authorized. Do not pin the starter or deploy without separate explicit approval.

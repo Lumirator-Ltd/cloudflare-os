@@ -128,6 +128,7 @@ function checkSearchResult(
   const [owner, repo, kind, rawNumber] = segments;
   if (url.protocol !== "https:" || url.host.toLowerCase() !== "github.com"
       || url.username !== "" || url.password !== ""
+      || result.html_url !== `https://github.com${url.pathname}`
       || !repoInScope(scope, owner, repo)) {
     return "scope";
   }
