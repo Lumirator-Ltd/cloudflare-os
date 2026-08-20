@@ -126,7 +126,7 @@ export type GitHubAccountCodeSearch = GitHubCodeSearch & { owner?: string; repo?
 export type GitHubAccountIssueSearch = GitHubIssueSearch & { owner?: string; repo?: string };
 ```
 
-4. New `GitHubAccount` interface (doc comments explain the discovery→drill-in flow, the default `user:{login}` search scope + `owner`/`repo` narrowing for org/collaborator repos, and that issue/PR/write access requires a repo-scoped connection):
+4. New `GitHubAccount` interface (doc comments explain the discovery→drill-in flow, the default `user:{login}` search scope + `owner`/`repo` narrowing for org/collaborator repos, that the account capability is read-only, and that only already-persisted legacy scoped bindings retain writes):
 
 ```ts
 export interface GitHubAccount {
@@ -179,7 +179,7 @@ export interface GitHubAccount {
 3. `GatekeeperUserImpl.getGatekeeperClassFor`: rewrite on `parseGitHubResourceUrl`; `account` → props `{ userObjectId, resourceKind: "account", owner: "", repo: "" }` + `ACCOUNT_RESOURCE`.
 4. `describe()` account branch: viewer-based (`accountMetadata`) → `{ url, title: "GitHub account @{login}", snippet, suggestedBindingName: "GITHUB_ACCOUNT", tsType: "GitHubAccount" }`.
 5. `startSession()` account branch → `new GitHubAccountSessionImpl(this, queue)`; widen return type union.
-6. `addObserver()`: account kind throws `"Account-wide GitHub connections grant access to everything the connecting user's GitHub account can read, so they cannot be shared with collaborators. Connect a specific repository instead."` before the repo ACL check.
+6. `addObserver()`: account kind rejects collaborators; account observations also set `prohibitAllSharing: true`, so reads fail in already-shared workspaces and prevent future sharing.
 7. New DO methods:
    - `accountMetadata()` — from cached viewer (`#getViewerActor` machinery) → `GitHubAccountMetadata`.
    - `accountRepos(filter, pageSize)` — `StreamingCursor` over `api.listRepos` (affiliation mapping: `organizationMember` → `organization_member`, default `owner,collaborator,organization_member`; sort `updated`); maps to `GitHubRepoSummary` (incl. `defaultBranch`, `updatedAt`, `archived`, `fork`, `language`).
@@ -195,7 +195,7 @@ export interface GitHubAccount {
 
 **Files:**
 - Create: `src/configurator/github-account-configurator-types.d.ts` (`GitHubAccountConfiguratorValues = {}`; empty `GitHubAccountConfiguratorRpc` interface)
-- Create: `src/configurator/github-account-configurator-ui.tsx` — no inputs: `initial: {}`, `resourceUrl: () => "https://github.com"`, `render` returns a `Section` explaining the grant ("Grants read access to every repository this GitHub account can access — repository discovery, code search, and file reading. Issues, pull requests, and write access still require connecting a specific repository.")
+- Create: `src/configurator/github-account-configurator-ui.tsx` — no inputs: `initial: {}`, `resourceUrl: () => "https://github.com"`, `render` explains account-wide read-only repository/code/issue/PR access, owner-only sharing lockdown, and that new write-capable GitHub bindings are unavailable.
 - Modify: `src/github-configurators.ts` — `GitHubAccountConfiguratorUI` RpcTarget
 - Modify: `src/github.ts` — import generated `github-account-configurator-ui.txt`; `startResourceConfigurator` branch for `ACCOUNT_RESOURCE.urlPattern`
 

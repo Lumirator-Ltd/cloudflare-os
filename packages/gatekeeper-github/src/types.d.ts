@@ -198,13 +198,20 @@ export interface GitHubPullRequest extends GitHubIssue {
  * repositories owned by the connected account; pass `owner` (a user or organization) or
  * `repo` to reach other repositories (discover them via `listRepos`).
  *
- * This session is read-only and does not expose issue or pull request capabilities.
- * To work with a repository's issues/PRs or make any changes, request a connection to
- * that specific repository.
+ * This session is read-only and owner-only. Issue/PR discussions and writes remain available
+ * only through already-persisted legacy scoped connections; new scoped bindings are prohibited.
  */
 export interface GitHubAccount {
   /** Returns basic metadata about the connected account. */
   getMetadata(): Promise<GitHubAccountMetadata>;
+
+  /**
+   * Resolves a repository from an exact qualified `owner/name`, canonical GitHub repository
+   * URL, or bare repository name. Inputs are interpreted literally: whitespace is not trimmed
+   * and a `.git` suffix is not removed. Bare names use exact, case-insensitive name matching;
+   * multiple matches and bounded searches return an explicit ambiguous result.
+   */
+  resolveRepo(input: string): Promise<GitHubRepoResolution>;
 
   /**
    * Lists repositories the account can access (owned, collaborating, or via an
@@ -227,6 +234,32 @@ export interface GitHubAccount {
    * answers "which repo discusses X?".
    */
   searchIssues(query: GitHubAccountIssueSearch): Promise<Cursor<GitHubIssueSummary>>;
+
+  /**
+   * Searches pull requests across repositories. Results have issue-search fields; use
+   * `getPullRequest()` to retrieve full pull-request metadata.
+   */
+  searchPullRequests(
+    query: GitHubAccountPullRequestSearch,
+  ): Promise<Cursor<GitHubPullRequestSearchResult>>;
+
+  /** Returns one issue's full metadata and body. Rejects pull-request numbers. */
+  getIssue(repo: string, number: number): Promise<GitHubIssueDetails>;
+
+  /** Returns one pull request's full metadata, refs, and body. */
+  getPullRequest(repo: string, number: number): Promise<GitHubPullRequestDetails>;
+
+  /**
+   * Reads changed files and hunks for one pull request.
+   *
+   * `revision` describes the PR state observed when this call begins. Files are fetched
+   * lazily, so later cursor pages may reflect a concurrent pull-request update.
+   */
+  readPullRequestDiff(
+    repo: string,
+    number: number,
+    options?: GitHubPageOptions,
+  ): Promise<GitHubPullRequestDiff>;
 
   /** Returns metadata for one accessible repository. `repo` is `"owner/name"`. */
   getRepoMetadata(repo: string): Promise<GitHubRepoMetadata>;
@@ -391,6 +424,23 @@ export type GitHubAccountCodeSearch = GitHubCodeSearch & {
   repo?: string;
 }
 
+/** The explicit outcome of resolving a repository through a GitHub account. */
+export type GitHubRepoResolution =
+  | {
+      status: "resolved";
+      repo: GitHubRepoSummary;
+    }
+  | {
+      status: "notFound";
+      message: string;
+    }
+  | {
+      status: "ambiguous";
+      reason: "multipleMatches" | "paginationBound";
+      candidates: GitHubRepoSummary[];
+      message: string;
+    };
+
 /** An account-wide issue search. Scoping works like `GitHubAccountCodeSearch`. */
 export type GitHubAccountIssueSearch = GitHubIssueSearch & {
   /** A user or organization to search in. Defaults to the connected account's login. */
@@ -398,6 +448,20 @@ export type GitHubAccountIssueSearch = GitHubIssueSearch & {
   /** A single repository (`"owner/name"`) to search in. Overrides `owner`. */
   repo?: string;
 }
+
+/** An account-wide pull-request search. Scoping works like `GitHubAccountCodeSearch`. */
+export type GitHubAccountPullRequestSearch = GitHubPullRequestSearch & {
+  /** A user or organization to search in. Defaults to the connected account's login. */
+  owner?: string;
+  /** A single repository (`"owner/name"`) to search in. Overrides `owner`. */
+  repo?: string;
+}
+
+/**
+ * A pull-request search result with the fields returned by GitHub's issue search API.
+ * Use `GitHubAccount.getPullRequest()` for full pull-request-only fields.
+ */
+export type GitHubPullRequestSearchResult = GitHubIssueSummary;
 
 /** A GitHub label attached to an issue or pull request. */
 export type GitHubLabel = {
@@ -487,6 +551,7 @@ export interface Cursor<T> {
 
 /** Generic paging options for a cursor-backed result set. */
 export type GitHubPageOptions = {
+  /** Finite positive integer page size. Account-wide methods accept at most 200. */
   resultsPerPage?: number;
 }
 
@@ -581,7 +646,10 @@ export type GitHubPullRequestRevision = {
   headSha: string;
 }
 
-/** A pull request diff pinned to a specific revision. */
+/**
+ * A pull request diff opened at a specific revision. Its lazy file cursor is not an atomic
+ * snapshot, so later pages may reflect a concurrent pull-request update.
+ */
 export type GitHubPullRequestDiff = {
   revision: GitHubPullRequestRevision;
   files: Cursor<GitHubPullRequestDiffFile>;

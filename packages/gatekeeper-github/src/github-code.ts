@@ -1,9 +1,10 @@
+import type { GitHubPullFileResponse } from "./github-api";
+import { parseCanonicalGitHubRepository } from "./github-account-reads";
+import type { GitHubPullRequestDiffFile, GitHubPullRequestDiffHunk } from "./types";
+
 // Pure helpers for the GitHub code-read surface. This module must stay free of
 // `cloudflare:workers` imports so it can be unit tested under the plain node vitest
 // environment.
-
-const GITHUB_OWNER_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/;
-const GITHUB_REPO_PATTERN = /^[A-Za-z0-9._-]+$/;
 
 // NUL-byte sniffing window for binary detection, matching git's own heuristic.
 const BINARY_SNIFF_BYTES = 8192;
@@ -14,33 +15,58 @@ export type ParsedGitHubResourceUrl =
   | { kind: "issue"; owner: string; repo: string; issueNumber: number }
   | { kind: "pull"; owner: string; repo: string; issueNumber: number };
 
-/**
- * Classifies a github.com URL into one of the supported resource kinds. The bare origin is
- * the account-wide resource; owner-only URLs are rejected; URLs with extra or non-numeric
- * trailing segments fall back to the enclosing repository.
- */
+/** Classifies an exact canonical `https://github.com` account or resource URL. */
 export function parseGitHubResourceUrl(url: string): ParsedGitHubResourceUrl {
-  const parsed = new URL(url);
-  if (parsed.hostname !== "github.com") {
+  const unsupported = (): never => {
     throw new Error(`Unsupported GitHub URL: ${url}`);
-  }
-
-  const segments = parsed.pathname.split("/").filter(Boolean);
-  if (segments.length === 0) {
+  };
+  if (url === "https://github.com" || url === "https://github.com/") {
     return { kind: "account" };
   }
-  if (segments.length < 2) {
-    throw new Error(`Unsupported GitHub URL: ${url}`);
+
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return unsupported();
+  }
+  if (parsed.origin !== "https://github.com"
+      || parsed.username !== "" || parsed.password !== ""
+      || parsed.search !== "" || parsed.hash !== "") {
+    return unsupported();
   }
 
-  const [owner, repo, kind, number] = segments;
-  if (kind === "issues" && number && /^\d+$/.test(number)) {
-    return { kind: "issue", owner, repo, issueNumber: Number(number) };
+  const segments = parsed.pathname.split("/");
+  if (segments[0] !== "" || (segments.length !== 3 && segments.length !== 5)) {
+    return unsupported();
   }
-  if (kind === "pull" && number && /^\d+$/.test(number)) {
-    return { kind: "pull", owner, repo, issueNumber: Number(number) };
+
+  const owner = segments[1];
+  const repo = segments[2];
+  try {
+    parseCanonicalGitHubRepository(`${owner}/${repo}`);
+  } catch {
+    return unsupported();
   }
-  return { kind: "repo", owner, repo };
+
+  if (segments.length === 3) {
+    if (url !== `https://github.com/${owner}/${repo}`) return unsupported();
+    return { kind: "repo", owner, repo };
+  }
+
+  const pathKind = segments[3];
+  const rawNumber = segments[4];
+  if ((pathKind !== "issues" && pathKind !== "pull") || !/^[1-9]\d*$/.test(rawNumber)) {
+    return unsupported();
+  }
+  const issueNumber = Number(rawNumber);
+  if (!Number.isSafeInteger(issueNumber)
+      || url !== `https://github.com/${owner}/${repo}/${pathKind}/${issueNumber}`) {
+    return unsupported();
+  }
+  return pathKind === "issues"
+    ? { kind: "issue", owner, repo, issueNumber }
+    : { kind: "pull", owner, repo, issueNumber };
 }
 
 /**
@@ -48,23 +74,20 @@ export function parseGitHubResourceUrl(url: string): ParsedGitHubResourceUrl {
  * does not name exactly one repository.
  */
 export function splitRepoFullName(input: string): { owner: string; repo: string } | null {
-  let fullName = input.trim();
-
-  if (/^https?:\/\//i.test(fullName)) {
+  if (/^https?:\/\//i.test(input)) {
     try {
-      const url = new URL(fullName);
-      if (url.hostname.toLowerCase() !== "github.com") return null;
-      fullName = url.pathname.replace(/^\/+|\/+$/g, "");
+      const parsed = parseGitHubResourceUrl(input);
+      return parsed.kind === "repo" ? { owner: parsed.owner, repo: parsed.repo } : null;
     } catch {
       return null;
     }
   }
 
-  const [owner, rawRepo, ...rest] = fullName.split("/");
-  if (!owner || !rawRepo || rest.length > 0) return null;
-  const repo = rawRepo.replace(/\.git$/i, "");
-  if (!GITHUB_OWNER_PATTERN.test(owner) || !GITHUB_REPO_PATTERN.test(repo)) return null;
-  return { owner, repo };
+  try {
+    return parseCanonicalGitHubRepository(input);
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -117,4 +140,60 @@ export function filterTreeEntries<T extends { path: string }>(
     if (!recursive && entry.path.slice(prefix.length).includes("/")) return false;
     return true;
   });
+}
+
+function parsePatch(patch: string): GitHubPullRequestDiffHunk[] {
+  const lines = patch.split("\n");
+  const hunks: GitHubPullRequestDiffHunk[] = [];
+  let currentHunk: GitHubPullRequestDiffHunk | undefined;
+  let oldLine = 0;
+  let newLine = 0;
+
+  for (const line of lines) {
+    const match = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line);
+    if (match) {
+      oldLine = Number(match[1]);
+      newLine = Number(match[3]);
+      currentHunk = { header: line, lines: [] };
+      hunks.push(currentHunk);
+      continue;
+    }
+    if (!currentHunk) continue;
+
+    if (line.startsWith("+")) {
+      currentHunk.lines.push({ kind: "added", text: line.slice(1), newLineNumber: newLine });
+      newLine += 1;
+    } else if (line.startsWith("-")) {
+      currentHunk.lines.push({ kind: "removed", text: line.slice(1), oldLineNumber: oldLine });
+      oldLine += 1;
+    } else if (line.startsWith("\\")) {
+      currentHunk.lines.push({ kind: "context", text: line });
+    } else {
+      currentHunk.lines.push({
+        kind: "context",
+        text: line.startsWith(" ") ? line.slice(1) : line,
+        oldLineNumber: oldLine,
+        newLineNumber: newLine,
+      });
+      oldLine += 1;
+      newLine += 1;
+    }
+  }
+
+  return hunks;
+}
+
+/** Converts one GitHub changed-file response to the public diff-file shape. */
+export function normalizeGitHubPullRequestDiffFile(
+  file: GitHubPullFileResponse,
+): GitHubPullRequestDiffFile {
+  return {
+    path: file.filename,
+    previousPath: file.previous_filename,
+    status: file.status,
+    additions: file.additions,
+    deletions: file.deletions,
+    diffOmitted: !file.patch,
+    hunks: file.patch ? parsePatch(file.patch) : [],
+  };
 }

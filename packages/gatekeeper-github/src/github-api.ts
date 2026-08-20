@@ -231,6 +231,24 @@ const DEFAULT_ACCEPT = "application/vnd.github+json";
 const USER_AGENT = "Cloudflare-Gadgets";
 const REQUEST_TIMEOUT_MS = 30_000;
 
+function requireSafeGitHubApiPathValue(value: string, label: "path" | "ref"): string {
+  if (value.split("/").some(segment => segment === "" || segment === "." || segment === "..")) {
+    throw new Error(`GitHub API ${label} contains an unsafe path segment.`);
+  }
+  return value;
+}
+
+function encodeGitHubApiPathSegment(value: string): string {
+  if (value === "" || value === "." || value === "..") {
+    throw new Error("GitHub API path contains an unsafe path segment.");
+  }
+  return encodeURIComponent(value);
+}
+
+function encodeGitHubApiRef(ref: string): string {
+  return encodeGitHubApiPathSegment(requireSafeGitHubApiPathValue(ref, "ref"));
+}
+
 function encodeBasicAuth(username: string, password: string): string {
   return btoa(`${username}:${password}`);
 }
@@ -389,7 +407,7 @@ export async function revokeOAuthGrant(
 ): Promise<void> {
   await request<void>(
     "DELETE",
-    `/applications/${encodeURIComponent(clientId)}/grant`,
+    `/applications/${encodeGitHubApiPathSegment(clientId)}/grant`,
     {
       auth: "basic",
       basicAuth: {
@@ -494,7 +512,7 @@ export class GitHubApi {
     options: ConditionalRequestOptions = {},
   ): Promise<ConditionalRequestResult<GitHubRepoResponse>> {
     return await this.#conditionalGet<GitHubRepoResponse>(
-      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`,
+      `/repos/${encodeGitHubApiPathSegment(owner)}/${encodeGitHubApiPathSegment(repo)}`,
       undefined,
       options,
     );
@@ -534,7 +552,7 @@ export class GitHubApi {
   async getOwnerType(owner: string): Promise<string | undefined> {
     const result = await this.#request<{ type?: string }>(
       "GET",
-      `/users/${encodeURIComponent(owner)}`,
+      `/users/${encodeGitHubApiPathSegment(owner)}`,
     );
     return result.data.type;
   }
@@ -545,7 +563,7 @@ export class GitHubApi {
   }): Promise<GitHubBranchResponse[]> {
     const result = await this.#request<GitHubBranchResponse[]>(
       "GET",
-      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/branches`,
+      `/repos/${encodeGitHubApiPathSegment(owner)}/${encodeGitHubApiPathSegment(repo)}/branches`,
       { query: options },
     );
     return result.data;
@@ -563,8 +581,22 @@ export class GitHubApi {
     options: ConditionalRequestOptions = {},
   ): Promise<ConditionalRequestResult<GitHubTreeResponse>> {
     return await this.#conditionalGet<GitHubTreeResponse>(
-      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/trees/${encodeURIComponent(ref)}`,
+      `/repos/${encodeGitHubApiPathSegment(owner)}/${encodeGitHubApiPathSegment(repo)}/git/trees/${encodeGitHubApiRef(ref)}`,
       { recursive: "1" },
+      options,
+    );
+  }
+
+  async getRootContentsConditional(
+    owner: string,
+    repo: string,
+    ref: string,
+    options: ConditionalRequestOptions = {},
+  ): Promise<ConditionalRequestResult<GitHubContentsResponse[]>> {
+    const safeRef = requireSafeGitHubApiPathValue(ref, "ref");
+    return await this.#conditionalGet<GitHubContentsResponse[]>(
+      `/repos/${encodeGitHubApiPathSegment(owner)}/${encodeGitHubApiPathSegment(repo)}/contents`,
+      { ref: safeRef },
       options,
     );
   }
@@ -580,10 +612,11 @@ export class GitHubApi {
     ref?: string,
     options: ConditionalRequestOptions = {},
   ): Promise<ConditionalRequestResult<GitHubContentsResponse | GitHubContentsResponse[]>> {
-    const encodedPath = path.split("/").map(encodeURIComponent).join("/");
+    const encodedPath = path.split("/").map(encodeGitHubApiPathSegment).join("/");
+    const safeRef = ref === undefined ? undefined : requireSafeGitHubApiPathValue(ref, "ref");
     return await this.#conditionalGet<GitHubContentsResponse | GitHubContentsResponse[]>(
-      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${encodedPath}`,
-      ref !== undefined ? { ref } : undefined,
+      `/repos/${encodeGitHubApiPathSegment(owner)}/${encodeGitHubApiPathSegment(repo)}/contents/${encodedPath}`,
+      safeRef !== undefined ? { ref: safeRef } : undefined,
       options,
     );
   }
@@ -619,7 +652,7 @@ export class GitHubApi {
     options: ConditionalRequestOptions = {},
   ): Promise<ConditionalRequestResult<GitHubIssueResponse>> {
     return await this.#conditionalGet<GitHubIssueResponse>(
-      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues/${issueNumber}`,
+      `/repos/${encodeGitHubApiPathSegment(owner)}/${encodeGitHubApiPathSegment(repo)}/issues/${issueNumber}`,
       undefined,
       options,
     );
@@ -644,7 +677,7 @@ export class GitHubApi {
     options: ConditionalRequestOptions = {},
   ): Promise<ConditionalRequestResult<GitHubPullRequestResponse>> {
     return await this.#conditionalGet<GitHubPullRequestResponse>(
-      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${pullNumber}`,
+      `/repos/${encodeGitHubApiPathSegment(owner)}/${encodeGitHubApiPathSegment(repo)}/pulls/${pullNumber}`,
       undefined,
       options,
     );
@@ -687,7 +720,7 @@ export class GitHubApi {
     options: ConditionalRequestOptions = {},
   ): Promise<ConditionalRequestResult<GitHubIssueResponse[]>> {
     return await this.#conditionalGet<GitHubIssueResponse[]>(
-      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues`,
+      `/repos/${encodeGitHubApiPathSegment(owner)}/${encodeGitHubApiPathSegment(repo)}/issues`,
       query,
       options,
     );
@@ -764,7 +797,7 @@ export class GitHubApi {
     options: ConditionalRequestOptions = {},
   ): Promise<ConditionalRequestResult<GitHubPullRequestResponse[]>> {
     return await this.#conditionalGet<GitHubPullRequestResponse[]>(
-      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls`,
+      `/repos/${encodeGitHubApiPathSegment(owner)}/${encodeGitHubApiPathSegment(repo)}/pulls`,
       query,
       options,
     );
@@ -780,7 +813,7 @@ export class GitHubApi {
   ): Promise<GitHubIssueCommentResponse[]> {
     return (await this.#request<GitHubIssueCommentResponse[]>(
       "GET",
-      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues/${issueNumber}/comments`,
+      `/repos/${encodeGitHubApiPathSegment(owner)}/${encodeGitHubApiPathSegment(repo)}/issues/${issueNumber}/comments`,
       {
         query: {
           page,
@@ -803,7 +836,7 @@ export class GitHubApi {
   ): Promise<GitHubIssueResponse> {
     return (await this.#request<GitHubIssueResponse>(
       "POST",
-      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues`,
+      `/repos/${encodeGitHubApiPathSegment(owner)}/${encodeGitHubApiPathSegment(repo)}/issues`,
       { body: options },
     )).data;
   }
@@ -821,7 +854,7 @@ export class GitHubApi {
   ): Promise<GitHubPullRequestResponse> {
     return (await this.#request<GitHubPullRequestResponse>(
       "POST",
-      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls`,
+      `/repos/${encodeGitHubApiPathSegment(owner)}/${encodeGitHubApiPathSegment(repo)}/pulls`,
       { body: options },
     )).data;
   }
@@ -839,7 +872,7 @@ export class GitHubApi {
   ): Promise<GitHubIssueResponse> {
     return (await this.#request<GitHubIssueResponse>(
       "PATCH",
-      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues/${issueNumber}`,
+      `/repos/${encodeGitHubApiPathSegment(owner)}/${encodeGitHubApiPathSegment(repo)}/issues/${issueNumber}`,
       { body: patch },
     )).data;
   }
@@ -852,7 +885,7 @@ export class GitHubApi {
   ): Promise<GitHubLabelResponse[]> {
     return (await this.#request<GitHubLabelResponse[]>(
       "POST",
-      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues/${issueNumber}/labels`,
+      `/repos/${encodeGitHubApiPathSegment(owner)}/${encodeGitHubApiPathSegment(repo)}/issues/${issueNumber}/labels`,
       {
         body: { labels },
       },
@@ -867,7 +900,7 @@ export class GitHubApi {
   ): Promise<void> {
     await this.#request<void>(
       "DELETE",
-      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues/${issueNumber}/labels/${encodeURIComponent(label)}`,
+      `/repos/${encodeGitHubApiPathSegment(owner)}/${encodeGitHubApiPathSegment(repo)}/issues/${issueNumber}/labels/${encodeGitHubApiPathSegment(label)}`,
     );
   }
 
@@ -879,7 +912,7 @@ export class GitHubApi {
   ): Promise<GitHubLabelResponse[]> {
     return (await this.#request<GitHubLabelResponse[]>(
       "PUT",
-      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues/${issueNumber}/labels`,
+      `/repos/${encodeGitHubApiPathSegment(owner)}/${encodeGitHubApiPathSegment(repo)}/issues/${issueNumber}/labels`,
       {
         body: { labels },
       },
@@ -894,7 +927,7 @@ export class GitHubApi {
   ): Promise<GitHubIssueCommentResponse> {
     return (await this.#request<GitHubIssueCommentResponse>(
       "POST",
-      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues/${issueNumber}/comments`,
+      `/repos/${encodeGitHubApiPathSegment(owner)}/${encodeGitHubApiPathSegment(repo)}/issues/${issueNumber}/comments`,
       {
         body: { body },
       },
@@ -909,7 +942,7 @@ export class GitHubApi {
   ): Promise<GitHubIssueCommentResponse> {
     return (await this.#request<GitHubIssueCommentResponse>(
       "PATCH",
-      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues/comments/${commentId}`,
+      `/repos/${encodeGitHubApiPathSegment(owner)}/${encodeGitHubApiPathSegment(repo)}/issues/comments/${commentId}`,
       {
         body: { body },
       },
@@ -919,7 +952,7 @@ export class GitHubApi {
   async deleteIssueComment(owner: string, repo: string, commentId: number): Promise<void> {
     await this.#request<void>(
       "DELETE",
-      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues/comments/${commentId}`,
+      `/repos/${encodeGitHubApiPathSegment(owner)}/${encodeGitHubApiPathSegment(repo)}/issues/comments/${commentId}`,
     );
   }
 
@@ -946,7 +979,7 @@ export class GitHubApi {
     options: ConditionalRequestOptions = {},
   ): Promise<ConditionalRequestResult<GitHubPullRequestReviewResponse[]>> {
     return await this.#conditionalGet<GitHubPullRequestReviewResponse[]>(
-      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${pullNumber}/reviews`,
+      `/repos/${encodeGitHubApiPathSegment(owner)}/${encodeGitHubApiPathSegment(repo)}/pulls/${pullNumber}/reviews`,
       {
         page,
         per_page: perPage,
@@ -965,7 +998,7 @@ export class GitHubApi {
   ): Promise<GitHubPullRequestReviewCommentResponse[]> {
     return (await this.#request<GitHubPullRequestReviewCommentResponse[]>(
       "GET",
-      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${pullNumber}/comments`,
+      `/repos/${encodeGitHubApiPathSegment(owner)}/${encodeGitHubApiPathSegment(repo)}/pulls/${pullNumber}/comments`,
       {
         query: {
           page,
@@ -1008,7 +1041,7 @@ export class GitHubApi {
     options: ConditionalRequestOptions = {},
   ): Promise<ConditionalRequestResult<GitHubPullRequestReviewCommentResponse[]>> {
     return await this.#conditionalGet<GitHubPullRequestReviewCommentResponse[]>(
-      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${pullNumber}/reviews/${reviewId}/comments`,
+      `/repos/${encodeGitHubApiPathSegment(owner)}/${encodeGitHubApiPathSegment(repo)}/pulls/${pullNumber}/reviews/${reviewId}/comments`,
       {
         per_page: perPage,
         page,
@@ -1036,7 +1069,7 @@ export class GitHubApi {
     options: ConditionalRequestOptions = {},
   ): Promise<ConditionalRequestResult<GitHubPullRequestReviewCommentResponse>> {
     return await this.#conditionalGet<GitHubPullRequestReviewCommentResponse>(
-      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/comments/${commentId}`,
+      `/repos/${encodeGitHubApiPathSegment(owner)}/${encodeGitHubApiPathSegment(repo)}/pulls/comments/${commentId}`,
       undefined,
       options,
     );
@@ -1063,7 +1096,7 @@ export class GitHubApi {
   ): Promise<GitHubPullRequestReviewResponse> {
     return (await this.#request<GitHubPullRequestReviewResponse>(
       "POST",
-      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${pullNumber}/reviews`,
+      `/repos/${encodeGitHubApiPathSegment(owner)}/${encodeGitHubApiPathSegment(repo)}/pulls/${pullNumber}/reviews`,
       {
         body,
       },
@@ -1079,7 +1112,7 @@ export class GitHubApi {
   ): Promise<GitHubPullRequestReviewResponse> {
     return (await this.#request<GitHubPullRequestReviewResponse>(
       "PUT",
-      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${pullNumber}/reviews/${reviewId}`,
+      `/repos/${encodeGitHubApiPathSegment(owner)}/${encodeGitHubApiPathSegment(repo)}/pulls/${pullNumber}/reviews/${reviewId}`,
       {
         body: { body },
       },
@@ -1095,7 +1128,7 @@ export class GitHubApi {
   ): Promise<GitHubPullRequestReviewCommentResponse> {
     return (await this.#request<GitHubPullRequestReviewCommentResponse>(
       "POST",
-      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${pullNumber}/comments/${commentId}/replies`,
+      `/repos/${encodeGitHubApiPathSegment(owner)}/${encodeGitHubApiPathSegment(repo)}/pulls/${pullNumber}/comments/${commentId}/replies`,
       {
         body: { body },
       },
@@ -1110,7 +1143,7 @@ export class GitHubApi {
   ): Promise<GitHubPullRequestReviewCommentResponse> {
     return (await this.#request<GitHubPullRequestReviewCommentResponse>(
       "PATCH",
-      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/comments/${commentId}`,
+      `/repos/${encodeGitHubApiPathSegment(owner)}/${encodeGitHubApiPathSegment(repo)}/pulls/comments/${commentId}`,
       {
         body: { body },
       },
@@ -1124,7 +1157,7 @@ export class GitHubApi {
   ): Promise<void> {
     await this.#request<void>(
       "DELETE",
-      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/comments/${commentId}`,
+      `/repos/${encodeGitHubApiPathSegment(owner)}/${encodeGitHubApiPathSegment(repo)}/pulls/comments/${commentId}`,
     );
   }
 
@@ -1151,7 +1184,7 @@ export class GitHubApi {
     options: ConditionalRequestOptions = {},
   ): Promise<ConditionalRequestResult<GitHubPullFileResponse[]>> {
     return await this.#conditionalGet<GitHubPullFileResponse[]>(
-      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${pullNumber}/files`,
+      `/repos/${encodeGitHubApiPathSegment(owner)}/${encodeGitHubApiPathSegment(repo)}/pulls/${pullNumber}/files`,
       {
         page,
         per_page: perPage,
@@ -1173,7 +1206,7 @@ export class GitHubApi {
   ): Promise<{ sha: string; merged: boolean; message: string }> {
     return (await this.#request<{ sha: string; merged: boolean; message: string }>(
       "PUT",
-      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${pullNumber}/merge`,
+      `/repos/${encodeGitHubApiPathSegment(owner)}/${encodeGitHubApiPathSegment(repo)}/pulls/${pullNumber}/merge`,
       {
         body: options,
       },
@@ -1200,8 +1233,10 @@ export class GitHubApi {
     head: string,
     options: ConditionalRequestOptions = {},
   ): Promise<ConditionalRequestResult<GitHubCompareResponse>> {
+    requireSafeGitHubApiPathValue(base, "ref");
+    requireSafeGitHubApiPathValue(head, "ref");
     return await this.#conditionalGet<GitHubCompareResponse>(
-      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/compare/${encodeURIComponent(`${base}...${head}`)}`,
+      `/repos/${encodeGitHubApiPathSegment(owner)}/${encodeGitHubApiPathSegment(repo)}/compare/${encodeGitHubApiPathSegment(`${base}...${head}`)}`,
       undefined,
       options,
     );

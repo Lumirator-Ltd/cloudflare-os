@@ -286,6 +286,12 @@ export type SupportedResource = {
   icon?: AvatarImage;
 
   /**
+   * Whether callers may mint new bindings for this resource type. Defaults to true. Existing
+   * persisted bindings remain usable, and the resource stays in compatibility/admin catalogs.
+   */
+  newConnectionsAllowed?: boolean;
+
+  /**
    * If true, this resource type is independently grantable. The user can enable or disable it at
    * account-connection time, and the Workshop will request only the underlying authorization (e.g.
    * OAuth scopes) needed for the resource types they enable.
@@ -293,6 +299,11 @@ export type SupportedResource = {
    * If omitted/false, the resource type is not separately grantable.
    */
   grantable?: boolean;
+}
+
+/** Returns whether a resource type permits minting a new binding. */
+export function resourceAllowsNewConnections(resource: SupportedResource): boolean {
+  return resource.newConnectionsAllowed !== false;
 }
 
 /** Removes every trailing slash from a string in linear time. */
@@ -344,7 +355,7 @@ export type ResolveRequestedResourceResult =
 /**
  * Determines which SupportedResource an agent connection request would pre-select in the accept
  * modal, using the exact same precedence the modal uses:
- *   1. the resource whose urlPattern matches `resourceUrl` (ignoring the catch-all), else
+ *   1. the most-specific resource whose urlPattern matches `resourceUrl` (ignoring catch-all), else
  *   2. the whole-instance catch-all ("https://*") if the vendor offers one, else
  *   3. the sole resource, if the vendor offers exactly one.
  *
@@ -360,8 +371,11 @@ export function resolveRequestedResource(
     supportedResources: SupportedResource[],
     resourceUrl: string | undefined): ResolveRequestedResourceResult {
   if (resourceUrl) {
-    const matched = supportedResources.find(
-      r => r.urlPattern !== 'https://*' && matchesResourceUrlPattern(r.urlPattern, resourceUrl));
+    const matched = supportedResources.reduce<SupportedResource | undefined>((best, resource) => {
+      if (resource.urlPattern === 'https://*'
+          || !matchesResourceUrlPattern(resource.urlPattern, resourceUrl)) return best;
+      return !best || resource.urlPattern.length > best.urlPattern.length ? resource : best;
+    }, undefined);
     if (matched) return { ok: true, resource: matched };
   }
   const catchAll = supportedResources.find(r => r.urlPattern === 'https://*');

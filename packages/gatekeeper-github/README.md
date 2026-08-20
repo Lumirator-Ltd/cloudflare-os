@@ -10,16 +10,17 @@ This package provides GitHub OAuth integration for Gadgets. It serves two purpos
   (`repo read:user user:email`) are requested so gadgets can access repositories, issues, and pull
   requests on the user's behalf.
 
-Four resource types can be bound to a gadget:
+The compatibility catalog contains four resource types, but only **GitHub Account** permits new
+bindings. It provides account-wide, read-only repository discovery, code and issue/PR search,
+repository metadata, branches, file trees/files, issue and PR details, and PR diffs. Code search
+covers only each repository's default branch. Every account read is owner-only: it is rejected in a
+shared workspace and prevents the workspace from being shared later. `resolveRepo()` accepts an
+exact `owner/name`, an exact canonical `https://github.com/owner/name` URL, or a bare repository
+name for exact-name lookup. It does not trim input or remove a `.git` suffix.
 
-- **GitHub Account** — account-wide, read-only discovery: list/search repositories, search code
-  and issues across them, and read any accessible repository's branches, file trees, and files.
-  Code search covers only each repository's default branch. Account-wide connections cannot be
-  shared with collaborators; issues, pull requests, and write access require a repository-scoped
-  connection.
-- **GitHub Repository** — issues, pull requests, reviews, and discussions of one repository, plus
-  read-only code access (branches, file trees, files at any ref, and default-branch code search).
-- **GitHub Issue** / **GitHub Pull Request** — a single issue or pull request.
+Existing persisted **GitHub Repository**, **GitHub Issue**, and **GitHub Pull Request** bindings keep
+their scoped reads and writes for compatibility. They remain visible in admin/compatibility
+catalogs, but no UI, agent, blueprint, or direct API path can mint a new scoped binding.
 
 > **Use a GitHub _OAuth App_, not a GitHub _App_.** Only OAuth Apps honor the OAuth `scope`
 > parameter, which is what makes the minimal-on-login / full-on-connect behavior work, and the
@@ -82,12 +83,11 @@ Users are keyed by their GitHub primary verified email, so the OAuth App must be
 2. Create or open a gadget.
 3. Navigate to the **Connections** tab.
 4. Click **+ New Connection**.
-5. Choose a GitHub resource type: account, repository, issue, or pull request.
+5. Choose **GitHub Account**.
 6. If prompted, connect a GitHub account.
 7. You should be redirected to GitHub's authorization page in a new tab.
 8. After granting access, the tab closes, and you're back to Gadgets.
-9. Use the picker to choose the repository, issue, or pull request to connect.
-10. Create the connection. The Gadget now has access only to the selected GitHub resource scope.
+9. Create the connection. The gadget receives the account-wide read-only capability.
 
 You can also see your connected accounts and add and remove them in the settings (accessed through the account menu in the upper-right).
 

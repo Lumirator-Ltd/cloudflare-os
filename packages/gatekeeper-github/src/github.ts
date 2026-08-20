@@ -29,37 +29,67 @@ import {
   type GitHubIssueCommentResponse,
   type GitHubIssueResponse,
   type GitHubLabelResponse,
-  type GitHubPullFileResponse,
   type GitHubPullRequestResponse,
   type GitHubContentsResponse,
   type GitHubPullRequestReviewCommentResponse,
   type GitHubRepoResponse,
   type GitHubTreeEntryResponse,
 } from "./github-api";
+import { withAuthenticatedGitHubApi } from "./github-auth";
 import {
   assertCodeSearchResultsInScope,
   assertIssueSearchResultsInRepo,
   assertIssueSearchResultsInScope,
+  assertPullRequestSearchResultsInScope,
   assertRepoSearchResultsInScope,
   buildCodeSearchQuery,
   buildIssueSearchQuery,
   buildScopedIssueSearchQuery,
+  buildScopedPullRequestSearchQuery,
   scopeQualifier,
   type GitHubSearchScope,
 } from "./github-search";
 import {
   decodeRepoFileText,
   filterTreeEntries,
+  normalizeGitHubPullRequestDiffFile,
   parseGitHubResourceUrl,
   prefixTreeEntries,
-  splitRepoFullName,
 } from "./github-code";
+import {
+  assertGitHubAccountEntityResponse,
+  assertGitHubAccountIssueResponse,
+  authorizeGitHubAccountCursorRead,
+  authorizeGitHubAccountRead,
+  githubAccountDiffCacheKey,
+  githubAccountEntityCacheKey,
+  githubAccountEntityUrl,
+  parseCanonicalGitHubRepository,
+  readFreshGitHubPullRequestRevision,
+  requirePositiveGitHubNumber,
+} from "./github-account-reads";
+import {
+  ACCOUNT_RESOURCE,
+  GITHUB_VENDOR_COPY,
+  describeGitHubResource,
+  ISSUE_RESOURCE,
+  PULL_REQUEST_RESOURCE,
+  REPO_RESOURCE,
+  SUPPORTED_RESOURCES,
+  type GitHubResourceKind,
+} from "./github-resources";
+import {
+  getDirectGitHubRepoOrNull,
+  resolveGitHubRepo,
+  resolveGitHubRepoAfterApproval,
+} from "./github-repo-resolution";
 import GITHUB_LOGO_SVG from "./github-logo.svg";
 import type {
   GitHubAccount as GitHubAccountSession,
   GitHubAccountCodeSearch,
   GitHubAccountIssueSearch,
   GitHubAccountMetadata,
+  GitHubAccountPullRequestSearch,
   GitHubActor,
   GitHubCreateIssueOptions,
   GitHubCreatePullRequestOptions,
@@ -85,17 +115,18 @@ import type {
   GitHubPullRequestDetails,
   GitHubPullRequestDiff,
   GitHubPullRequestDiffFile,
-  GitHubPullRequestDiffHunk,
   GitHubPullRequestFilter,
   GitHubPullRequestMergeOptions,
   GitHubPullRequestReviewDraft,
   GitHubPullRequestRevision,
   GitHubPullRequestSearch,
+  GitHubPullRequestSearchResult,
   GitHubPullRequestSummary,
   GitHubRepo as GitHubRepoSession,
   GitHubRepoFilter,
   GitHubRepoMetadata,
   GitHubRepoRef,
+  GitHubRepoResolution,
   GitHubRepoSearch,
   GitHubRepoSummary,
   GitHubRepoTree,
@@ -134,7 +165,7 @@ type StoredNonce = {
   stage: "initiation" | "oauth";
 };
 
-type ResourceKind = "repo" | "issue" | "pull" | "account";
+type ResourceKind = GitHubResourceKind;
 type EntityKind = "issue" | "pull";
 
 type GitHubGatekeeperImplProps = {
@@ -334,39 +365,6 @@ const OAUTH_SCOPES = ["repo", "read:user", "user:email"];
 // Minimal scopes for sign-in only (verify the user's email). Used when connecting in "auth" mode;
 // the resulting grant is transient.
 const AUTH_SCOPES = ["read:user", "user:email"];
-
-const REPO_RESOURCE: SupportedResource = {
-  urlPattern: "https://github.com/:owner/:repo",
-  title: "GitHub Repository",
-  description: "Read and manage issues, pull requests, reviews, and discussions in a GitHub repository.",
-};
-
-const ISSUE_RESOURCE: SupportedResource = {
-  urlPattern: "https://github.com/:owner/:repo/issues/:number",
-  title: "GitHub Issue",
-  description: "Read and manage a specific GitHub issue.",
-};
-
-const PULL_REQUEST_RESOURCE: SupportedResource = {
-  urlPattern: "https://github.com/:owner/:repo/pull/:number",
-  title: "GitHub Pull Request",
-  description: "Read and manage a specific GitHub pull request and its review threads.",
-};
-
-const ACCOUNT_RESOURCE: SupportedResource = {
-  urlPattern: "https://github.com",
-  title: "GitHub Account",
-  description:
-      "Discover, search, and read code across every repository this GitHub account can access. " +
-      "Read-only; issues, pull requests, and writes require connecting a specific repository.",
-};
-
-const SUPPORTED_RESOURCES: SupportedResource[] = [
-  ACCOUNT_RESOURCE,
-  REPO_RESOURCE,
-  ISSUE_RESOURCE,
-  PULL_REQUEST_RESOURCE,
-];
 
 const SELF_CLOSING_HTML = `<!DOCTYPE html>
 <html lang="en">
@@ -623,7 +621,7 @@ function normalizeIssueSummary(owner: string, repo: string, response: GitHubIssu
   return {
     repo: repoRef(owner, repo),
     id: String(response.number),
-    url: issueUrl(owner, repo, String(response.number)),
+    url: githubAccountEntityUrl(owner, repo, "issue", response.number),
     title: response.title,
     state: response.state,
     labels: response.labels.map(labelFromResponse),
@@ -665,6 +663,7 @@ function normalizePullSummary(
 ): GitHubPullRequestSummary {
   return {
     ...normalizeIssueSummary(owner, repo, response),
+    url: githubAccountEntityUrl(owner, repo, "pull", response.number),
     draft: response.draft,
     merged: !!response.merged_at,
     head: normalizePullBranchRef(owner, repo, response.head),
@@ -710,6 +709,18 @@ function summarizePullDetails(details: GitHubPullRequestDetails): GitHubPullRequ
 
 function stableKey(value: unknown): string {
   return encodeURIComponent(JSON.stringify(value));
+}
+
+function normalizedRepoCacheParts(owner: string, repo: string): [string, string] {
+  return [owner.toLowerCase(), repo.toLowerCase()];
+}
+
+function normalizeSearchScope(scope: GitHubSearchScope): GitHubSearchScope {
+  return {
+    ...scope,
+    owner: scope.owner.toLowerCase(),
+    repo: scope.repo?.toLowerCase(),
+  };
 }
 
 function matchesAllLabels(item: { labels: GitHubLabel[] }, labels?: string[]): boolean {
@@ -877,59 +888,6 @@ function discussionCommentFromResponse(comment: GitHubIssueCommentResponse): Git
     updatedAt: parseDate(comment.updated_at),
     url: comment.html_url,
   };
-}
-
-function parsePatch(patch: string): GitHubPullRequestDiffHunk[] {
-  const lines = patch.split("\n");
-  const hunks: GitHubPullRequestDiffHunk[] = [];
-  let currentHunk: GitHubPullRequestDiffHunk | undefined;
-  let oldLine = 0;
-  let newLine = 0;
-
-  for (const line of lines) {
-    const match = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line);
-    if (match) {
-      oldLine = Number(match[1]);
-      newLine = Number(match[3]);
-      currentHunk = { header: line, lines: [] };
-      hunks.push(currentHunk);
-      continue;
-    }
-
-    if (!currentHunk) continue;
-
-    if (line.startsWith("+")) {
-      currentHunk.lines.push({
-        kind: "added",
-        text: line.slice(1),
-        newLineNumber: newLine,
-      });
-      newLine += 1;
-    } else if (line.startsWith("-")) {
-      currentHunk.lines.push({
-        kind: "removed",
-        text: line.slice(1),
-        oldLineNumber: oldLine,
-      });
-      oldLine += 1;
-    } else if (line.startsWith("\\")) {
-      currentHunk.lines.push({
-        kind: "context",
-        text: line,
-      });
-    } else {
-      currentHunk.lines.push({
-        kind: "context",
-        text: line.startsWith(" ") ? line.slice(1) : line,
-        oldLineNumber: oldLine,
-        newLineNumber: newLine,
-      });
-      oldLine += 1;
-      newLine += 1;
-    }
-  }
-
-  return hunks;
 }
 
 @validateRpc()
@@ -1137,10 +1095,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
       url: "https://github.com",
       logo: { url: GITHUB_LOGO_URL },
       color: "#f0f0f0",
-      tagline: "Triage issues, review PRs, and manage repos",
-      description:
-          "Connect your GitHub account so Cloudflare OS can read and update issues, pull requests, " +
-          "and reviews on the repositories you choose.",
+      ...GITHUB_VENDOR_COPY,
       providesAuth: true,
       configuration: staticOauthConnectorConfiguration(this.env),
     };
@@ -1324,16 +1279,7 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
     const id = this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId);
     const account = this.ctx.exports.UserAccount.get(id);
     const scopes = await account.getScopes();
-    const api = new GitHubApi(async () => await account.getAccessToken());
-    try {
-      return await fn(api, scopes);
-    } catch (error) {
-      if (error instanceof GitHubApiError && error.isAuthError) {
-        await account.noteCredentialsExpired();
-        throw new Error("GitHub credentials have expired or been revoked. Please reconnect the account.", { cause: error });
-      }
-      throw error;
-    }
+    return await withAuthenticatedGitHubApi(account, api => fn(api, scopes));
   }
 
   async describe(): Promise<AccountDescription> {
@@ -1524,17 +1470,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
   }
 
   async #withApi<T>(fn: (api: GitHubApi) => Promise<T>): Promise<T> {
-    const account = this.#userAccount();
-    const api = new GitHubApi(async () => await account.getAccessToken());
-    try {
-      return await fn(api);
-    } catch (error) {
-      if (error instanceof GitHubApiError && error.isAuthError) {
-        await account.noteCredentialsExpired();
-        throw new Error("GitHub credentials have expired or been revoked. Please reconnect the account.", { cause: error });
-      }
-      throw error;
-    }
+    return await withAuthenticatedGitHubApi(this.#userAccount(), fn);
   }
 
   #counterKey(name: string): string {
@@ -2291,7 +2227,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
   async #getRepoMetadataFor(owner: string, repo: string): Promise<GitHubRepoMetadata> {
     // "v2": older records lack `defaultBranch`, and reusing their key would let an ETag 304
     // refresh the stale shape indefinitely.
-    const key = this.#cacheKey("repo", "v2", owner, repo);
+    const key = this.#cacheKey("repo", "v2", ...normalizedRepoCacheParts(owner, repo));
     return await this.#loadCachedWithEtag<GitHubRepoMetadata>(key, ENTITY_CACHE_TTL_MS, async etag => {
       const result = await this.#withApi(api =>
         api.getRepoConditional(owner, repo, { ifNoneMatch: etag })
@@ -3163,7 +3099,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
             headers: comparison.headers,
             data: {
               revision,
-              files: (comparison.data.files ?? []).map(file => this.#normalizeDiffFile(file)),
+              files: (comparison.data.files ?? []).map(normalizeGitHubPullRequestDiffFile),
             },
           };
         },
@@ -3211,7 +3147,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
               return {
                 status: 200,
                 headers: raw.headers,
-                data: raw.data.map(file => this.#normalizeDiffFile(file)),
+                data: raw.data.map(normalizeGitHubPullRequestDiffFile),
               };
             },
           );
@@ -3227,19 +3163,6 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
         injectedItems: [],
         pageSize,
       }),
-    };
-  }
-
-  #normalizeDiffFile(file: GitHubPullFileResponse): GitHubPullRequestDiffFile {
-    return {
-      path: file.filename,
-      previousPath: file.previous_filename,
-      status: file.status,
-      additions: file.additions,
-      deletions: file.deletions,
-      // GitHub omits `patch` for binary files and for large text diffs.
-      diffOmitted: !file.patch,
-      hunks: file.patch ? parsePatch(file.patch) : [],
     };
   }
 
@@ -3327,50 +3250,40 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
   }
 
   async describe(): Promise<ResourceDescription> {
-    switch (this.ctx.props.resourceKind) {
-      case "account": {
-        const account = await this.accountMetadata();
-        return {
-          url: account.url,
-          title: `GitHub account @${account.login}`,
-          snippet:
-              "Account-wide read access: discover repositories, search code and issues, and " +
-              "read files across everything this GitHub account can access.",
-          suggestedBindingName: "GITHUB_ACCOUNT",
-          tsType: "GitHubAccount",
-        };
+    return await describeGitHubResource(this.ctx.props.resourceKind, async resourceKind => {
+      switch (resourceKind) {
+        case "repo": {
+          const repo = await this.#getRepoMetadata();
+          return {
+            url: repo.url,
+            title: repo.fullName,
+            snippet: repo.description ?? `GitHub repository ${repo.fullName}`,
+            suggestedBindingName: "GITHUB_REPO",
+            tsType: "GitHubRepo",
+          };
+        }
+        case "issue": {
+          const issue = await this.#getIssueDetails(String(this.ctx.props.issueNumber));
+          return {
+            url: issue.url,
+            title: `Issue #${issue.id}: ${issue.title}`,
+            snippet: textSnippet(issue.bodyMarkdown, `${issue.state} issue in ${issue.repo.fullName}`),
+            suggestedBindingName: "GITHUB_ISSUE",
+            tsType: "GitHubIssue",
+          };
+        }
+        case "pull": {
+          const pull = await this.#getPullRequestDetails(String(this.ctx.props.issueNumber));
+          return {
+            url: pull.url,
+            title: `Pull Request #${pull.id}: ${pull.title}`,
+            snippet: textSnippet(pull.bodyMarkdown, `${pull.state} pull request in ${pull.repo.fullName}`),
+            suggestedBindingName: "GITHUB_PULL_REQUEST",
+            tsType: "GitHubPullRequest",
+          };
+        }
       }
-      case "repo": {
-        const repo = await this.#getRepoMetadata();
-        return {
-          url: repo.url,
-          title: repo.fullName,
-          snippet: repo.description ?? `GitHub repository ${repo.fullName}`,
-          suggestedBindingName: "GITHUB_REPO",
-          tsType: "GitHubRepo",
-        };
-      }
-      case "issue": {
-        const issue = await this.#getIssueDetails(String(this.ctx.props.issueNumber));
-        return {
-          url: issue.url,
-          title: `Issue #${issue.id}: ${issue.title}`,
-          snippet: textSnippet(issue.bodyMarkdown, `${issue.state} issue in ${issue.repo.fullName}`),
-          suggestedBindingName: "GITHUB_ISSUE",
-          tsType: "GitHubIssue",
-        };
-      }
-      case "pull": {
-        const pull = await this.#getPullRequestDetails(String(this.ctx.props.issueNumber));
-        return {
-          url: pull.url,
-          title: `Pull Request #${pull.id}: ${pull.title}`,
-          snippet: textSnippet(pull.bodyMarkdown, `${pull.state} pull request in ${pull.repo.fullName}`),
-          suggestedBindingName: "GITHUB_PULL_REQUEST",
-          tsType: "GitHubPullRequest",
-        };
-      }
-    }
+    });
   }
 
   async getTypeScriptTypes(): Promise<string> {
@@ -3755,6 +3668,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
       comparator: () => 0,
       injectedItems: [],
       pageSize,
+      remotePageSize: 100,
     });
   }
 
@@ -3765,7 +3679,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     pageSize: number,
   ): Promise<GitHubRepoTree> {
     const ref = options.ref ?? (await this.#getRepoMetadataFor(owner, repo)).defaultBranch;
-    const key = this.#cacheKey("tree", owner, repo, ref);
+    const key = this.#cacheKey("tree", ...normalizedRepoCacheParts(owner, repo), ref);
     // Always fetch the recursive tree: one cached response serves every subtree/depth view.
     const tree = await this.#loadCachedWithEtag<{
       sha: string;
@@ -3856,7 +3770,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
       dirSha = dirEntry.sha;
     }
 
-    const key = this.#cacheKey("tree", owner, repo, dirSha);
+    const key = this.#cacheKey("tree", ...normalizedRepoCacheParts(owner, repo), dirSha);
     const subtree = await this.#loadCachedWithEtag<{
       sha: string;
       truncated: boolean;
@@ -3896,8 +3810,9 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     path: string,
     ref: string,
   ): Promise<GitHubContentsResponse[]> {
-    const result = await this.#withApi(api =>
-      api.getContentsConditional(owner, repo, path, ref));
+    const result = await this.#withApi(api => path === ""
+      ? api.getRootContentsConditional(owner, repo, ref)
+      : api.getContentsConditional(owner, repo, path, ref));
     if (result.status === 304) {
       throw new Error("GitHub unexpectedly returned 304 for an unconditional contents request.");
     }
@@ -3913,7 +3828,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
    */
   async #qualifyScope(scope: GitHubSearchScope): Promise<GitHubSearchScope> {
     if (scope.repo || scope.ownerIsOrg !== undefined) return scope;
-    const key = this.#cacheKey("ownerType", scope.owner);
+    const key = this.#cacheKey("ownerType", scope.owner.toLowerCase());
     let ownerType = this.#loadCached<string>(key, VIEWER_CACHE_TTL_MS);
     if (ownerType === undefined) {
       ownerType = (await this.#withApi(api => api.getOwnerType(scope.owner))) ?? "User";
@@ -3924,7 +3839,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
 
   async codeFile(owner: string, repo: string, path: string, ref?: string): Promise<GitHubFileContent> {
     const resolvedRef = ref ?? (await this.#getRepoMetadataFor(owner, repo)).defaultBranch;
-    const key = this.#cacheKey("file", owner, repo, resolvedRef, path);
+    const key = this.#cacheKey("file", ...normalizedRepoCacheParts(owner, repo), resolvedRef, path);
     return await this.#loadCachedWithEtag<GitHubFileContent>(key, ENTITY_CACHE_TTL_MS, async etag => {
       const result = await this.#withApi(api =>
         api.getContentsConditional(owner, repo, path, resolvedRef, { ifNoneMatch: etag }));
@@ -3968,7 +3883,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     query: { text: string; path?: string; extension?: string },
     pageSize: number,
   ): Promise<Cursor<GitHubCodeSearchResult>> {
-    scope = await this.#qualifyScope(scope);
+    scope = await this.#qualifyScope(normalizeSearchScope(scope));
     const q = buildCodeSearchQuery(scope, query);
     return new StreamingCursor<GitHubCodeSearchResult>({
       fetchPage: async (page, perPage) => {
@@ -3989,6 +3904,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
       comparator: () => 0,
       injectedItems: [],
       pageSize,
+      remotePageSize: 100,
     });
   }
 
@@ -4003,6 +3919,27 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
       url: actor.url,
       avatarUrl: actor.avatarUrl,
     };
+  }
+
+  async accountResolveRepo(input: string): Promise<GitHubRepoResolution> {
+    return await resolveGitHubRepo(input, {
+      getRepo: async (owner, repo) => {
+        const response = await getDirectGitHubRepoOrNull(
+          async () => await this.#withApi(api => api.getRepo(owner, repo)),
+        );
+        return response ? repoSummaryFromResponse(response) : null;
+      },
+      listRepos: async options => {
+        const repos = await this.#withApi(api => api.listRepos({
+          affiliation: options.affiliation,
+          sort: "updated",
+          direction: "desc",
+          per_page: options.perPage,
+          page: options.page,
+        }));
+        return repos.map(repoSummaryFromResponse);
+      },
+    });
   }
 
   async accountRepos(filter: GitHubRepoFilter, pageSize: number): Promise<Cursor<GitHubRepoSummary>> {
@@ -4027,6 +3964,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
       comparator: () => 0,
       injectedItems: [],
       pageSize,
+      remotePageSize: 100,
     });
   }
 
@@ -4035,7 +3973,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     query: GitHubRepoSearch,
     pageSize: number,
   ): Promise<Cursor<GitHubRepoSummary>> {
-    scope = await this.#qualifyScope(scope);
+    scope = await this.#qualifyScope(normalizeSearchScope(scope));
     const q = `${JSON.stringify(query.text)} ${scopeQualifier(scope)} fork:true`;
     return new StreamingCursor<GitHubRepoSummary>({
       fetchPage: async (page, perPage) => {
@@ -4062,6 +4000,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
       comparator: () => 0,
       injectedItems: [],
       pageSize,
+      remotePageSize: 100,
     });
   }
 
@@ -4070,7 +4009,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     query: GitHubAccountIssueSearch,
     pageSize: number,
   ): Promise<Cursor<GitHubIssueSummary>> {
-    scope = await this.#qualifyScope(scope);
+    scope = await this.#qualifyScope(normalizeSearchScope(scope));
     const q = buildScopedIssueSearchQuery(scope, query);
     return new StreamingCursor<GitHubIssueSummary>({
       fetchPage: async (page, perPage) => {
@@ -4097,7 +4036,160 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
       comparator: () => 0,
       injectedItems: [],
       pageSize,
+      remotePageSize: 100,
     });
+  }
+
+  async accountSearchPullRequests(
+    scope: GitHubSearchScope,
+    query: GitHubAccountPullRequestSearch,
+    pageSize: number,
+  ): Promise<Cursor<GitHubPullRequestSearchResult>> {
+    scope = await this.#qualifyScope(normalizeSearchScope(scope));
+    const q = buildScopedPullRequestSearchQuery(scope, query);
+    return new StreamingCursor<GitHubPullRequestSearchResult>({
+      fetchPage: async (page, perPage) => {
+        if ((page - 1) * perPage >= GITHUB_SEARCH_RESULT_CAP) return [];
+        const key = this.#cacheKey("accountPullRequestSearch", stableKey({ q, page, perPage }));
+        const cached = this.#loadCached<GitHubPullRequestSearchResult[]>(key, LIST_CACHE_TTL_MS);
+        if (cached) return cached;
+
+        const items = await this.#withApi(api => api.searchIssues(q, page, perPage));
+        assertPullRequestSearchResultsInScope(scope, items);
+        const results = items.map(item => {
+          const [owner, repo] = new URL(item.html_url).pathname.split("/").filter(Boolean);
+          return {
+            ...normalizeIssueSummary(owner, repo, item),
+            url: item.html_url,
+          };
+        });
+        this.#storeCached(key, results);
+        return results;
+      },
+      overlay: item => item,
+      filter: () => true,
+      comparator: () => 0,
+      injectedItems: [],
+      pageSize,
+      remotePageSize: 100,
+    });
+  }
+
+  async accountIssueDetails(
+    owner: string,
+    repo: string,
+    number: number,
+  ): Promise<GitHubIssueDetails> {
+    const canonical = parseCanonicalGitHubRepository(`${owner}/${repo}`);
+    number = requirePositiveGitHubNumber(number);
+    const key = githubAccountEntityCacheKey(canonical.owner, canonical.repo, "issue", number);
+    return await this.#loadCachedWithEtag<GitHubIssueDetails>(key, ENTITY_CACHE_TTL_MS, async etag => {
+      const result = await this.#withApi(api => api.getIssueConditional(
+        canonical.owner,
+        canonical.repo,
+        number,
+        { ifNoneMatch: etag },
+      ));
+      if (result.status === 304) return result;
+      assertGitHubAccountIssueResponse(canonical, number, result.data);
+      return {
+        status: 200,
+        headers: result.headers,
+        data: normalizeIssueDetails(canonical.owner, canonical.repo, result.data),
+      };
+    });
+  }
+
+  async accountPullRequestDetails(
+    owner: string,
+    repo: string,
+    number: number,
+  ): Promise<GitHubPullRequestDetails> {
+    const canonical = parseCanonicalGitHubRepository(`${owner}/${repo}`);
+    number = requirePositiveGitHubNumber(number);
+    const key = githubAccountEntityCacheKey(canonical.owner, canonical.repo, "pull", number);
+    return await this.#loadCachedWithEtag<GitHubPullRequestDetails>(key, ENTITY_CACHE_TTL_MS, async etag => {
+      const result = await this.#withApi(api => api.getPullRequestConditional(
+        canonical.owner,
+        canonical.repo,
+        number,
+        { ifNoneMatch: etag },
+      ));
+      if (result.status === 304) return result;
+      assertGitHubAccountEntityResponse("pull", canonical, number, result.data);
+      return {
+        status: 200,
+        headers: result.headers,
+        data: normalizePullDetails(canonical.owner, canonical.repo, result.data),
+      };
+    });
+  }
+
+  async accountPullRequestDiff(
+    owner: string,
+    repo: string,
+    number: number,
+    pageSize: number,
+  ): Promise<GitHubPullRequestDiff> {
+    const canonical = parseCanonicalGitHubRepository(`${owner}/${repo}`);
+    number = requirePositiveGitHubNumber(number);
+    const revision = await this.#withApi(api =>
+      readFreshGitHubPullRequestRevision(api, canonical, number));
+    const key = githubAccountDiffCacheKey(canonical.owner, canonical.repo, number, revision);
+    const cached = this.#loadCached<{
+      revision: GitHubPullRequestRevision;
+      files: GitHubPullRequestDiffFile[];
+    }>(key, ENTITY_CACHE_TTL_MS);
+    if (cached) {
+      return { revision: cached.revision, files: new ArrayCursor(cached.files, pageSize) };
+    }
+
+    const allFiles: GitHubPullRequestDiffFile[] = [];
+    return {
+      revision,
+      files: new StreamingCursor<GitHubPullRequestDiffFile>({
+        fetchPage: async (page, perPage) => {
+          const pageKey = githubAccountDiffCacheKey(
+            canonical.owner,
+            canonical.repo,
+            number,
+            revision,
+            page,
+          );
+          const files = await this.#loadCachedWithEtag<GitHubPullRequestDiffFile[]>(
+            pageKey,
+            ENTITY_CACHE_TTL_MS,
+            async etag => {
+              const result = await this.#withApi(api => api.listPullRequestFilesConditional(
+                canonical.owner,
+                canonical.repo,
+                number,
+                page,
+                perPage,
+                { ifNoneMatch: etag },
+              ));
+              if (result.status === 304) return result;
+              return {
+                status: 200,
+                headers: result.headers,
+                data: result.data.map(normalizeGitHubPullRequestDiffFile),
+              };
+            },
+          );
+          allFiles.push(...files);
+          if (files.length < perPage) {
+            this.#storeCached(key, { revision, files: allFiles });
+          }
+          return files;
+        },
+        overlay: item => item,
+        filter: () => true,
+        comparator: () => 0,
+        injectedItems: [],
+        pageSize,
+        remotePageSize: 100,
+      }),
+    };
   }
 
   async openIssue(id: string): Promise<GitHubIssueDetails> {
@@ -4316,8 +4408,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     if (this.ctx.props.resourceKind === "account") {
       throw new Error(
           "Account-wide GitHub connections grant access to everything the connecting user's " +
-          "GitHub account can read, so they cannot be shared with collaborators. Connect a " +
-          "specific repository instead.");
+          "GitHub account can read, so they can only be used in an owner-only workspace.");
     }
 
     const verifier = user as unknown as Fetcher<GitHubVerifierApi>;
@@ -4348,118 +4439,208 @@ class GitHubAccountSessionImpl extends RpcTarget implements GitHubAccountSession
   }
 
   #parseRepo(repo: string): { owner: string; repo: string } {
-    const parsed = splitRepoFullName(repo);
-    if (!parsed) {
-      throw new Error(`"${repo}" is not a valid GitHub repository name; expected "owner/name".`);
-    }
-    return parsed;
+    return parseCanonicalGitHubRepository(repo);
   }
 
-  // Resolves the scope of an account-wide search: an explicit repo wins, then an explicit
-  // owner, then the connected account's own login.
-  async #searchScope(query: { owner?: string; repo?: string }): Promise<GitHubSearchScope> {
+  async #read<T>(
+    description: { title: string; description: string },
+    read: () => PromiseLike<T>,
+  ): Promise<T> {
+    return await authorizeGitHubAccountRead(
+      approval => this.#approvalQueue.authorizeObservation(approval),
+      description,
+      read,
+    );
+  }
+
+  async #readCursor<T>(
+    description: { title: string; description: string },
+    resultsPerPage: number | undefined,
+    defaultPageSize: number,
+    read: (pageSize: number) => PromiseLike<T>,
+  ): Promise<T> {
+    return await authorizeGitHubAccountCursorRead(
+      approval => this.#approvalQueue.authorizeObservation(approval),
+      description,
+      resultsPerPage,
+      defaultPageSize,
+      read,
+    );
+  }
+
+  #explicitSearchScope(query: { owner?: string; repo?: string }): GitHubSearchScope | undefined {
     if (query.repo) {
       const parsed = this.#parseRepo(query.repo);
       return { owner: parsed.owner, repo: parsed.repo };
     }
-    if (query.owner) return { owner: query.owner };
-    return { owner: (await this.#gatekeeper.accountMetadata()).login };
+    if (query.owner) {
+      scopeQualifier({ owner: query.owner });
+      return { owner: query.owner };
+    }
+    return undefined;
   }
 
-  #scopeLabel(scope: GitHubSearchScope): string {
+  async #searchScope(explicit: GitHubSearchScope | undefined): Promise<GitHubSearchScope> {
+    return explicit ?? { owner: (await this.#gatekeeper.accountMetadata()).login };
+  }
+
+  #scopeLabel(scope: GitHubSearchScope | undefined): string {
+    if (!scope) return "repositories owned by the connected account";
     return scope.repo ? `${scope.owner}/${scope.repo}` : `repositories of ${scope.owner}`;
   }
 
   async getMetadata(): Promise<GitHubAccountMetadata> {
-    const account = await this.#gatekeeper.accountMetadata();
-    await this.#approvalQueue.authorizeObservation({
-      title: `Read GitHub account metadata for @${account.login}`,
-      description: `Read basic metadata about the connected GitHub account @${account.login}.`,
-    });
-    return account;
+    return await this.#read({
+      title: "Read GitHub account metadata",
+      description: "Read basic metadata about the connected GitHub account.",
+    }, () => this.#gatekeeper.accountMetadata());
   }
 
-  async listRepos(options?: GitHubRepoFilter): Promise<Cursor<GitHubRepoSummary>> {
-    await this.#approvalQueue.authorizeObservation({
-      title: "List accessible GitHub repositories",
-      description: "List the repositories the connected GitHub account can access.",
-    });
-    return this.#gatekeeper.accountRepos(options ?? {}, options?.resultsPerPage ?? 50);
-  }
-
-  async searchRepos(query: GitHubRepoSearch): Promise<Cursor<GitHubRepoSummary>> {
-    const scope = await this.#searchScope(query);
-    await this.#approvalQueue.authorizeObservation({
-      title: `Search repositories for "${query.text}"`,
-      description: `Search ${this.#scopeLabel(scope)} for "${query.text}".`,
-    });
-    return this.#gatekeeper.accountSearchRepos(scope, query, query.resultsPerPage ?? 50);
-  }
-
-  async searchCode(query: GitHubAccountCodeSearch): Promise<Cursor<GitHubCodeSearchResult>> {
-    const scope = await this.#searchScope(query);
-    await this.#approvalQueue.authorizeObservation({
-      title: `Search code for "${query.text}"`,
-      description: `Search file contents (default branches) of ${this.#scopeLabel(scope)} for "${query.text}".`,
-    });
-    return this.#gatekeeper.codeSearch(
-      scope,
-      { text: query.text, path: query.path, extension: query.extension },
-      query.resultsPerPage ?? 30,
+  async resolveRepo(input: string): Promise<GitHubRepoResolution> {
+    return await resolveGitHubRepoAfterApproval(
+      input,
+      description => this.#approvalQueue.authorizeObservation(description),
+      approvedInput => this.#gatekeeper.accountResolveRepo(approvedInput),
     );
   }
 
+  async listRepos(options?: GitHubRepoFilter): Promise<Cursor<GitHubRepoSummary>> {
+    return await this.#readCursor({
+      title: "List accessible GitHub repositories",
+      description: "List the repositories the connected GitHub account can access.",
+    }, options?.resultsPerPage, 50, pageSize =>
+      this.#gatekeeper.accountRepos(options ?? {}, pageSize));
+  }
+
+  async searchRepos(query: GitHubRepoSearch): Promise<Cursor<GitHubRepoSummary>> {
+    const explicitScope = this.#explicitSearchScope(query);
+    return await this.#readCursor({
+      title: `Search repositories for "${query.text}"`,
+      description: `Search ${this.#scopeLabel(explicitScope)} for "${query.text}".`,
+    }, query.resultsPerPage, 50, async pageSize => this.#gatekeeper.accountSearchRepos(
+      await this.#searchScope(explicitScope),
+      query,
+      pageSize,
+    ));
+  }
+
+  async searchCode(query: GitHubAccountCodeSearch): Promise<Cursor<GitHubCodeSearchResult>> {
+    const explicitScope = this.#explicitSearchScope(query);
+    return await this.#readCursor({
+      title: `Search code for "${query.text}"`,
+      description: `Search file contents (default branches) of ${this.#scopeLabel(explicitScope)} for "${query.text}".`,
+    }, query.resultsPerPage, 30, async pageSize => this.#gatekeeper.codeSearch(
+      await this.#searchScope(explicitScope),
+      { text: query.text, path: query.path, extension: query.extension },
+      pageSize,
+    ));
+  }
+
   async searchIssues(query: GitHubAccountIssueSearch): Promise<Cursor<GitHubIssueSummary>> {
-    const scope = await this.#searchScope(query);
-    await this.#approvalQueue.authorizeObservation({
+    const explicitScope = this.#explicitSearchScope(query);
+    return await this.#readCursor({
       title: `Search issues for "${query.text}"`,
-      description: `Search issues in ${this.#scopeLabel(scope)} for "${query.text}".`,
-    });
-    return this.#gatekeeper.accountSearchIssues(scope, query, query.resultsPerPage ?? 50);
+      description: `Search issues in ${this.#scopeLabel(explicitScope)} for "${query.text}".`,
+    }, query.resultsPerPage, 50, async pageSize => this.#gatekeeper.accountSearchIssues(
+      await this.#searchScope(explicitScope),
+      query,
+      pageSize,
+    ));
+  }
+
+  async searchPullRequests(
+    query: GitHubAccountPullRequestSearch,
+  ): Promise<Cursor<GitHubPullRequestSearchResult>> {
+    const explicitScope = this.#explicitSearchScope(query);
+    return await this.#readCursor({
+      title: `Search pull requests for "${query.text}"`,
+      description: `Search pull requests in ${this.#scopeLabel(explicitScope)} for "${query.text}".`,
+    }, query.resultsPerPage, 50, async pageSize => this.#gatekeeper.accountSearchPullRequests(
+      await this.#searchScope(explicitScope),
+      query,
+      pageSize,
+    ));
+  }
+
+  async getIssue(repo: string, number: number): Promise<GitHubIssueDetails> {
+    const parsed = this.#parseRepo(repo);
+    number = requirePositiveGitHubNumber(number);
+    return await this.#read({
+      title: `Read issue #${number} in ${repo}`,
+      description: `Read the full details of issue #${number} in ${repo}.`,
+    }, () => this.#gatekeeper.accountIssueDetails(parsed.owner, parsed.repo, number));
+  }
+
+  async getPullRequest(repo: string, number: number): Promise<GitHubPullRequestDetails> {
+    const parsed = this.#parseRepo(repo);
+    number = requirePositiveGitHubNumber(number);
+    return await this.#read({
+      title: `Read pull request #${number} in ${repo}`,
+      description: `Read the full details of pull request #${number} in ${repo}.`,
+    }, () => this.#gatekeeper.accountPullRequestDetails(parsed.owner, parsed.repo, number));
+  }
+
+  async readPullRequestDiff(
+    repo: string,
+    number: number,
+    options?: GitHubPageOptions,
+  ): Promise<GitHubPullRequestDiff> {
+    const parsed = this.#parseRepo(repo);
+    number = requirePositiveGitHubNumber(number);
+    return await this.#readCursor({
+      title: `Read pull request diff #${number} in ${repo}`,
+      description: `Read changed files and hunks for pull request #${number} in ${repo}.`,
+    }, options?.resultsPerPage, 20, pageSize => this.#gatekeeper.accountPullRequestDiff(
+      parsed.owner,
+      parsed.repo,
+      number,
+      pageSize,
+    ));
   }
 
   async getRepoMetadata(repo: string): Promise<GitHubRepoMetadata> {
     const parsed = this.#parseRepo(repo);
-    const metadata = await this.#gatekeeper.repoMetadataFor(parsed.owner, parsed.repo);
-    await this.#approvalQueue.authorizeObservation({
-      title: `Read repository metadata for ${metadata.fullName}`,
-      description: `Read basic metadata for the GitHub repository ${metadata.fullName}.`,
-    });
-    return metadata;
+    return await this.#read({
+      title: `Read repository metadata for ${repo}`,
+      description: `Read basic metadata for the GitHub repository ${repo}.`,
+    }, () => this.#gatekeeper.repoMetadataFor(parsed.owner, parsed.repo));
   }
 
   async listBranches(repo: string, options?: GitHubPageOptions): Promise<Cursor<GitHubBranch>> {
     const parsed = this.#parseRepo(repo);
-    await this.#approvalQueue.authorizeObservation({
-      title: `List branches in ${parsed.owner}/${parsed.repo}`,
-      description: `List the branches of the GitHub repository ${parsed.owner}/${parsed.repo}.`,
-    });
-    return this.#gatekeeper.codeBranches(parsed.owner, parsed.repo, options?.resultsPerPage ?? 50);
+    return await this.#readCursor({
+      title: `List branches in ${repo}`,
+      description: `List the branches of the GitHub repository ${repo}.`,
+    }, options?.resultsPerPage, 50, pageSize =>
+      this.#gatekeeper.codeBranches(parsed.owner, parsed.repo, pageSize));
   }
 
   async readTree(repo: string, options?: GitHubTreeOptions): Promise<GitHubRepoTree> {
     const parsed = this.#parseRepo(repo);
-    await this.#approvalQueue.authorizeObservation({
-      title: `Read file tree of ${parsed.owner}/${parsed.repo}`,
-      description: `Read the file tree of ${parsed.owner}/${parsed.repo}` +
+    return await this.#readCursor({
+      title: `Read file tree of ${repo}`,
+      description: `Read the file tree of ${repo}` +
         (options?.ref ? ` at ${options.ref}` : "") +
         (options?.path ? ` under ${options.path}` : "") + ".",
-    });
-    return this.#gatekeeper.codeTree(parsed.owner, parsed.repo, {
-      ref: options?.ref,
-      path: options?.path,
-      recursive: options?.recursive,
-    }, options?.resultsPerPage ?? 200);
+    }, options?.resultsPerPage, 200, pageSize => this.#gatekeeper.codeTree(
+      parsed.owner,
+      parsed.repo,
+      {
+        ref: options?.ref,
+        path: options?.path,
+        recursive: options?.recursive,
+      },
+      pageSize,
+    ));
   }
 
   async readFile(repo: string, path: string, options?: GitHubFileOptions): Promise<GitHubFileContent> {
     const parsed = this.#parseRepo(repo);
-    await this.#approvalQueue.authorizeObservation({
-      title: `Read file ${path} in ${parsed.owner}/${parsed.repo}`,
+    return await this.#read({
+      title: `Read file ${path} in ${repo}`,
       description: `Read ${path}` + (options?.ref ? ` at ${options.ref}` : "") +
-        ` in the GitHub repository ${parsed.owner}/${parsed.repo}.`,
-    });
-    return this.#gatekeeper.codeFile(parsed.owner, parsed.repo, path, options?.ref);
+        ` in the GitHub repository ${repo}.`,
+    }, () => this.#gatekeeper.codeFile(parsed.owner, parsed.repo, path, options?.ref));
   }
 }
 

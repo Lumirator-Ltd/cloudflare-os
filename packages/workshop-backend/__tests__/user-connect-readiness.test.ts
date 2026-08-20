@@ -5,7 +5,7 @@ import { UserDurableObject } from "../src/user.js";
 const UNCONFIGURED_MESSAGE =
   "This connector is not configured. Ask an administrator to configure it.";
 
-function connectedUser() {
+function connectedUser(newConnectionsAllowed: boolean | undefined = undefined) {
   let ensureCalls = 0;
   let reconnectCalls = 0;
   let capabilityCalls = 0;
@@ -26,6 +26,7 @@ function connectedUser() {
           urlPattern: "https://github.com/:owner/:repo",
           title: "GitHub repository",
           description: "A repository",
+          newConnectionsAllowed,
         },
       };
     },
@@ -112,14 +113,22 @@ describe("UserDurableObject connector readiness", () => {
     expect(calls().reconnectCalls).toBe(0);
   });
 
-  it("does not block existing connected-account capability usage", async () => {
+  it("allows new capabilities when the resource uses the default policy", async () => {
     const { user, calls } = connectedUser();
 
-    await expect(user.getGatekeeperClassFor(7, "https://github.com/cloudflare/workers-sdk"))
+    await expect(user.getGatekeeperClassFor(7, "https://github.com"))
       .resolves.toMatchObject({
         vendorId: "github",
         typeUrlPattern: "https://github.com/:owner/:repo",
       });
+    expect(calls().capabilityCalls).toBe(1);
+  });
+
+  it("rejects a direct bypass that tries to mint a blocked scoped capability", async () => {
+    const { user, calls } = connectedUser(false);
+
+    await expect(user.getGatekeeperClassFor(7, "https://github.com/cloudflare/workers-sdk"))
+      .rejects.toThrow("no longer available for new connections");
     expect(calls().capabilityCalls).toBe(1);
   });
 });

@@ -4,7 +4,12 @@ import { Tooltip, useKumoToastManager } from '@cloudflare/kumo'
 import { Plus, CaretRight, Warning } from '@phosphor-icons/react'
 import { RpcStub } from 'capnweb'
 import { AuthenticatedApi } from '@gadgets/workshop-shared/api'
-import { AccountDescription, SupportedResource, VendorDescription } from '@gadgets/workshop-shared/gatekeeper'
+import {
+  AccountDescription,
+  SupportedResource,
+  VendorDescription,
+  resourceAllowsNewConnections,
+} from '@gadgets/workshop-shared/gatekeeper'
 import { extractHostname, extractBaseUrl, matchesResource, matchesResourceText, classifyMatch, getPlaceholderRanges } from './resourceMatching'
 import { GatekeeperIcon } from './components/GatekeeperIcon'
 import {
@@ -194,7 +199,9 @@ export default function ResourcePicker({
   const lowerSearch = searchText.toLowerCase().trim()
 
   const allResourceItems = allVendors.flatMap(v =>
-    v.supportedResources.map(r => ({ resource: r, vendor: v }))
+    v.supportedResources
+      .filter(resourceAllowsNewConnections)
+      .map(r => ({ resource: r, vendor: v }))
   )
 
   // Check if the search URL still contains placeholder tokens (:name or *).

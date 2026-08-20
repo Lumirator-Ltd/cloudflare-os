@@ -1,7 +1,7 @@
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName } from '@gadgets/workshop-shared/api';
-import { Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, resolveRequestedResource, HookController, HookDescription, ActionKind, assertConnectorConfigured, connectorIsConfigured, CONNECTOR_NOT_CONFIGURED_MESSAGE } from "@gadgets/workshop-shared/gatekeeper";
+import { Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, resolveRequestedResource, HookController, HookDescription, ActionKind, assertConnectorConfigured, connectorIsConfigured, CONNECTOR_NOT_CONFIGURED_MESSAGE, resourceAllowsNewConnections } from "@gadgets/workshop-shared/gatekeeper";
 import {
   DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub,
   RpcTarget as NativeRpcTarget, restore,
@@ -1156,6 +1156,10 @@ class OverseerImpl implements AgentHooks {
   #chatSubscribers: Set<RpcStub<AiChatSubscriber>> = new Set();
 
   #autoApprovalDrainer: AutoApprovalDrainer;
+  #activeActionApplications = 0;
+  #activeAccessGrantingSharingMutations = 0;
+  #activeSharingRevocations = 0;
+  #sharingLockdownTransitions = 0;
 
   #preparingChatMessages = new Map<number, Promise<void>>();
 
@@ -2678,6 +2682,61 @@ class OverseerImpl implements AgentHooks {
     });
   }
 
+  #assertSharingMutationAllowed(): void {
+    if (this.storage.prohibitAllSharing.get() || this.#sharingLockdownTransitions > 0) {
+      throw new Error(
+          "This workspace has observed sensitive data. To prevent leaks, the workspace cannot be " +
+          "shared.");
+    }
+    if (this.#activeSharingRevocations > 0) {
+      throw new Error(
+          "Sharing access is being revoked. Try again after the workspace restarts.");
+    }
+  }
+
+  async runAccessGrantingSharingMutation<T>(mutation: () => T | Promise<T>): Promise<T> {
+    this.#assertSharingMutationAllowed();
+    this.#activeAccessGrantingSharingMutations += 1;
+    try {
+      return await mutation();
+    } finally {
+      this.#activeAccessGrantingSharingMutations -= 1;
+    }
+  }
+
+  async runSharingRevocation(
+      mutation: () => AffectedCollaborator[] | Promise<AffectedCollaborator[]>,
+      cleanup: (affected: AffectedCollaborator[]) => Promise<void>)
+      : Promise<AffectedCollaborator[]> {
+    this.#assertSharingMutationAllowed();
+    if (this.#activeActionApplications > 0) {
+      throw new Error(
+          "Sharing access cannot be revoked while an action is being applied. Try again after the " +
+          "action application finishes.");
+    }
+
+    this.#activeSharingRevocations += 1;
+    let remainFailClosed = false;
+    try {
+      let affected = await mutation();
+      if (affected.length === 0) return affected;
+
+      // Existing sessions retain their old capability until the abort, so this instance must never
+      // reopen the sensitive-observation gate after reachability changes.
+      remainFailClosed = true;
+      try {
+        await cleanup(affected);
+      } finally {
+        // Await the durability barrier and waitUntil registration before reporting success. A
+        // failure is propagated to the caller and the revocation transition remains fail-closed.
+        await this.scheduleRevocationRestart();
+      }
+      return affected;
+    } finally {
+      if (!remainFailClosed) this.#activeSharingRevocations -= 1;
+    }
+  }
+
   // Apply a single pending action: invoke the gatekeeper, mark it approved, and persist (the put
   // auto-notifies subscribeToActions). Shared by manual approval (`approveAction`) and the
   // auto-approval drain (`drainAutoApprovals`). The caller is responsible for validating that the
@@ -2689,13 +2748,29 @@ class OverseerImpl implements AgentHooks {
   // was applied automatically. For an auto-approval, `resolvedBy` is the user who enabled the rule.
   async applyPendingAction(record: ActionRecord & {type: "action"},
                            resolvedBy: AiChatAuthorInfo, autoApproved: boolean): Promise<void> {
-    let gatekeeper = this.getGatekeeperFacet(record.gatekeeperId);
-    await gatekeeper.applyAction(record.action);
-    record.state = "approved";
-    record.appliedAt = new Date();
-    record.resolvedBy = resolvedBy;
-    record.autoApproved = autoApproved;
-    this.storage.actions.put(record);
+    if (this.storage.prohibitAllSharing.get() || this.#sharingLockdownTransitions > 0) {
+      throw new Error(
+          "This workspace has observed sensitive data. To prevent leaks, the workspace is " +
+          "prohibited from performing actions.");
+    }
+    if (this.#activeSharingRevocations > 0) {
+      throw new Error(
+          "This action cannot be applied while sharing access is being revoked. Try again after " +
+          "the workspace restarts.");
+    }
+
+    this.#activeActionApplications += 1;
+    try {
+      let gatekeeper = this.getGatekeeperFacet(record.gatekeeperId);
+      await gatekeeper.applyAction(record.action);
+      record.state = "approved";
+      record.appliedAt = new Date();
+      record.resolvedBy = resolvedBy;
+      record.autoApproved = autoApproved;
+      this.storage.actions.put(record);
+    } finally {
+      this.#activeActionApplications -= 1;
+    }
   }
 
   // Apply all currently-eligible pending actions of the given gatekeeper, in ascending id order.
@@ -2855,14 +2930,35 @@ class OverseerImpl implements AgentHooks {
   async authorizeObservation(gatekeeperId: number, description: ObservationDescription,
                              caller: GatekeeperCaller): Promise<void> {
     if (description.prohibitAllSharing) {
-      if ((await this.getSharingManager()).hasAnyShares()) {
+      if (this.#activeActionApplications > 0) {
         throw new Error(
-            "This observation was blocked because it contains sensitive data that must only be " +
-            "shown to the account owner, but this workspace is shared with other users. Try again " +
-            "from a workspace that is not shared.");
+            "This observation was blocked because an action is being applied. Try again after " +
+            "the action application finishes.");
+      }
+      if (this.#activeAccessGrantingSharingMutations > 0) {
+        throw new Error(
+            "This observation was blocked because sharing access is being granted. Try again " +
+            "after the sharing change finishes.");
+      }
+      if (this.#activeSharingRevocations > 0) {
+        throw new Error(
+            "This observation was blocked because sharing access is being revoked. Try again " +
+            "after the workspace restarts.");
       }
 
-      this.storage.prohibitAllSharing.put(true);
+      this.#sharingLockdownTransitions += 1;
+      try {
+        if ((await this.getSharingManager()).hasAnyShares()) {
+          throw new Error(
+              "This observation was blocked because it contains sensitive data that must only be " +
+              "shown to the account owner, but this workspace is shared with other users. Try " +
+              "again from a workspace that is not shared.");
+        }
+
+        this.storage.prohibitAllSharing.put(true);
+      } finally {
+        this.#sharingLockdownTransitions -= 1;
+      }
     }
 
     // Forward exclusion: the gatekeeper may name observers who must not see this observation. Since
@@ -3399,9 +3495,26 @@ class OverseerImpl implements AgentHooks {
   //   Without the delay their own removeCollaborator()/revokeShareLink() call might reject with a
   //   connection error even though it succeeded.
   async scheduleRevocationRestart(): Promise<void> {
-    await this.ctx.storage.sync();
-    await scheduler.wait(100);
-    this.ctx.abort("Gadget restarted to revoke access for a removed collaborator.");
+    const reason = "Gadget restarted to revoke access for a removed collaborator.";
+    try {
+      // Do not report a successful revocation until the changed graph is durable.
+      await this.ctx.storage.sync();
+    } catch (error) {
+      // The mutation must fail visibly, but this in-memory instance is no longer safe to serve:
+      // terminate it even if the durability barrier failed so stale capabilities cannot linger.
+      this.ctx.waitUntil(Promise.resolve().then(() => this.ctx.abort(reason)));
+      throw error;
+    }
+
+    // waitUntil keeps the delayed abort alive after the revocation RPC returns. The finally block
+    // guarantees session invalidation even if the delay itself is interrupted or rejects.
+    this.ctx.waitUntil((async () => {
+      try {
+        await scheduler.wait(100);
+      } finally {
+        this.ctx.abort(reason);
+      }
+    })());
   }
 
   // Last timestamp generated by getChatTimestamp(), if it has been called during this session.
@@ -5785,7 +5898,8 @@ class OverseerImpl implements AgentHooks {
     try {
       let vendors = await this.#listGatekeeperVendorsCached();
       return vendors
-          .filter(v => connectorIsConfigured(v.description))
+          .filter(v => connectorIsConfigured(v.description)
+              && v.supportedResources.some(resourceAllowsNewConnections))
           .map(v => ({id: v.id, displayName: v.description.displayName}));
     } catch (err) {
       this.logger.warn("failed to list connectable vendors", {
@@ -5803,12 +5917,13 @@ class OverseerImpl implements AgentHooks {
           `${vendors.filter(v => connectorIsConfigured(v.description)).map(v => v.id).join(", ") || "(none)"}.`;
     }
     assertConnectorConfigured(vendor.description);
-    if (vendor.supportedResources.length === 0) {
+    let connectableResources = vendor.supportedResources.filter(resourceAllowsNewConnections);
+    if (connectableResources.length === 0) {
       return `Vendor "${vendorId}" (${vendor.description.displayName}) offers no connectable ` +
           `resources.`;
     }
     let lines = [`Resource types offered by "${vendorId}" (${vendor.description.displayName}):`];
-    for (let r of vendor.supportedResources) {
+    for (let r of connectableResources) {
       lines.push(`* ${r.title} — urlPattern: ${r.urlPattern}\n  ${r.description}`);
     }
     lines.push(
@@ -5846,10 +5961,18 @@ class OverseerImpl implements AgentHooks {
     // Resolve the exact resource this request maps to, using the same precedence the accept modal
     // uses. If it can't be resolved, REJECT the request: otherwise the user would get an accept
     // card that opens a blank "create new connection" picker. The agent is told what to fix.
-    let resolved = resolveRequestedResource(vendor.supportedResources, input.resourceUrl);
+    let resolutionResources = input.resourceUrl
+        ? vendor.supportedResources
+        : vendor.supportedResources.filter(resourceAllowsNewConnections);
+    let resolved = resolveRequestedResource(resolutionResources, input.resourceUrl);
     if (!resolved.ok) {
       return { requested: false, message:
           `Cannot request a connection for "${vendor.description.displayName}": ${resolved.reason}` };
+    }
+    if (!resourceAllowsNewConnections(resolved.resource)) {
+      return { requested: false, message:
+          `Cannot request a connection for "${vendor.description.displayName}": ` +
+          `the "${resolved.resource.title}" resource is no longer available for new connections.` };
     }
 
     let requestId = `${chatId}:${crypto.randomUUID()}`;
@@ -6708,17 +6831,24 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
         throw createOpenGadgetError(OPEN_GADGET_ERROR_CODES.workspaceAccessDenied);
       }
 
-      let sharing = await this.impl.getSharingManager();
+      let sharing: Awaited<ReturnType<OverseerImpl["getSharingManager"]>> | undefined;
 
-      // If a share key was provided, redeem it. The owner already has full access and should not
-      // appear in the collaborators table.
+      // If a share key was provided, register the access-grant transition before even looking up
+      // the sharing manager: that lookup may yield, and a sensitive-observation lockdown must not
+      // slip through while redemption is starting.
       if (shareKey) {
-        await sharing.redeemShareKey({
-          rawKey: shareKey,
-          profileId,
-          fetchProfile: () => clientUser.whoami(),
+        await this.impl.runAccessGrantingSharingMutation(async () => {
+          sharing = await this.impl.getSharingManager();
+          await sharing.redeemShareKey({
+            rawKey: shareKey,
+            profileId,
+            fetchProfile: () => clientUser.whoami(),
+          });
         });
+      } else {
+        sharing = await this.impl.getSharingManager();
       }
+      if (!sharing) throw new Error("Sharing manager initialization did not complete.");
 
       // Check authorization. Compute the caller's effective role from the permission graph; this
       // both authorizes the session and determines which capability we hand back.
@@ -7668,7 +7798,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     await this.impl.ctx.blockConcurrencyWhile(async () => {
       await this.#owner.deleteGadget(this.impl.ctx.id.toString());
       await this.impl.ctx.storage.deleteAll();
-      this.impl.scheduleRevocationRestart();
+      await this.impl.scheduleRevocationRestart();
       this.impl.ownerId = undefined;
     });
 
@@ -8958,25 +9088,21 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async addCollaborator(username: string, role: CollaboratorRole, note?: string)
       : Promise<CollaboratorInfo | null> {
-    // Look up the user DO to check if the account exists.
-    let userDoId = this.impl.users.idFromName(username);
-    let userDo = this.impl.users.get(userDoId);
-    let profile = await userDo.whoamiIfExists();
-    if (!profile) {
-      return null;
-    }
+    return await this.impl.runAccessGrantingSharingMutation(async () => {
+      // Look up the user DO to check if the account exists.
+      let userDoId = this.impl.users.idFromName(username);
+      let userDo = this.impl.users.get(userDoId);
+      let profile = await userDo.whoamiIfExists();
+      if (!profile) {
+        return null;
+      }
 
-    if (this.impl.storage.prohibitAllSharing.get()) {
-      throw new Error(
-          "This workspace has observed sensitive data. To prevent leaks, the workspace cannot be " +
-          "shared.");
-    }
-
-    return (await this.impl.getSharingManager()).addCollaborator({
-      caller: this.#sharingCaller(),
-      profile,
-      role,
-      note,
+      return (await this.impl.getSharingManager()).addCollaborator({
+        caller: this.#sharingCaller(),
+        profile,
+        role,
+        note,
+      });
     });
   }
 
@@ -8986,20 +9112,13 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async removeCollaborator(profileId: string, keepUsers: string[]): Promise<AffectedCollaborator[]> {
-    let affected = (await this.impl.getSharingManager())
-        .removeCollaborator(this.#sharingCaller(), profileId, keepUsers);
-    // Tear down observer records for anyone who lost access (best-effort; see tearDownLostObservers).
-    await this.impl.tearDownLostObservers(affected);
-    // Likewise update or remove their cached workspace listing. Must happen before the restart
-    // below, which destroys this DO.
-    await this.impl.refreshAffectedCollaboratorListings(affected);
-    // Only restart if someone actually lost access or was downgraded (kept users are already
-    // excluded). A no-op removal -- e.g. severing a share-link edge nobody relied on -- shouldn't
-    // disconnect everyone.
-    if (affected.length > 0) {
-      this.impl.scheduleRevocationRestart();
-    }
-    return affected;
+    return await this.impl.runSharingRevocation(
+        async () => (await this.impl.getSharingManager())
+            .removeCollaborator(this.#sharingCaller(), profileId, keepUsers),
+        async affected => {
+          await this.impl.tearDownLostObservers(affected);
+          await this.impl.refreshAffectedCollaboratorListings(affected);
+        });
   }
 
   async previewRevokeShareLink(linkId: string): Promise<AffectedCollaborator[]> {
@@ -9008,42 +9127,28 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async revokeShareLink(linkId: string, keepUsers: string[]): Promise<AffectedCollaborator[]> {
-    let affected = (await this.impl.getSharingManager())
-        .revokeShareLink(this.#sharingCaller(), linkId, keepUsers);
-    // Tear down observer records for anyone who lost access (best-effort; see tearDownLostObservers).
-    await this.impl.tearDownLostObservers(affected);
-    // Likewise update or remove their cached workspace listing (see removeCollaborator).
-    await this.impl.refreshAffectedCollaboratorListings(affected);
-    // Only restart if someone actually lost access or was downgraded (see removeCollaborator).
-    if (affected.length > 0) {
-      this.impl.scheduleRevocationRestart();
-    }
-    return affected;
+    return await this.impl.runSharingRevocation(
+        async () => (await this.impl.getSharingManager())
+            .revokeShareLink(this.#sharingCaller(), linkId, keepUsers),
+        async affected => {
+          await this.impl.tearDownLostObservers(affected);
+          await this.impl.refreshAffectedCollaboratorListings(affected);
+        });
   }
 
   // --- Share link management ---
 
   async createShareLink(role: CollaboratorRole, note?: string)
       : Promise<{ key: string; linkId: string }> {
-    if (this.impl.storage.prohibitAllSharing.get()) {
-      throw new Error(
-          "This workspace has observed sensitive data. To prevent leaks, the workspace cannot be " +
-          "shared.");
-    }
-
-    return (await this.impl.getSharingManager())
-        .createShareLink({ caller: this.#sharingCaller(), role, note });
+    return await this.impl.runAccessGrantingSharingMutation(async () =>
+      (await this.impl.getSharingManager())
+          .createShareLink({ caller: this.#sharingCaller(), role, note }));
   }
 
   async newShareLinkKey(linkId: string): Promise<{ key: string }> {
-    if (this.impl.storage.prohibitAllSharing.get()) {
-      throw new Error(
-          "This workspace has observed sensitive data. To prevent leaks, the workspace cannot be " +
-          "shared.");
-    }
-
-    return (await this.impl.getSharingManager())
-        .newShareLinkKey({ caller: this.#sharingCaller(), linkId });
+    return await this.impl.runAccessGrantingSharingMutation(async () =>
+      (await this.impl.getSharingManager())
+          .newShareLinkKey({ caller: this.#sharingCaller(), linkId }));
   }
 
   async listShareLinks(): Promise<ShareLinkInfo[]> {
@@ -9861,5 +9966,5 @@ class AgentSpawnerBindingImpl extends RpcTarget implements AgentSpawnerBinding {
   }
 }
 
-/** Test-only export: readiness tests construct the module-private implementation directly. */
-export { OverseerImpl };
+/** Test-only exports for constructing module-private Overseer implementations and clients. */
+export { OverseerClientInterface, OverseerImpl };
