@@ -117,6 +117,34 @@ it("rechecks account generation immediately before the tool request", async () =
   expect(requests).toBe(0);
 });
 
+it("rechecks account generation immediately before a discovery request", async () => {
+  let current = true;
+  let requests = 0;
+  vi.stubGlobal("fetch", async (_input: unknown, init?: RequestInit) => {
+    requests++;
+    const request = JSON.parse(String(init?.body));
+    return Response.json({ jsonrpc: "2.0", id: request.id, result: { tools: [] } });
+  });
+  const account: ConnectionAccount = {
+    async getConnection() {
+      return { authorization: "token", sessionId: "session", generation: 1 };
+    },
+    async assertConnectionCurrent() {
+      if (!current) throw new Error("connection replaced");
+    },
+    async setMcpSessionId() { return true; },
+    async noteCredentialsExpired() {},
+  };
+
+  const error = await withClient({}, account, "https://mcp.example.com", async client => {
+    current = false;
+    return client.listTools(1);
+  }).catch(err => err);
+
+  expect(error).toBeInstanceOf(McpCallNotDispatchedError);
+  expect(requests).toBe(0);
+});
+
 it("persists a successful initialization before running the requested operation", async () => {
   const writes: Array<string | null> = [];
   vi.stubGlobal("fetch", async (_input: unknown, init?: RequestInit) => {
