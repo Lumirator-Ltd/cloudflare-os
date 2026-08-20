@@ -11,6 +11,10 @@ If your organization runs an MCP server portal, use
 administrator-configured URL, needs no user to paste an endpoint, and scopes a grant to a single
 upstream server behind the portal.
 
+New deployments disable this arbitrary-endpoint connector by default. An administrator can
+explicitly enable it in the Gatekeepers admin panel. Disabling it prevents new discovery and grants;
+it does not revoke capabilities that were already minted.
+
 ## What it provides
 
 One resource type, **Any MCP server**, at two grant breadths:

@@ -46,8 +46,12 @@ signatures unscoped, and 12 when scoped to one server.
 Only `MCP_ALLOW_INSECURE` is set in the repo's `wrangler.jsonc`, pinned to `"false"` so the default
 is explicit rather than merely absent. None of the others is, and a portal URL committed there would
 become the default for every deployment of this repo and would send their users' OAuth flows to
-whichever host it named, so it belongs in the deployment's own configuration — for Cloudflare's
-internal deployment, the per-package overrides in `gadgets-internal`.
+whichever host it named.
+
+A deployment admin configures `MCP_PORTAL_URL` from **Admin → Connector configuration**. The URL is
+written to this Worker through the deployment's existing write-only connector configuration path.
+The portal and its approved upstream MCP servers remain managed in Cloudflare Zero Trust; this UI
+only connects Cloudflare OS to that portal.
 
 This connector is intrinsically OAuth-only. Legacy `MCP_PORTAL_AUTH` and `MCP_PORTAL_TOKEN`
 settings are ignored.

@@ -88,7 +88,7 @@ export const DEFAULT_ADMIN_CONFIG: AdminConfig = {
   banner: { text: "", color: DEFAULT_BANNER_COLOR },
   accentColor: "",
   disabledResources: {},
-  disabledGatekeepers: [],
+  disabledGatekeepers: ["mcp"],
   ambientGatekeeperModes: {},
   formats: [],
 };
@@ -310,7 +310,9 @@ export function parseAdminConfig(raw: string | null): AdminConfig {
       },
       accentColor: typeof p.accentColor === "string" ? p.accentColor : "",
       disabledResources,
-      disabledGatekeepers: strings(p.disabledGatekeepers).map(v => v.toLowerCase()),
+      disabledGatekeepers: Array.isArray(p.disabledGatekeepers)
+        ? strings(p.disabledGatekeepers).map(v => v.toLowerCase())
+        : [...DEFAULT_ADMIN_CONFIG.disabledGatekeepers],
       ambientGatekeeperModes,
       formats: parseFormats(p.formats),
     };

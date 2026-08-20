@@ -927,7 +927,7 @@ export type AdminConnectorConfiguration = {
   writeAvailable: boolean;
 };
 
-/** Secret values submitted to configure a connector. Values are never returned by the API. */
+/** Write-only values submitted to configure a connector. Values are never returned by the API. */
 export type AdminConnectorConfigurationValues = Record<string, string>;
 
 /**
