@@ -6,10 +6,9 @@
 // connector instead of offering a dead end. See the README.
 
 import type { SupportedResource } from "@gadgets/workshop-shared/gatekeeper";
-import type { ConnectedServer, ServerAuthKind } from "@gadgets/mcp-shared/account";
+import type { ConnectedServer } from "@gadgets/mcp-shared/account";
 import type { ToolScope } from "@gadgets/mcp-shared/scope";
 import { fetchOptions } from "@gadgets/mcp-shared/fetch";
-import { sameEndpoint } from "@gadgets/mcp-shared/scope";
 import type { ServerTrust } from "@gadgets/mcp-shared/tools";
 
 /** The configured portal, once the deployment's vars have been read and validated. */
@@ -18,8 +17,8 @@ export type PortalConfig = {
   endpoint: string;
   /** Display name shown in the connector list and in every approval prompt. */
   name: string;
-  /** How to authenticate. */
-  auth: ServerAuthKind;
+  /** This connector always authenticates each user through OAuth. */
+  auth: "oauth";
 };
 
 /** Stable id used in binding names, action kinds, and generated type names. */
@@ -58,21 +57,12 @@ export function readPortalConfig(env: Env): PortalConfig | null {
   if (url.protocol !== "https:" && !(fetchOptions(env).allowInsecure && url.protocol === "http:")) {
     return null;
   }
-  // URL userinfo is an ambient credential: URL and fetch APIs can copy it into requests, while this
-  // connector also persists and returns the endpoint to users and configurator frames. Portal auth
-  // has explicit OAuth/token settings, so reject rather than silently stripping credentials and
-  // contacting a different endpoint than the administrator configured.
-  if (url.username || url.password) return null;
-  url.hash = "";
-
-  const configured = env.MCP_PORTAL_AUTH?.trim().toLowerCase();
-  const auth: ServerAuthKind =
-    configured === "none" || configured === "token" ? configured : "oauth";
+  if (url.username || url.password || url.search || url.hash) return null;
 
   return {
     endpoint: url.toString(),
     name: env.MCP_PORTAL_NAME?.trim() || `MCP Server Portal (${url.host})`,
-    auth,
+    auth: "oauth",
   };
 }
 
@@ -119,35 +109,4 @@ export function portalServer(config: PortalConfig): ConnectedServer {
     serverId: PORTAL_SERVER_ID,
     serverName: config.name,
   };
-}
-
-/**
- * Probing may legitimately move between none and OAuth. A preissued token is deployment authority,
- * so entering or leaving that mode requires the account to reconnect against current configuration.
- */
-export function portalAuthRequiresReconnect(
-  connected: ServerAuthKind, configured: ServerAuthKind,
-): boolean {
-  return (connected === "token") !== (configured === "token");
-}
-
-/**
- * The preissued token, but only for the endpoint the deployment currently names.
- *
- * `MCP_PORTAL_TOKEN` is the one credential in this connector read from live configuration rather
- * than from an account's storage. Everything else an account hands out was minted for the endpoint
- * that account records, so it is safe to send there by construction. This is not: an administrator
- * repoints the gateway by editing the URL and its token together, which touches no account, so
- * until someone reconnects the account still names the old host while this value is already the new
- * deployment's secret. An account-side endpoint check cannot catch that -- it compares the caller
- * against storage that has not moved yet -- so the scoping has to happen here, against the
- * configuration the token actually belongs to.
- *
- * Null means "this deployment has no token for that endpoint", covering both a portal with no token
- * configured and one that has since been repointed. Callers fail the request closed either way.
- */
-export function portalTokenFor(env: Env, endpoint: string): string | null {
-  const config = readPortalConfig(env);
-  if (config?.auth !== "token" || !sameEndpoint(config.endpoint, endpoint)) return null;
-  return env.MCP_PORTAL_TOKEN || null;
 }

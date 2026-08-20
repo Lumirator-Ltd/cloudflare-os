@@ -59,6 +59,20 @@ class ConfiguredTokenAccount extends McpAccountBase<AccountEnv> {
   protected override async probe(): Promise<never> { throw new Error("not probed"); }
 }
 
+class LivePolicyAccount extends McpAccountBase<AccountEnv> {
+  allowedEndpoint: string | null = "https://old.example/mcp";
+
+  protected baseUrl(): string { return "https://gatekeeper.example"; }
+  protected log(): never { return testLog as never; }
+  protected mintAccount(): never { throw new Error("not reached"); }
+  protected override assertServerAvailable(server: ConnectedServer): void {
+    if (this.allowedEndpoint !== server.endpoint) {
+      throw new Error("This MCP portal is no longer available. Reconnect the account.");
+    }
+  }
+  protected override async probe(): Promise<never> { throw new Error("not probed"); }
+}
+
 // Exercises the expiry latch. The callback is the Workshop, reached over RPC, so it can fail
 // transiently without anything being wrong with the account.
 class ExpiringAccount extends McpAccountBase<AccountEnv> {
@@ -151,6 +165,36 @@ describe("connect initiation nonce", () => {
     await expect(first).rejects.toThrow("stop test probe");
     // The request still owns the claim, so a transient failure reopens the already-rendered form.
     expect(account.isWaiting(nonce)).toBe(true);
+  });
+
+  it.each([
+    ["removed", null],
+    ["repointed", "https://new.example/mcp"],
+  ])("refuses getConnection after the deployment endpoint is %s", async (_change, allowed) => {
+    const context = fakeContext();
+    const connected = { ...server("https://old.example/mcp"), auth: "none" as const };
+    context.storage.kv.put("server", connected);
+    const account = new LivePolicyAccount(context as never, {});
+
+    await expect(account.getConnection(connected.endpoint)).resolves.toMatchObject({
+      authorization: null,
+    });
+    account.allowedEndpoint = allowed;
+
+    await expect(account.getConnection(connected.endpoint)).rejects.toThrow(/Reconnect/);
+  });
+
+  it("refuses a captured connection after deployment policy changes", async () => {
+    const context = fakeContext();
+    const connected = { ...server("https://old.example/mcp"), auth: "none" as const };
+    context.storage.kv.put("server", connected);
+    const account = new LivePolicyAccount(context as never, {});
+    const connection = await account.getConnection(connected.endpoint);
+
+    account.allowedEndpoint = "https://new.example/mcp";
+
+    await expect(account.assertConnectionCurrent(connected.endpoint, connection.generation))
+      .rejects.toThrow(/Reconnect/);
   });
 
   it("does not hand current credentials to a facet for the pre-repoint endpoint", async () => {

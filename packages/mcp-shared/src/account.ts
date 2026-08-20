@@ -185,6 +185,8 @@ export abstract class McpAccountBase<E extends AccountEnv, P = unknown>
     return fetchOptions(this.env);
   }
 
+  /** Fails when live connector policy no longer permits requests to this connected server. */
+  protected assertServerAvailable(_server: ConnectedServer): void {}
 
   protected server(): ConnectedServer | undefined {
     return this.ctx.storage.kv.get<ConnectedServer>("server");
@@ -586,6 +588,7 @@ export abstract class McpAccountBase<E extends AccountEnv, P = unknown>
     this.ctx.storage.kv.delete("pendingAuth");
 
     if (!this.isCurrentConnection(server, pending.generation)) return false;
+    this.assertServerAvailable(server);
     let result: Awaited<ReturnType<typeof auth>>;
     try {
       result = await auth(this.oauthProvider(server, pending.generation), {
@@ -671,6 +674,7 @@ export abstract class McpAccountBase<E extends AccountEnv, P = unknown>
         `This binding is for ${hostOf(endpoint)}, but the account is now connected to ` +
         `${hostOf(server.endpoint)}. Replace the binding before using it again.`);
     }
+    this.assertServerAvailable(server);
     const authorization = await this.#getAuthorization(server, generation);
     // `#getAuthorization` may await a token refresh. A reconnect can interleave there, so recheck
     // before returning the credential to a caller that still intends to contact the old endpoint.
@@ -691,6 +695,7 @@ export abstract class McpAccountBase<E extends AccountEnv, P = unknown>
         || generation !== this.connectionGeneration()) {
       throw new Error("This MCP connection changed before the request was sent. Try again.");
     }
+    this.assertServerAvailable(server);
   }
 
   // Returns the bearer token for one captured connection generation, refreshing it when close to

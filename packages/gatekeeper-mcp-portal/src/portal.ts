@@ -69,10 +69,8 @@ import {
   type McpGatekeeperUserProps,
 } from "@gadgets/mcp-shared/user";
 import {
-  portalAuthRequiresReconnect,
   portalResource,
   portalServer,
-  portalTokenFor,
   portalTrust,
   readPortalConfig,
   requirePortalServerScope,
@@ -181,6 +179,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
       url: "https://developers.cloudflare.com/cloudflare-one/access-controls/ai-controls/mcp-portals/",
       logo: PORTAL_AVATAR,
       color: PORTAL_COLOR,
+      configuration: { configured: config !== null },
       tagline: config
         ? `Connect a server behind ${hostOf(config.endpoint)}`
         : "No MCP server portal is configured",
@@ -194,6 +193,9 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
     callback: Fetcher<GatekeeperConnectCallback>,
     _options?: GatekeeperConnectOptions,
   ): Promise<{ url: string }> {
+    if (!readPortalConfig(this.env)) {
+      throw new Error("No valid MCP server portal is configured for this deployment.");
+    }
     const accountId = this.ctx.exports.McpAccount.newUniqueId();
     const initiationNonce = generateNonce();
     await this.ctx.exports.McpAccount.get(accountId).setCallback(callback, initiationNonce);
@@ -220,12 +222,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
 // ---------------------------------------------------------------------------
 // Account DO — owns the endpoint choice and every credential for it.
 
-/**
- * One connected portal, for one user. Nothing outside this object ever sees a credential.
- *
- * The endpoint is a deployment setting rather than user input, so the preissued token is the only
- * real addition: a portal may be fronted by one instead of using OAuth.
- */
+/** One OAuth connection to the deployment-configured portal, for one user. */
 export class McpAccount extends McpAccountBase<Env> {
   protected baseUrl(): string {
     return getBaseUrl(this.env);
@@ -240,12 +237,12 @@ export class McpAccount extends McpAccountBase<Env> {
     return this.ctx.exports.GatekeeperUserImpl({ props });
   }
 
-  /**
-   * Scoped to the endpoint this account is connected to, never merely to what configuration says
-   * today. The rule lives beside the configuration it guards, in `portalTokenFor`.
-   */
-  protected override staticToken(server: ConnectedServer): string | null {
-    return portalTokenFor(this.env, server.endpoint);
+  protected override assertServerAvailable(server: ConnectedServer): void {
+    const config = readPortalConfig(this.env);
+    if (!config || !sameEndpoint(config.endpoint, server.endpoint)) {
+      throw new Error(
+        "This deployment's MCP portal was removed or repointed. Reconnect the account.");
+    }
   }
 }
 
@@ -295,8 +292,8 @@ export class GatekeeperUserImpl
         `This connection is for ${hostOf(server.endpoint)}, but this deployment's portal is now ` +
         `${hostOf(config.endpoint)}. Reconnect the account.`);
     }
-    if (portalAuthRequiresReconnect(server.auth, config.auth)) {
-      throw new Error("This deployment's portal authentication changed. Reconnect the account.");
+    if (server.auth !== "oauth") {
+      throw new Error("This portal connection does not use OAuth. Reconnect the account.");
     }
 
     // The account holds credentials for one portal, so a resource URL naming any other endpoint is
