@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
+import type { ConnectedServer, ServerAuthKind } from "@gadgets/mcp-shared/account";
 import {
+  assertPortalServerAvailable,
   portalResource,
   portalServer,
   portalTrust,
@@ -77,6 +79,30 @@ describe("readPortalConfig", () => {
       MCP_PORTAL_URL: "http://localhost:9000/mcp",
       MCP_ALLOW_INSECURE: "true",
     }))?.endpoint).toBe("http://localhost:9000/mcp");
+  });
+});
+
+describe("assertPortalServerAvailable", () => {
+  const config = readPortalConfig(env({ MCP_PORTAL_URL: "https://gw.example.com/mcp" }))!;
+  const server = (auth: ServerAuthKind): ConnectedServer => ({
+    endpoint: config.endpoint,
+    provenance: "deployment",
+    auth,
+    serverId: "portal",
+    serverName: config.name,
+  });
+
+  it.each(["none", "token"] as const)(
+    "rejects a current portal endpoint using legacy %s authentication",
+    auth => {
+      expect(() => assertPortalServerAvailable(config, server(auth))).toThrowError(
+        /^This MCP portal connection is no longer available\. Reconnect the account\.$/,
+      );
+    },
+  );
+
+  it("accepts a current portal endpoint using OAuth", () => {
+    expect(() => assertPortalServerAvailable(config, server("oauth"))).not.toThrow();
   });
 });
 

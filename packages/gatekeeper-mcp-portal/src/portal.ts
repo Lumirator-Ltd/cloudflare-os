@@ -69,6 +69,7 @@ import {
   type McpGatekeeperUserProps,
 } from "@gadgets/mcp-shared/user";
 import {
+  assertPortalServerAvailable,
   portalResource,
   portalServer,
   portalTrust,
@@ -238,11 +239,7 @@ export class McpAccount extends McpAccountBase<Env> {
   }
 
   protected override assertServerAvailable(server: ConnectedServer): void {
-    const config = readPortalConfig(this.env);
-    if (!config || !sameEndpoint(config.endpoint, server.endpoint)) {
-      throw new Error(
-        "This deployment's MCP portal was removed or repointed. Reconnect the account.");
-    }
+    assertPortalServerAvailable(readPortalConfig(this.env), server);
   }
 }
 

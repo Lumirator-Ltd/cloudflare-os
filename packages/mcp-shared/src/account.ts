@@ -609,6 +609,7 @@ export abstract class McpAccountBase<E extends AccountEnv, P = unknown>
     }
     if (result !== "AUTHORIZED") throw new Error("The authorization server requested another redirect.");
     if (!this.isCurrentConnection(server, pending.generation)) return false;
+    this.assertServerAvailable(server);
     const tokens = this.ctx.storage.kv.get<OAuthTokens>("tokens");
     if (!tokens) throw new Error("The authorization server returned no access token.");
     this.ctx.storage.kv.delete("oauthVerifier");

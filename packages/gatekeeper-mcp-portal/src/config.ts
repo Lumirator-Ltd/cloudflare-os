@@ -7,7 +7,7 @@
 
 import type { SupportedResource } from "@gadgets/workshop-shared/gatekeeper";
 import type { ConnectedServer } from "@gadgets/mcp-shared/account";
-import type { ToolScope } from "@gadgets/mcp-shared/scope";
+import { sameEndpoint, type ToolScope } from "@gadgets/mcp-shared/scope";
 import { fetchOptions } from "@gadgets/mcp-shared/fetch";
 import type { ServerTrust } from "@gadgets/mcp-shared/tools";
 
@@ -64,6 +64,15 @@ export function readPortalConfig(env: Env): PortalConfig | null {
     name: env.MCP_PORTAL_NAME?.trim() || `MCP Server Portal (${url.host})`,
     auth: "oauth",
   };
+}
+
+/** Refuses a connected server that the portal's current OAuth-only policy no longer permits. */
+export function assertPortalServerAvailable(
+  config: PortalConfig | null, server: ConnectedServer,
+): void {
+  if (config && sameEndpoint(config.endpoint, server.endpoint) && server.auth === "oauth") return;
+  throw new Error(
+    "This MCP portal connection is no longer available. Reconnect the account.");
 }
 
 /**
