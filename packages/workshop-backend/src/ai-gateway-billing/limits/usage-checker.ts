@@ -57,6 +57,20 @@ function unlimitedResult(): UsageCheckResult {
   };
 }
 
+/** Resolves required-mode routing or throws the user-facing reason inference is blocked. */
+export async function getRequiredUserGatewayRouting(
+  env: Cloudflare.Env,
+  userStub: DurableObjectStub<UserDurableObject>,
+): Promise<ByokGatewayRouting | undefined> {
+  if (!isUserFundedAiRequired(env)) return undefined;
+
+  const usage = await checkUsageAndBalance(env, userStub);
+  if (!usage.allowed || !usage.byokRouting) {
+    throw new Error(usage.reason ?? "A funded Cloudflare account is required for AI inference.");
+  }
+  return usage.byokRouting;
+}
+
 /**
  * Check whether the user may proceed with an LLM-backed request.
  *

@@ -643,9 +643,13 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return this.storage.cloudflareBilling.get();
   }
 
-  /** Update the cached credit balance for the billed account. */
-  async updateCloudflareCredits(creditsRemaining: number | null): Promise<void> {
+  /** Update cached credits only if the caller's billed account is still selected. */
+  async updateCloudflareCredits(
+    creditsRemaining: number | null,
+    expectedAccountId?: string,
+  ): Promise<void> {
     let record = this.storage.cloudflareBilling.get() ?? {};
+    if (expectedAccountId && record.accountId !== expectedAccountId) return;
     record.creditsRemaining = creditsRemaining;
     record.creditsUpdatedAt = Date.now();
     this.storage.cloudflareBilling.put(record);

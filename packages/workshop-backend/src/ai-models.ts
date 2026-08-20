@@ -19,6 +19,8 @@ import { AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, WORKERS_AI_OUTPUT_LI
   from "@gadgets/workshop-shared/api";
 import { AiGatewayConfig, getAiGatewayConfig, type AiGatewayLogRoute } from "./ai-gateway.js";
 import { isUserFundedAiRequired } from "./ai-gateway-billing/config.js";
+import { refreshCachedBalance } from "./ai-gateway-billing/cloudflare/connection-service.js";
+import { getRequiredUserGatewayRouting } from "./ai-gateway-billing/limits/usage-checker.js";
 import { completeText } from "./ai-invoke.js";
 import { bridgePdfAttachments } from "./chat-attachment-pdf.js";
 
@@ -656,6 +658,7 @@ export type LanguageModelGatekeeperProps = {
   config: AiModelConfig,
   initiator: AiChatAuthorInfo,
   metadata?: GatewayMetadataContext,
+  userId?: string,
 };
 
 export class LanguageModelGatekeeper
@@ -688,10 +691,25 @@ export class LanguageModelGatekeeper
 
   async startSession(approvalQueue: RpcStub<ApprovalQueue>)
       : Promise<LanguageModelBinding> {
-    let model = getModel(this.env, this.ctx.props.config, this.ctx.props.initiator, {
-      metadata: this.ctx.props.metadata,
+    return new LanguageModelBindingImpl(async () => {
+      let userGateway: UserGatewayRouting | undefined;
+      let refreshBalance: (() => Promise<void>) | undefined;
+      if (isUserFundedAiRequired(this.env)) {
+        const users = this.ctx.exports.UserDurableObject;
+        const userId = this.ctx.props.userId
+          ? users.idFromString(this.ctx.props.userId)
+          : users.idFromName(this.ctx.props.initiator.id);
+        const user = users.get(userId);
+        userGateway = await getRequiredUserGatewayRouting(this.env, user);
+        refreshBalance = () => refreshCachedBalance(this.env, user);
+      }
+
+      const model = getModel(this.env, this.ctx.props.config, this.ctx.props.initiator, {
+        metadata: this.ctx.props.metadata,
+        userGateway,
+      });
+      return {model, refreshBalance};
     });
-    return new LanguageModelBindingImpl(model);
   }
 
   applyAction(action: number): Promise<void> {
@@ -717,7 +735,10 @@ export class LanguageModelGatekeeper
 
 @validateRpc()
 class LanguageModelBindingImpl extends RpcTarget implements LanguageModelBinding {
-  constructor(private model: ModelHandle) {
+  constructor(private resolveModel: () => Promise<{
+    model: ModelHandle,
+    refreshBalance?: () => Promise<void>,
+  }>) {
     super();
   }
 
@@ -725,9 +746,14 @@ class LanguageModelBindingImpl extends RpcTarget implements LanguageModelBinding
     // TODO: Should we be calling authorizeObservation() here? It's not really observing anything,
     //   but you might want the audit logs?
     // TODO: Account LLM costs back to the calling gadget.
-    return await completeText(this.model, {
-      prompt: options.prompt,
-      systemPrompt: options.systemPrompt,
-    });
+    const {model, refreshBalance} = await this.resolveModel();
+    try {
+      return await completeText(model, {
+        prompt: options.prompt,
+        systemPrompt: options.systemPrompt,
+      });
+    } finally {
+      await refreshBalance?.();
+    }
   }
 }
