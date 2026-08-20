@@ -5,7 +5,7 @@
 import { AuthVendorInfo, ServerConfig } from "@gadgets/workshop-shared/api";
 import { createWorkshopLogger } from "./observability";
 import { getAuthGatekeeperAllowlist, isPasswordAuthEnabled } from "./auth/config.js";
-import { isCloudflareLimitsEnabled } from "./ai-gateway-billing/config.js";
+import { isCloudflareBillingEnabled } from "./ai-gateway-billing/config.js";
 import { getAuthVendorBinding } from "./auth/auth-vendors.js";
 import { readAdminConfig } from "./admin-config.js";
 import { siteLogoImage } from "./site-logo.js";
@@ -49,7 +49,7 @@ export async function getServerConfig(env: Cloudflare.Env): Promise<ServerConfig
     clerkPublishableKey: env.CF_ACCESS_AUD ? undefined : env.CLERK_PUBLISHABLE_KEY,
     authVendors,
     passwordAuthEnabled: isPasswordAuthEnabled(env),
-    cloudflareLimitsEnabled: isCloudflareLimitsEnabled(env),
+    cloudflareLimitsEnabled: isCloudflareBillingEnabled(env),
     signupsEnabled: config.signupsEnabled,
     siteName: config.siteName,
     siteLogo: siteLogoImage(config.siteLogoConfigured),
