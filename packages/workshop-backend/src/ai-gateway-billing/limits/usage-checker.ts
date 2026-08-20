@@ -160,11 +160,29 @@ export async function getUsageInfo(
     return {
       cloudflareLimitsEnabled: false,
       unlimited: true,
+      userFundingRequired: false,
       dailyUsed: 0,
       dailyLimit: 0,
       remaining: 0,
       connected: false,
       balance: null,
+    };
+  }
+
+  if (isUserFundedAiRequired(env)) {
+    const status = await getConnectionStatus(env, userStub);
+    return {
+      cloudflareLimitsEnabled: true,
+      unlimited: false,
+      userFundingRequired: true,
+      dailyUsed: 0,
+      dailyLimit: 0,
+      remaining: 0,
+      connected: status.connected,
+      balance: status.balance,
+      accountId: status.accountId,
+      accountName: status.accountName,
+      needsAccountSelection: status.needsAccountSelection,
     };
   }
 
@@ -178,6 +196,7 @@ export async function getUsageInfo(
   return {
     cloudflareLimitsEnabled: true,
     unlimited: false,
+    userFundingRequired: false,
     dailyUsed: quota.used,
     dailyLimit: quota.limit,
     remaining: quota.remaining,

@@ -90,13 +90,14 @@ export default function OutOfCreditsModal({ open, onClose }: OutOfCreditsModalPr
 
   const connected = usage?.connected ?? false
   const needsSelection = connected && (usage?.needsAccountSelection ?? false)
+  const userFundingRequired = usage?.userFundingRequired ?? false
 
   return (
     <Dialog.Root open={open} onOpenChange={(o) => { if (!o) onClose() }}>
       <Dialog className="p-6 sm:w-[560px]" size="base">
         <Dialog.Title className="text-lg font-semibold mb-2 flex items-center gap-2">
           <CloudWarning size={22} weight="bold" className="text-kumo-warning" />
-          You've reached your free usage limit
+          {userFundingRequired ? 'Connect a funded account to continue' : "You've reached your free usage limit"}
         </Dialog.Title>
 
         {usage === null ? (
@@ -105,20 +106,26 @@ export default function OutOfCreditsModal({ open, onClose }: OutOfCreditsModalPr
           <div className="space-y-4">
             {!connected ? (
               <p className="text-sm text-kumo-subtle">
-                You've used all {usage.dailyLimit} of your free {usage.dailyLimit === 1 ? 'request' : 'requests'} for
-                today. Connect your Cloudflare account to keep building now — usage beyond the free
-                tier is billed to your own Cloudflare AI Gateway credits
-                {usage.resetAt ? (
+                {userFundingRequired ? (
+                  'Connect your Cloudflare account and add AI Gateway credits to use AI models. All inference is billed directly to your account.'
+                ) : (
                   <>
-                    {' '}— or wait: your free {usage.dailyLimit === 1 ? 'request resets' : 'requests reset'} at
-                    00:00 UTC, in <ResetCountdown resetAt={usage.resetAt} onElapsed={refresh} />.
+                    You've used all {usage.dailyLimit} of your free {usage.dailyLimit === 1 ? 'request' : 'requests'} for
+                    today. Connect your Cloudflare account to keep building now — usage beyond the free
+                    tier is billed to your own Cloudflare AI Gateway credits
+                    {usage.resetAt ? (
+                      <>
+                        {' '}— or wait: your free {usage.dailyLimit === 1 ? 'request resets' : 'requests reset'} at
+                        00:00 UTC, in <ResetCountdown resetAt={usage.resetAt} onElapsed={refresh} />.
+                      </>
+                    ) : '.'}
                   </>
-                ) : '.'}
+                )}
               </p>
             ) : needsSelection ? (
               <p className="text-sm text-kumo-subtle">
                 Your Cloudflare connection has access to multiple accounts. Choose which one's AI
-                Gateway credits should be billed for usage beyond the free tier.
+                Gateway credits should be billed{userFundingRequired ? '.' : ' beyond the free tier.'}
               </p>
             ) : (
               <p className="text-sm text-kumo-subtle">

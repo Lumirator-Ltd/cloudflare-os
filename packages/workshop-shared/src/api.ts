@@ -1088,8 +1088,8 @@ export type ServerConfig = {
   passwordAuthEnabled: boolean;
 
   /**
-   * Whether the optional Cloudflare free-tier limits + top-up flow is enabled. When false (the
-   * default, e.g. self-hosted), usage is unlimited and the credits UI is hidden.
+   * Whether Cloudflare free-tier limits or required user-funded billing is enabled. When false
+   * (the default, e.g. self-hosted), usage is unlimited and the credits UI is hidden.
    */
   cloudflareLimitsEnabled: boolean;
 
@@ -1131,8 +1131,10 @@ export type CloudflareUsageInfo = {
   cloudflareLimitsEnabled: boolean;
   /** When true, the user has unlimited access (limits disabled) and counters are not tracked. */
   unlimited: boolean;
+  /** When true, AI inference is blocked unless it can use the connected user's funded account. */
+  userFundingRequired: boolean;
 
-  /** Free-tier daily usage. */
+  /** Free-tier daily usage. All values are zero when user funding is required. */
   dailyUsed: number;
   dailyLimit: number;
   remaining: number;

@@ -98,20 +98,28 @@ export default function UsageSettings() {
         <p className="text-sm text-kumo-subtle">Loading usage…</p>
       ) : (
         <div className="space-y-6">
-          {/* Free daily allowance */}
-          <div>
-            <p className="text-xs font-medium text-kumo-subtle mb-1">Free daily allowance</p>
-            <p className="text-sm text-kumo-default">
-              {usage.remaining} of {usage.dailyLimit}{' '}
-              {usage.dailyLimit === 1 ? 'request' : 'requests'} remaining today
-            </p>
-            {usage.resetAt && (
-              <p className="text-xs text-kumo-subtle mt-1">
-                Resets at 00:00 UTC, in{' '}
-                <ResetCountdown resetAt={usage.resetAt} onElapsed={refresh} />.
+          {usage.userFundingRequired ? (
+            <div>
+              <p className="text-xs font-medium text-kumo-subtle mb-1">User-funded usage</p>
+              <p className="text-sm text-kumo-default">
+                A funded Cloudflare account is required for all AI inference.
               </p>
-            )}
-          </div>
+            </div>
+          ) : (
+            <div>
+              <p className="text-xs font-medium text-kumo-subtle mb-1">Free daily allowance</p>
+              <p className="text-sm text-kumo-default">
+                {usage.remaining} of {usage.dailyLimit}{' '}
+                {usage.dailyLimit === 1 ? 'request' : 'requests'} remaining today
+              </p>
+              {usage.resetAt && (
+                <p className="text-xs text-kumo-subtle mt-1">
+                  Resets at 00:00 UTC, in{' '}
+                  <ResetCountdown resetAt={usage.resetAt} onElapsed={refresh} />.
+                </p>
+              )}
+            </div>
+          )}
 
           {/* Cloudflare connection / credits */}
           <div>
@@ -123,9 +131,9 @@ export default function UsageSettings() {
                   <span>Not connected</span>
                 </div>
                 <p className="text-sm text-kumo-subtle">
-                  Connect your Cloudflare account to keep building once your free allowance runs
-                  out. Usage beyond the free tier is billed to your own Cloudflare AI Gateway
-                  credits.
+                  {usage.userFundingRequired
+                    ? 'Connect and fund your Cloudflare account to use AI models. Inference is billed to your own AI Gateway credits.'
+                    : 'Connect your Cloudflare account to keep building once your free allowance runs out. Usage beyond the free tier is billed to your own Cloudflare AI Gateway credits.'}
                 </p>
                 <div className="pt-1">
                   <Button variant="primary" size="sm" onClick={connect} loading={busy}>
