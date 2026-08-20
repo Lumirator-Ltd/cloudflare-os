@@ -76,6 +76,27 @@ describe("AdminApi connector configuration listing", () => {
     expect(JSON.stringify(result)).not.toContain("values");
   });
 
+  it("lists the bound MCP portal with its plain URL input and no callback", async () => {
+    const result = await call<unknown[]>(api(environment({
+      GATEKEEPER_GITHUB: vendor({ displayName: "GitHub", url: "https://github.com" }),
+      GATEKEEPER_MCP_PORTAL: vendor({
+        displayName: "MCP Portal",
+        url: "https://developers.cloudflare.com/cloudflare-one/access-controls/ai-controls/mcp-portals/",
+        configuration: { configured: false },
+      }),
+    })), "listConnectorConfigurations");
+
+    expect(result).toEqual([{
+      id: "mcp_portal",
+      displayName: "MCP Portal",
+      configured: false,
+      setupGuideUrl:
+        "https://developers.cloudflare.com/cloudflare-one/access-controls/ai-controls/mcp-portals/",
+      inputs: [{ name: "MCP_PORTAL_URL", label: "Portal URL", secret: false }],
+      writeAvailable: true,
+    }]);
+  });
+
   it("uses immutable HubSpot inputs and a server-owned setup guide", async () => {
     const result = await call<unknown[]>(api(environment({
       GATEKEEPER_GITHUB: vendor({ displayName: "GitHub", url: "https://github.com" }),
@@ -186,6 +207,35 @@ describe("AdminApi.configureConnector", () => {
     });
   });
 
+  it("writes the MCP portal URL to the mcp-portal Worker", async () => {
+    const requests: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      requests.push({ input, init });
+      return new Response(null, { status: 200 });
+    };
+
+    await call(api(environment({
+      GATEKEEPER_MCP_PORTAL: vendor({
+        displayName: "MCP Portal",
+        url: "https://example.com/mcp",
+        configuration: { configured: false },
+      }),
+    }), fetchImpl), "configureConnector", ["mcp_portal", {
+      MCP_PORTAL_URL: "https://PORTAL.Example:443/mcp",
+    }]);
+
+    expect(requests).toHaveLength(1);
+    expect(String(requests[0].input)).toBe(
+      `https://api.cloudflare.com/client/v4/accounts/${"a".repeat(32)}` +
+      "/workers/scripts/customer-gatekeeper-mcp-portal/secrets",
+    );
+    expect(JSON.parse(String(requests[0].init?.body))).toEqual({
+      name: "MCP_PORTAL_URL",
+      text: "https://portal.example/mcp",
+      type: "secret_text",
+    });
+  });
+
   it("rejects unbound connectors and bound connectors without configuration metadata", async () => {
     await expect(call(api(environment()), "configureConnector", ["missing", {}]))
       .rejects.toThrow(/not configurable/);
@@ -263,6 +313,32 @@ describe("AdminApi.configureConnector", () => {
       CLIENT_ID: invalidValue,
       CLIENT_SECRET: "secret",
     }])).rejects.toThrow(/CLIENT_ID/);
+  });
+
+  it.each([
+    ["HTTP URL", "http://portal.example/mcp"],
+    ["relative URL", "/mcp"],
+    ["malformed URL", "https://"],
+    ["userinfo", "https://user:password@portal.example/mcp"],
+    ["query", "https://portal.example/mcp?tenant=secret"],
+    ["fragment", "https://portal.example/mcp#secret"],
+    ["empty value", ""],
+    ["control character", "https://portal.example/\u0000mcp"],
+    ["overlong value", `https://portal.example/${"x".repeat(4097)}`],
+  ])("rejects an MCP portal %s before fetching", async (_name, invalidUrl) => {
+    const fetchImpl = vi.fn<typeof fetch>();
+
+    await expect(call(api(environment({
+      GATEKEEPER_MCP_PORTAL: vendor({
+        displayName: "MCP Portal",
+        url: "https://example.com/mcp",
+        configuration: { configured: false },
+      }),
+    }), fetchImpl), "configureConnector", ["mcp_portal", {
+      MCP_PORTAL_URL: invalidUrl,
+    }])).rejects.toThrow(/MCP_PORTAL_URL/);
+
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 
   it("fails clearly when the control plane is unavailable", async () => {

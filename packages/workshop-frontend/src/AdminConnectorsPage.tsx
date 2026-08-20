@@ -81,12 +81,21 @@ export default function AdminConnectorsPage() {
     try {
       await admin.api.configureConnector(connector.id, values)
       setDrafts((current) => ({ ...current, [connector.id]: {} }))
-      setConnectors((current) => current.map((item) =>
-        item.id === connector.id ? { ...item, configured: true } : item,
-      ))
-      toasts.add({ title: `${connector.displayName} credentials saved`, variant: 'success' })
+      let refreshFailed = false
+      try {
+        setConnectors(await admin.api.listConnectorConfigurations())
+      } catch (error) {
+        refreshFailed = true
+        console.error('Failed to reload connector configurations after saving:', error)
+      }
+      toasts.add({
+        title: refreshFailed
+          ? `${connector.displayName} configuration saved, but status could not be refreshed. Reload this page to check availability.`
+          : `${connector.displayName} configuration saved. It may take a moment to become available.`,
+        variant: 'success',
+      })
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to save connector credentials'
+      const message = error instanceof Error ? error.message : 'Failed to save connector configuration'
       toasts.add({ title: message, variant: 'error' })
     } finally {
       setSaving(null)
@@ -129,15 +138,15 @@ export default function AdminConnectorsPage() {
         <a href="/admin" className="text-sm font-medium text-kumo-brand hover:underline">
           Back to Admin
         </a>
-        <h1 className="mt-3 text-2xl font-semibold text-kumo-default">Connector credentials</h1>
+        <h1 className="mt-3 text-2xl font-semibold text-kumo-default">Connector configuration</h1>
         <p className="mt-1 text-sm text-kumo-subtle">
-          Configure the deployment OAuth credentials used when users connect their accounts.
+          Configure deployment settings used when users connect their accounts.
         </p>
       </div>
 
       {readOnly && (
         <div className="rounded-xl border border-kumo-line bg-kumo-elevated px-4 py-3 text-sm text-kumo-subtle">
-          Connector credential management is not enabled for this deployment. Configuration is read-only.
+          Connector configuration management is not enabled for this deployment. Configuration is read-only.
         </div>
       )}
 
@@ -187,12 +196,18 @@ export default function AdminConnectorsPage() {
                 </div>
 
                 <div className="mt-5">
-                  <p className="text-xs font-medium text-kumo-subtle">Callback URL</p>
-                  <code className="mt-1 block overflow-x-auto rounded-lg border border-kumo-line bg-kumo-base px-3 py-2 text-xs text-kumo-default">
-                    {connector.callbackUrl}
-                  </code>
+                  {connector.callbackUrl && (
+                    <>
+                      <p className="text-xs font-medium text-kumo-subtle">Callback URL</p>
+                      <code className="mt-1 block overflow-x-auto rounded-lg border border-kumo-line bg-kumo-base px-3 py-2 text-xs text-kumo-default">
+                        {connector.callbackUrl}
+                      </code>
+                    </>
+                  )}
                   <p className="mt-2 text-xs text-kumo-subtle">
-                    Follow the provider setup guide, register the callback URL above, then enter the credentials.{' '}
+                    {connector.callbackUrl
+                      ? 'Follow the provider setup guide, register the callback URL above, then enter the credentials. '
+                      : 'Follow the setup guide, then enter the connector settings. '}
                     <a
                       href={connector.setupGuideUrl}
                       target="_blank"
@@ -215,13 +230,15 @@ export default function AdminConnectorsPage() {
                         <input
                           id={inputId}
                           name={inputId}
-                          type="password"
-                          autoComplete="off"
-                          data-keeper-ignore="true"
-                          data-1p-ignore="true"
-                          data-lpignore="true"
-                          data-bwignore="true"
-                          data-form-type="other"
+                          type={input.secret ? 'password' : 'url'}
+                          {...(input.secret ? {
+                            autoComplete: 'off',
+                            'data-keeper-ignore': 'true',
+                            'data-1p-ignore': 'true',
+                            'data-lpignore': 'true',
+                            'data-bwignore': 'true',
+                            'data-form-type': 'other',
+                          } : { autoComplete: 'url' })}
                           value={values[input.name] ?? ''}
                           disabled={!connector.writeAvailable || saving === connector.id}
                           onChange={(event) =>
@@ -243,7 +260,7 @@ export default function AdminConnectorsPage() {
                       disabled={!complete || saving !== null}
                       onClick={() => handleSave(connector)}
                     >
-                      {connector.configured ? 'Rotate credentials' : 'Save credentials'}
+                      {connector.configured ? 'Update configuration' : 'Save configuration'}
                     </Button>
                   </div>
                 )}

@@ -101,10 +101,8 @@ export async function withClient<T>(
   }
   const { authorization, sessionId, generation } = connection;
   const client = new McpClient(
-    endpoint, async method => {
-      if (method === "tools/call") {
-        await account.assertConnectionCurrent(endpoint, generation);
-      }
+    endpoint, async () => {
+      await account.assertConnectionCurrent(endpoint, generation);
       return authorization;
     }, sessionId, {
       ...fetchOptions(env),

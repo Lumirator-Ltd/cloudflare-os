@@ -23,6 +23,14 @@ const connectors = [
   ["zoominfo", "zoominfo.ts"],
 ];
 
+function connectorDescriptorSource(vendorId) {
+  const start = configurationSource.indexOf(`  ${vendorId}: Object.freeze({`);
+  assert.notEqual(start, -1, `missing descriptor for ${vendorId}`);
+  const end = configurationSource.indexOf("\n  }),", start);
+  assert.notEqual(end, -1, `unterminated descriptor for ${vendorId}`);
+  return configurationSource.slice(start, end);
+}
+
 for (const [vendorId, fileName] of connectors) {
   test(`${vendorId} has a local setup guide`, () => {
     assert.equal(existsSync(`${root}/packages/gatekeeper-${vendorId}/README.md`), true);
@@ -44,11 +52,15 @@ for (const [vendorId, fileName] of connectors) {
   });
 
   test(`${vendorId} has a server-owned HTTPS setup guide`, () => {
+    const descriptor = connectorDescriptorSource(vendorId);
     if (vendorId === "linear") {
-      assert.match(configurationSource, /linear:\s*"https:\/\/linear\.app\/developers\/oauth-2-0-authentication"/);
+      assert.match(
+        descriptor,
+        /setupGuideUrl:\s*"https:\/\/linear\.app\/developers\/oauth-2-0-authentication"/,
+      );
     } else {
-      const expected = `${vendorId}: \`\${README_BASE_URL}/gatekeeper-${vendorId}#readme\`,`;
-      assert.equal(configurationSource.includes(expected), true);
+      const expected = `setupGuideUrl: \`\${README_BASE_URL}/gatekeeper-${vendorId}#readme\`,`;
+      assert.equal(descriptor.includes(expected), true);
     }
   });
 }

@@ -40,33 +40,38 @@ signatures unscoped, and 12 when scoped to one server.
 | --- | --- |
 | `MCP_PORTAL_URL` | The portal's MCP endpoint. Unset means the connector hides itself. |
 | `MCP_PORTAL_NAME` | Display name in the connector list and every approval prompt. Defaults to `MCP Server Portal (<host>)`. |
-| `MCP_PORTAL_AUTH` | `oauth` (default), `none`, or `token`. |
-| `MCP_PORTAL_TOKEN` | Secret bearer token, for `MCP_PORTAL_AUTH: "token"`. |
 | `MCP_PORTAL_TRUST_ANNOTATIONS` | `true` to let upstream tool annotations drive auto-approval. Off by default; see below. |
 | `MCP_ALLOW_INSECURE` | `"true"` to disable the endpoint checks entirely: permits `http://` **and** private, loopback, link-local, and cloud-metadata hosts, for the portal and every OAuth URL discovered from it. Local dev only. |
 
 Only `MCP_ALLOW_INSECURE` is set in the repo's `wrangler.jsonc`, pinned to `"false"` so the default
 is explicit rather than merely absent. None of the others is, and a portal URL committed there would
 become the default for every deployment of this repo and would send their users' OAuth flows to
-whichever host it named, so it belongs in the deployment's own configuration — for Cloudflare's
-internal deployment, the per-package overrides in `gadgets-internal`.
+whichever host it named.
+
+A deployment admin configures `MCP_PORTAL_URL` from **Admin → Connector configuration**. The URL is
+written to this Worker through the deployment's existing write-only connector configuration path.
+The portal and its approved upstream MCP servers remain managed in Cloudflare Zero Trust; this UI
+only connects Cloudflare OS to that portal.
+
+This connector is intrinsically OAuth-only. Legacy `MCP_PORTAL_AUTH` and `MCP_PORTAL_TOKEN`
+settings are ignored.
 
 Unconfigured, `getSupportedResources()` returns nothing and the Workshop drops the vendor. A
-`MCP_PORTAL_URL` that cannot be used — a non-`https` typo or a URL containing `username:password`,
-say — is treated the same way, so a misconfiguration hides the connector rather than producing one
-that fails on first use or copying URL credentials into account state and configurator fields.
+`MCP_PORTAL_URL` that cannot be used — a non-`https` typo or a URL containing userinfo, a query, or a
+fragment — is treated the same way, so a misconfiguration hides the connector rather than producing
+one that fails on first use or copying URL credentials into account state and configurator fields.
 
 Changing `MCP_PORTAL_URL` on a deployment that already has connected accounts is a **repoint**.
-Existing bindings fail closed at once: the minting path checks facet props against current
-configuration, and an already-minted facet must name its endpoint when asking the account for
-credentials, which the account refuses after it has moved. The user recovers by reconnecting, which
-is the one endpoint change an account will accept. It is accepted only because the new endpoint
-comes from this Worker's configuration rather than from a form. Nothing held for the old portal
-survives the move: tokens, the transport session, and any in-progress authorization are dropped, so
-the user re-authorizes against the new host. The account advances a persisted generation before
-probing; refreshes, expiry notifications, and session writes that started under the old generation
-are ignored when they eventually return. Always-approve action kinds also include the exact endpoint,
-so consent for the old portal does not carry over to the new one.
+Removing or repointing it makes every existing capability dormant until the user reconnects. The
+account checks current deployment configuration before preparing credentials and again immediately
+before each outbound MCP request, so an old durable facet stops without contacting the removed or
+previous endpoint. Reconnecting is the one endpoint change an account will accept because the new
+endpoint comes from this Worker's configuration rather than from a form. Nothing held for the old
+portal survives the move: tokens, the transport session, and any in-progress authorization are
+dropped, so the user re-authorizes against the new host. The account advances a persisted generation
+before probing; refreshes, expiry notifications, and session writes that started under the old
+generation are ignored when they eventually return. Always-approve action kinds also include the
+exact endpoint, so consent for the old portal does not carry over to the new one.
 
 `MCP_PORTAL_TRUST_ANNOTATIONS` is read at each point of use (`portalTrust(env)`) and never
 persisted on an account or a binding's props, so clearing it de-escalates every existing connection
@@ -76,10 +81,9 @@ a rule for each action kind.
 ## How the connect flow works
 
 There is no connect form: the endpoint is a deployment setting, so pressing "connect" goes straight
-to the portal's own sign-in. Under `MCP_PORTAL_AUTH: "oauth"` the gatekeeper runs the same
-discovery chain as [`gatekeeper-mcp`](../gatekeeper-mcp/README.md#how-the-connect-flow-works)
-against the portal; under `"token"` it presents `MCP_PORTAL_TOKEN` and no user interaction is
-needed; under `"none"` it connects unauthenticated.
+to the portal's own OAuth sign-in. The gatekeeper runs the same discovery chain as
+[`gatekeeper-mcp`](../gatekeeper-mcp/README.md#how-the-connect-flow-works) against the portal and
+refuses a portal that answers without requiring OAuth.
 
 The account records `provenance: "deployment"`, which is what keeps an upstream server from renaming
 itself over `MCP_PORTAL_NAME` in every approval prompt.
