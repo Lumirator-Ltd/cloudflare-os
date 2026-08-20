@@ -920,7 +920,8 @@ export type AdminConnectorConfiguration = {
   displayName: string;
   logo?: AvatarImage;
   configured: boolean;
-  callbackUrl: string;
+  /** OAuth callback URL to register; discovery-only connectors may omit it. */
+  callbackUrl?: string;
   setupGuideUrl: string;
   inputs: ConnectorConfigurationInput[];
   writeAvailable: boolean;
@@ -943,7 +944,7 @@ export interface AdminApi {
   /** Lists write-only connector setup metadata without returning any configured values. */
   listConnectorConfigurations(): Promise<AdminConnectorConfiguration[]>;
 
-  /** Writes every declared secret input for a configured connector. */
+  /** Writes every declared write-only input for a configured connector. */
   configureConnector(
     vendorId: string,
     values: AdminConnectorConfigurationValues,

@@ -38,7 +38,8 @@ export type AvatarImage = {
 export type ConnectorConfigurationInput = {
   name: string;
   label: string;
-  secret: true;
+  /** Whether the client should use password presentation instead of URL/plain presentation. */
+  secret: boolean;
 };
 
 /** Describes whether a connector has its required deployment configuration. */
