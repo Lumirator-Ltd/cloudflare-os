@@ -23,3 +23,13 @@ export function getMinimumCloudflareBalance(env: Cloudflare.Env): number {
 export function isCloudflareLimitsEnabled(env: Cloudflare.Env): boolean {
   return env.ENABLE_CLOUDFLARE_LIMITS === "true";
 }
+
+/** Returns whether every platform-gateway inference request must use a funded user account. */
+export function isUserFundedAiRequired(env: Cloudflare.Env): boolean {
+  return env.REQUIRE_USER_FUNDED_AI === "true";
+}
+
+/** Returns whether the deployment exposes Cloudflare account billing controls. */
+export function isCloudflareBillingEnabled(env: Cloudflare.Env): boolean {
+  return isCloudflareLimitsEnabled(env) || isUserFundedAiRequired(env);
+}

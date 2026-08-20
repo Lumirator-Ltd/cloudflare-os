@@ -36,6 +36,29 @@ describe("canProceedWithRequest", () => {
     expect(r.shouldUseByok).toBe(true);
   });
 
+  it("blocks platform funding when user funding is required", () => {
+    const r = canProceedWithRequest({
+      withinLimits: true,
+      hasUserToken: false,
+      requireUserFunding: true,
+    });
+    expect(r.allowed).toBe(false);
+    expect(r.shouldUseByok).toBe(true);
+    expect(r.reason).toContain("Connect your Cloudflare account");
+  });
+
+  it("requires sufficient user funds even when a free allowance exists", () => {
+    const r = canProceedWithRequest({
+      withinLimits: true,
+      hasUserToken: true,
+      balance: MINIMUM_CLOUDFLARE_BALANCE - 0.01,
+      requireUserFunding: true,
+    });
+    expect(r.allowed).toBe(false);
+    expect(r.shouldUseByok).toBe(true);
+    expect(r.reason).toContain("add credits");
+  });
+
   it("connected with $0 balance still uses the daily free tier", () => {
     const r = canProceedWithRequest({ withinLimits: true, hasUserToken: true, balance: 0 });
     expect(r.allowed).toBe(true);

@@ -18,6 +18,7 @@ import AI_MODEL_BINDING_TYPES from "./ai-model-binding.txt";
 import { AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, WORKERS_AI_OUTPUT_LIMIT }
   from "@gadgets/workshop-shared/api";
 import { AiGatewayConfig, getAiGatewayConfig, type AiGatewayLogRoute } from "./ai-gateway.js";
+import { isUserFundedAiRequired } from "./ai-gateway-billing/config.js";
 import { completeText } from "./ai-invoke.js";
 import { bridgePdfAttachments } from "./chat-attachment-pdf.js";
 
@@ -369,6 +370,9 @@ export function getModel(env: Cloudflare.Env, config: AiModelConfig,
   // tier). The config's apiToken/apiUrl are ignored in that mode.
   let gwConfig = getAiGatewayConfig(env);
   if (gwConfig) {
+    if (isUserFundedAiRequired(env)) {
+      throw new Error("A funded Cloudflare account is required for AI inference.");
+    }
     return getModelViaGateway(gwConfig, config, initiator, options);
   }
 

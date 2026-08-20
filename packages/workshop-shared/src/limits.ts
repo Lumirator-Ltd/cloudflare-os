@@ -25,6 +25,8 @@ export const LIMIT_ERROR_MESSAGES = {
     "Free usage limit reached. Connect your Cloudflare account or use your own API keys to continue.",
   NO_CLOUDFLARE_TOKEN:
     "Free usage limit reached. Connect your Cloudflare account to continue.",
+  USER_FUNDING_REQUIRED:
+    "Connect your Cloudflare account and add AI Gateway credits to use AI models.",
 } as const;
 
 /** The window over which the free-tier limit is measured. */
@@ -71,6 +73,8 @@ export function canProceedWithRequest(data: {
   balance?: number | null;
   /** Minimum required balance (USD). Defaults to MINIMUM_CLOUDFLARE_BALANCE. */
   minimumBalance?: number;
+  // When true, platform-funded free usage is disabled.
+  requireUserFunding?: boolean;
 }): CanProceedResult {
   const { withinLimits, hasUserToken, balance } = data;
   const minimumBalance = data.minimumBalance ?? MINIMUM_CLOUDFLARE_BALANCE;
@@ -78,6 +82,20 @@ export function canProceedWithRequest(data: {
   // Connected with sufficient balance: bill the user's own gateway, even within the free tier.
   if (hasUserToken && hasMinimumBalance(balance, minimumBalance)) {
     return { allowed: true, shouldUseByok: true };
+  }
+
+  if (data.requireUserFunding) {
+    return hasUserToken
+      ? {
+          allowed: false,
+          reason: insufficientBalanceMessage(minimumBalance),
+          shouldUseByok: true,
+        }
+      : {
+          allowed: false,
+          reason: LIMIT_ERROR_MESSAGES.USER_FUNDING_REQUIRED,
+          shouldUseByok: true,
+        };
   }
 
   // Otherwise fall back to the platform free tier while it lasts. A connected user whose balance is
