@@ -353,7 +353,7 @@ export abstract class McpAccountBase<E extends AccountEnv, P = unknown>
       if (generation !== this.connectionGeneration()) {
         throw new Error("This connection attempt was replaced by a newer one.");
       }
-      if (server.auth === "oauth") {
+      if (server.auth === "oauth" && server.provenance === "deployment") {
         this.restoreSelection(initiationNonce);
         throw new Error("This MCP server must require OAuth authorization.");
       }

@@ -112,7 +112,7 @@ class UnconfiguredTokenAccount extends McpAccountBase<AccountEnv> {
 class PublicProbeAccount extends McpAccountBase<AccountEnv> {
   protected baseUrl(): string { return "https://gatekeeper.example"; }
   protected log(): never { return testLog as never; }
-  protected mintAccount(): never { throw new Error("not reached"); }
+  protected mintAccount(): never { return {} as never; }
   protected override async probe(): Promise<never> {
     return { serverInfo: { name: "Public" } } as never;
   }
@@ -422,6 +422,18 @@ describe("connect initiation nonce", () => {
     expect(context.storage.kv.get("server")).toBeUndefined();
     expect(context.storage.kv.get("connected")).toBeUndefined();
     expect(account.isWaiting(nonce)).toBe(true);
+  });
+
+  it("preserves anonymous user-supplied endpoints when OAuth is only the initial guess", async () => {
+    const context = fakeContext();
+    context.storage.kv.put("callback", { credentialsRestored: async () => undefined });
+    const account = new PublicProbeAccount(context as never, {});
+    const nonce = "6".repeat(64);
+    await account.prepareReconnect(nonce);
+
+    await expect(account.beginConnect(nonce, server("https://public.example/mcp")))
+      .resolves.toEqual({ kind: "done" });
+    expect(context.storage.kv.get<ConnectedServer>("server")?.auth).toBe("none");
   });
 
   it("refuses an OAuth-configured endpoint that answers without authorization", async () => {
