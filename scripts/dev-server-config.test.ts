@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 import {
   getDevServerConfig,
   getWranglerPortFromBackendHost,
+  WORKSHOP_BACKEND_OPTIONAL_FEATURE_VARS,
 } from "./dev-server-config.ts";
 
 describe("getWranglerPortFromBackendHost", () => {
@@ -41,6 +42,12 @@ describe("getWranglerPortFromBackendHost", () => {
     assert.throws(
         () => getWranglerPortFromBackendHost("http://localhost:9000"),
         /VITE_BACKEND_HOST must include a valid host/);
+  });
+});
+
+describe("workshop backend optional feature vars", () => {
+  it("forwards required user-funded AI mode", () => {
+    assert.ok(WORKSHOP_BACKEND_OPTIONAL_FEATURE_VARS.includes("REQUIRE_USER_FUNDED_AI"));
   });
 });
 

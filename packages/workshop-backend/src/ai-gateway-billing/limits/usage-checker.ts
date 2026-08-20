@@ -2,14 +2,17 @@
 // whether a user's request may proceed, and whose credentials to use.
 //
 // Billing rules (see canProceedWithRequest):
-//   - Connected + balance >= minimum -> billed to the user's own gateway, no daily cap; the daily
-//     counter is NOT consumed (the platform free tier is reserved for everyone else).
-//   - Connected + balance below minimum (incl. $0), or not connected -> platform free tier; the
-//     daily counter is consumed and, once exhausted, the request is blocked.
+//   - Connected + balance >= minimum -> billed to the user's own gateway with no daily cap.
+//   - Required user funding without sufficient balance -> blocked without consuming a daily quota.
+//   - Otherwise, unfunded users consume the platform free tier until it is exhausted.
 
 import { canProceedWithRequest, hasMinimumBalance, LimitWindowKind } from "@gadgets/workshop-shared/limits";
 import { CloudflareUsageInfo } from "@gadgets/workshop-shared/api";
-import { isCloudflareLimitsEnabled, getMinimumCloudflareBalance } from "../config.js";
+import {
+  getMinimumCloudflareBalance,
+  isCloudflareBillingEnabled,
+  isUserFundedAiRequired,
+} from "../config.js";
 import { getDailyLlmCallLimit } from "./config.js";
 import { getConnectionStatus, resolveConnection, ByokGatewayRouting } from "../cloudflare/connection-service.js";
 import type { UserDurableObject } from "../../user.js";
@@ -54,21 +57,36 @@ function unlimitedResult(): UsageCheckResult {
   };
 }
 
+/** Resolves required-mode routing or throws the user-facing reason inference is blocked. */
+export async function getRequiredUserGatewayRouting(
+  env: Cloudflare.Env,
+  userStub: DurableObjectStub<UserDurableObject>,
+): Promise<ByokGatewayRouting | undefined> {
+  if (!isUserFundedAiRequired(env)) return undefined;
+
+  const usage = await checkUsageAndBalance(env, userStub);
+  if (!usage.allowed || !usage.byokRouting) {
+    throw new Error(usage.reason ?? "A funded Cloudflare account is required for AI inference.");
+  }
+  return usage.byokRouting;
+}
+
 /**
  * Check whether the user may proceed with an LLM-backed request.
  *
- * When limits are disabled, always allows without touching the user object. Otherwise: connected +
- * funded users bill their own gateway and skip the daily counter entirely; everyone else draws on
- * the platform free tier (consuming one call against the user object) until it's exhausted.
+ * When billing controls are disabled, always allows without touching the user object. Otherwise,
+ * funded users bill their own gateway; required-user-funding mode blocks everyone else, while the
+ * free-tier mode consumes a platform-funded allowance.
  */
 export async function checkUsageAndBalance(
   env: Cloudflare.Env,
   userStub: DurableObjectStub<UserDurableObject>,
 ): Promise<UsageCheckResult> {
-  if (!isCloudflareLimitsEnabled(env)) {
+  if (!isCloudflareBillingEnabled(env)) {
     return unlimitedResult();
   }
 
+  const requireUserFunding = isUserFundedAiRequired(env);
   const limit = getDailyLlmCallLimit(env);
   const minimumBalance = getMinimumCloudflareBalance(env);
 
@@ -98,6 +116,24 @@ export async function checkUsageAndBalance(
       balance,
       hasUserToken,
       byokRouting,
+    };
+  }
+
+  if (requireUserFunding) {
+    const decision = canProceedWithRequest({
+      withinLimits: false,
+      hasUserToken,
+      balance,
+      minimumBalance,
+      requireUserFunding: true,
+    });
+    return {
+      ...decision,
+      withinLimits: false,
+      remaining: 0,
+      limit: 0,
+      balance,
+      hasUserToken,
     };
   }
 
@@ -133,15 +169,35 @@ export async function getUsageInfo(
   env: Cloudflare.Env,
   userStub: DurableObjectStub<UserDurableObject>,
 ): Promise<CloudflareUsageInfo> {
-  if (!isCloudflareLimitsEnabled(env)) {
+  if (!isCloudflareBillingEnabled(env)) {
     return {
       cloudflareLimitsEnabled: false,
       unlimited: true,
+      userFundingRequired: false,
       dailyUsed: 0,
       dailyLimit: 0,
       remaining: 0,
       connected: false,
       balance: null,
+    };
+  }
+
+  if (isUserFundedAiRequired(env)) {
+    const status = await getConnectionStatus(env, userStub);
+    return {
+      cloudflareLimitsEnabled: true,
+      unlimited: false,
+      userFundingRequired: true,
+      dailyUsed: 0,
+      dailyLimit: 0,
+      remaining: 0,
+      connected: status.connected,
+      balance: status.balance,
+      accountId: status.accountId,
+      accountName: status.accountName,
+      needsAccountSelection: status.needsAccountSelection,
+      needsReconnect: status.needsReconnect,
+      accountDiscoveryFailed: status.accountDiscoveryFailed,
     };
   }
 
@@ -155,6 +211,7 @@ export async function getUsageInfo(
   return {
     cloudflareLimitsEnabled: true,
     unlimited: false,
+    userFundingRequired: false,
     dailyUsed: quota.used,
     dailyLimit: quota.limit,
     remaining: quota.remaining,
@@ -164,5 +221,7 @@ export async function getUsageInfo(
     accountId: status.accountId,
     accountName: status.accountName,
     needsAccountSelection: status.needsAccountSelection,
+    needsReconnect: status.needsReconnect,
+    accountDiscoveryFailed: status.accountDiscoveryFailed,
   };
 }

@@ -638,14 +638,29 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return null;
   }
 
+  /** Re-authenticate the first connected Cloudflare account used by the billing flow. */
+  async reconnectCloudflareBillingAccount(): Promise<{url: string}> {
+    let nextAccountId = this.storage.nextAccountId.get();
+    for (let id = 0; id < nextAccountId; id++) {
+      let rec: ConnectedAccountRecord | undefined;
+      try { rec = this.storage.connectedAccounts.get(id); } catch { continue; }
+      if (rec?.vendorId === CLOUDFLARE_VENDOR_ID) return this.reconnectAccount(id);
+    }
+    throw new Error("No connected Cloudflare account.");
+  }
+
   /** The AI Gateway billing state (selected account + cached balance), or null if unset. */
   async getCloudflareBilling(): Promise<CloudflareBilling | null> {
     return this.storage.cloudflareBilling.get();
   }
 
-  /** Update the cached credit balance for the billed account. */
-  async updateCloudflareCredits(creditsRemaining: number | null): Promise<void> {
+  /** Update cached credits only if the caller's billed account is still selected. */
+  async updateCloudflareCredits(
+    creditsRemaining: number | null,
+    expectedAccountId?: string,
+  ): Promise<void> {
     let record = this.storage.cloudflareBilling.get() ?? {};
+    if (expectedAccountId && record.accountId !== expectedAccountId) return;
     record.creditsRemaining = creditsRemaining;
     record.creditsUpdatedAt = Date.now();
     this.storage.cloudflareBilling.put(record);

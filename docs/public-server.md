@@ -2,9 +2,9 @@
 
 By default the Workshop uses built-in username/password accounts (or Cloudflare Access) and gives
 every user unlimited AI usage — ideal for self-hosting. It can optionally run as a public,
-multi-user service instead: users sign in with Google, GitHub, or Cloudflare, every account gets a
-free daily allowance of AI usage, and once that runs out they connect their own Cloudflare account
-and top up credits in the Cloudflare dashboard (their account is then billed for further usage).
+multi-user service instead: users sign in with Google, GitHub, or Cloudflare, then either receive a
+free daily allowance before connecting their own funded Cloudflare account or must connect that
+account before their first inference request.
 
 Sign-in is provided by **authentication gatekeepers**: each auth-capable gatekeeper (Google, GitHub,
 Cloudflare) uses its single OAuth app both to authenticate the user (by verified email) and to
@@ -15,6 +15,7 @@ connect the account's capabilities. There's no single switch — the pieces turn
 | `AUTH_GATEKEEPERS=cloudflare,google,github` | Allowlists which connected gatekeepers may be used to sign in. Each shows a "Continue with …" button alongside username/password. |
 | Each gatekeeper's OAuth credentials (on the gatekeeper Worker) | Required for that gatekeeper to actually authenticate. In dev, seeded from `GOOGLE_*` / `GITHUB_*` / `CLOUDFLARE_OAUTH_*` shell vars (see `run-dev-server.ts`). |
 | `ENABLE_CLOUDFLARE_LIMITS=true` | Enables the free daily limit + Cloudflare-credits top-up flow. Billing reads a token from the connected Cloudflare gatekeeper. |
+| `REQUIRE_USER_FUNDED_AI=true` | Disables platform-funded inference and requires a connected Cloudflare account with sufficient AI Gateway credits from the first request. Takes precedence over the free-tier flag. |
 | `DISABLE_PASSWORD_AUTH=true` | Hides username/password, leaving gatekeeper sign-in only (ignored unless `AUTH_GATEKEEPERS` is non-empty, to avoid lockout). |
 
 The primary account key is always the user's **verified email**: signing in with any allowlisted
@@ -24,7 +25,8 @@ For local development, set the required variables in a root `.dev.vars` file (gi
 `KEY=VALUE` per line); `pnpm run dev-server` loads it automatically. A minimal example:
 
 ```
-ENABLE_CLOUDFLARE_LIMITS=true
+# Choose ENABLE_CLOUDFLARE_LIMITS for a free allowance, or require user funding immediately:
+REQUIRE_USER_FUNDED_AI=true
 PUBLIC_BASE_URL=http://localhost:8787
 AUTH_GATEKEEPERS=cloudflare,google,github
 
@@ -36,7 +38,8 @@ GOOGLE_CLIENT_SECRET=...
 CLOUDFLARE_OAUTH_CLIENT_ID=...
 CLOUDFLARE_OAUTH_CLIENT_SECRET=...
 
-# Platform AI Gateway used for the free tier:
+# Model catalog and platform Gateway. In required-user-funding mode, its credentials are never used
+# for inference; every allowed call is routed through the connected user's default Gateway.
 CF_AI_GATEWAY=your-gateway
 CF_AI_GATEWAY_PROVIDERS=anthropic,openai,google
 
@@ -78,4 +81,4 @@ with `PUBLIC_BASE_URL`):
 - Cloudflare: `${PUBLIC_BASE_URL}/gatekeeper/cloudflare/oauth`
 
 See [docs/oauth-signin.md](oauth-signin.md) and [docs/ai-gateway-billing.md](ai-gateway-billing.md)
-for the full list of options, the free-tier / top-up behavior, and the storage bindings involved.
+for the full list of options, free-tier and required-user-funding behavior, and storage bindings.

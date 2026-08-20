@@ -16,7 +16,7 @@ export const DEFAULT_DAILY_LLM_CALL_LIMIT = 100;
 
 /** User-facing message for an insufficient connected-account balance. */
 export function insufficientBalanceMessage(minimum: number = MINIMUM_CLOUDFLARE_BALANCE): string {
-  return `Cloudflare AI Gateway balance is below $${minimum}. Please add credits or use BYOK.`;
+  return `Cloudflare AI Gateway balance is below $${minimum}. Please add credits to continue.`;
 }
 
 /** User-facing messages for limit violations. */
@@ -25,6 +25,8 @@ export const LIMIT_ERROR_MESSAGES = {
     "Free usage limit reached. Connect your Cloudflare account or use your own API keys to continue.",
   NO_CLOUDFLARE_TOKEN:
     "Free usage limit reached. Connect your Cloudflare account to continue.",
+  USER_FUNDING_REQUIRED:
+    "Connect your Cloudflare account and add AI Gateway credits to use AI models.",
 } as const;
 
 /** The window over which the free-tier limit is measured. */
@@ -58,12 +60,10 @@ export interface CanProceedResult {
  * request may proceed and whose credentials to use.
  *
  * Rules:
- *   1. Connected + balance >= minimum  -> proceed, billed to the user's own gateway (BYOK),
- *      regardless of the free-tier count. The platform is never charged for connected+funded users.
- *   2. Otherwise, within the free tier  -> proceed, platform-funded. This includes connected users
- *      whose balance is below the minimum (e.g. $0): they keep using the daily free allowance.
- *   3. Otherwise (free tier exhausted) -> blocked, prompting to connect (if not connected) or to
- *      add credits (if connected but out of balance).
+ *   1. Connected + balance >= minimum -> proceed through the user's gateway.
+ *   2. Required user funding without sufficient balance -> blocked.
+ *   3. Otherwise, within the free tier -> proceed through the platform gateway.
+ *   4. Otherwise -> blocked with connection or credit guidance.
  */
 export function canProceedWithRequest(data: {
   withinLimits: boolean;
@@ -71,6 +71,8 @@ export function canProceedWithRequest(data: {
   balance?: number | null;
   /** Minimum required balance (USD). Defaults to MINIMUM_CLOUDFLARE_BALANCE. */
   minimumBalance?: number;
+  /** When true, platform-funded free usage is disabled. */
+  requireUserFunding?: boolean;
 }): CanProceedResult {
   const { withinLimits, hasUserToken, balance } = data;
   const minimumBalance = data.minimumBalance ?? MINIMUM_CLOUDFLARE_BALANCE;
@@ -78,6 +80,20 @@ export function canProceedWithRequest(data: {
   // Connected with sufficient balance: bill the user's own gateway, even within the free tier.
   if (hasUserToken && hasMinimumBalance(balance, minimumBalance)) {
     return { allowed: true, shouldUseByok: true };
+  }
+
+  if (data.requireUserFunding) {
+    return hasUserToken
+      ? {
+          allowed: false,
+          reason: insufficientBalanceMessage(minimumBalance),
+          shouldUseByok: true,
+        }
+      : {
+          allowed: false,
+          reason: LIMIT_ERROR_MESSAGES.USER_FUNDING_REQUIRED,
+          shouldUseByok: true,
+        };
   }
 
   // Otherwise fall back to the platform free tier while it lasts. A connected user whose balance is

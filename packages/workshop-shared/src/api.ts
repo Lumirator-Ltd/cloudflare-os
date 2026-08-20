@@ -429,11 +429,13 @@ export interface AuthenticatedApi extends RpcTarget {
   getCloudflareUsage(): Promise<CloudflareUsageInfo>;
 
   /**
-   * List the Cloudflare accounts the connected grant can access. Used to prompt account selection
-   * when the user has more than one. Returns an empty array if not connected. Connecting Cloudflare
-   * is done via the Cloudflare gatekeeper (connectAccount("cloudflare")) or by signing in with it.
+   * List the eligible Cloudflare billing accounts. Returns an empty array if none are connected and
+   * throws when account discovery is temporarily unavailable.
    */
   listCloudflareAccounts(): Promise<CloudflareAccountOption[]>;
+
+  /** Re-authenticate the Cloudflare connection currently used for AI Gateway billing. */
+  reconnectCloudflareBillingAccount(): Promise<{url: string}>;
 
   /**
    * Select which Cloudflare account to bill. Persists the choice. Throws if the account isn't
@@ -1089,8 +1091,8 @@ export type ServerConfig = {
   passwordAuthEnabled: boolean;
 
   /**
-   * Whether the optional Cloudflare free-tier limits + top-up flow is enabled. When false (the
-   * default, e.g. self-hosted), usage is unlimited and the credits UI is hidden.
+   * Whether Cloudflare free-tier limits or required user-funded billing is enabled. When false
+   * (the default, e.g. self-hosted), usage is unlimited and the credits UI is hidden.
    */
   cloudflareLimitsEnabled: boolean;
 
@@ -1132,8 +1134,10 @@ export type CloudflareUsageInfo = {
   cloudflareLimitsEnabled: boolean;
   /** When true, the user has unlimited access (limits disabled) and counters are not tracked. */
   unlimited: boolean;
+  /** When true, AI inference is blocked unless it can use the connected user's funded account. */
+  userFundingRequired: boolean;
 
-  /** Free-tier daily usage. */
+  /** Free-tier daily usage. All values are zero when user funding is required. */
   dailyUsed: number;
   dailyLimit: number;
   remaining: number;
@@ -1147,10 +1151,14 @@ export type CloudflareUsageInfo = {
   accountId?: string;
   accountName?: string;
   /**
-   * True when connected but the user has multiple Cloudflare accounts and must pick which one to
-   * bill before usage can proceed. The client should prompt with selectCloudflareAccount().
+   * True when connected but no eligible billing account is selected. The client should load the
+   * eligible accounts and offer selection or reconnection when the list is empty.
    */
   needsAccountSelection?: boolean;
+  /** True when the connected Cloudflare OAuth grant must be re-authenticated. */
+  needsReconnect?: boolean;
+  /** True when eligible-account discovery failed and the client should offer a retry. */
+  accountDiscoveryFailed?: boolean;
 };
 
 /** A Cloudflare account available to a connected user. Returned by `listCloudflareAccounts()`. */

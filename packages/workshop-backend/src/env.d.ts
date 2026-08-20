@@ -77,6 +77,9 @@ declare global {
       // Enables the Cloudflare free-tier limits + top-up flow when set to "true".
       ENABLE_CLOUDFLARE_LIMITS?: string;
 
+      // Requires platform-gateway inference to use a funded Cloudflare account connected by the user.
+      REQUIRE_USER_FUNDED_AI?: string;
+
       // Public base URL of the deployment.
       PUBLIC_BASE_URL?: string;
 

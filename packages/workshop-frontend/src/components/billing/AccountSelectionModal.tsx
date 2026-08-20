@@ -1,29 +1,35 @@
 import { useCallback, useEffect, useState } from 'react'
 import { CloudflareUsageInfo, CloudflareAccountOption } from '@gadgets/workshop-shared/api'
 import { Dialog, Button, Loader, Radio, useKumoToastManager } from '@cloudflare/kumo'
-import { Warning } from '@phosphor-icons/react'
+import { Lightning, Warning } from '@phosphor-icons/react'
 import { useOptionalAuthenticatedApi } from '../../AuthContext'
 import { useCloudflareLimitsEnabled } from '../../ServerConfigContext'
+import { connectionErrorMessage } from '../../connectorReadiness'
 
 /**
- * Global, mandatory modal that forces the user to pick which Cloudflare account to bill whenever
- * they're connected but have access to more than one account. Auto-opens (and re-opens) as long as
- * the selection is pending, so it can't be missed after connecting. Mounted once in the app shell.
+ * Global modal that requires an eligible Cloudflare billing account. It offers account selection
+ * when several are available and reconnection when none are eligible. Mounted once in the app shell.
  */
 export default function AccountSelectionModal() {
   const limitsEnabled = useCloudflareLimitsEnabled()
   const auth = useOptionalAuthenticatedApi()
   const toasts = useKumoToastManager()
   const [needsSelection, setNeedsSelection] = useState(false)
+  const [userFundingRequired, setUserFundingRequired] = useState(false)
+  const [accountDiscoveryFailed, setAccountDiscoveryFailed] = useState(false)
   const [accounts, setAccounts] = useState<CloudflareAccountOption[] | null>(null)
+  const [accountLoadFailed, setAccountLoadFailed] = useState(false)
   const [chosen, setChosen] = useState<string | undefined>(undefined)
   const [saving, setSaving] = useState(false)
+  const [connecting, setConnecting] = useState(false)
 
   const check = useCallback(() => {
     if (!auth) return
     auth.authenticatedApi.getCloudflareUsage()
       .then((u: CloudflareUsageInfo) => {
         setNeedsSelection(!!(u.connected && u.needsAccountSelection))
+        setUserFundingRequired(u.userFundingRequired)
+        setAccountDiscoveryFailed(!!u.accountDiscoveryFailed)
       })
       .catch(() => {})
   }, [auth])
@@ -31,24 +37,57 @@ export default function AccountSelectionModal() {
   useEffect(() => {
     if (!limitsEnabled || !auth) return
     check()
-    const onFocus = () => check()
+    const onFocus = () => {
+      setAccounts(null)
+      setAccountLoadFailed(false)
+      check()
+    }
     window.addEventListener('focus', onFocus)
     return () => window.removeEventListener('focus', onFocus)
   }, [limitsEnabled, auth, check])
 
   // Load the account list once we know a selection is needed; default the choice to the first one.
   useEffect(() => {
-    if (needsSelection && accounts === null && auth) {
+    if (needsSelection && !accountDiscoveryFailed && accounts === null && auth) {
       auth.authenticatedApi.listCloudflareAccounts()
         .then((list: CloudflareAccountOption[]) => {
+          setAccountLoadFailed(false)
           setAccounts(list)
           setChosen(list[0]?.accountId)
         })
-        .catch(() => setAccounts([]))
+        .catch(() => {
+          setAccountLoadFailed(true)
+          setAccounts([])
+        })
     }
-  }, [needsSelection, accounts, auth])
+  }, [needsSelection, accountDiscoveryFailed, accounts, auth])
 
   if (!limitsEnabled || !auth || !needsSelection) return null
+
+  const reconnect = async () => {
+    if (!auth) return
+    setConnecting(true)
+    try {
+      const { url } = await auth.authenticatedApi.reconnectCloudflareBillingAccount()
+      setAccounts(null)
+      setAccountLoadFailed(false)
+      window.open(url, '_blank', 'noopener,noreferrer')
+    } catch (error) {
+      toasts.add({
+        title: connectionErrorMessage(error, 'Failed to reconnect Cloudflare'),
+        variant: 'error',
+      })
+    } finally {
+      setConnecting(false)
+    }
+  }
+
+  const retryAccountDiscovery = () => {
+    setAccounts(null)
+    setAccountLoadFailed(false)
+    setAccountDiscoveryFailed(false)
+    check()
+  }
 
   const save = async () => {
     if (!chosen) return
@@ -73,19 +112,28 @@ export default function AccountSelectionModal() {
       <Dialog className="p-6 sm:w-[480px]" size="base">
         <Dialog.Title className="text-lg font-semibold mb-2 flex items-center gap-2">
           <Warning size={22} weight="bold" className="text-kumo-warning" />
-          Choose a Cloudflare account
+          {accountDiscoveryFailed || accountLoadFailed
+            ? 'Unable to load Cloudflare accounts'
+            : accounts?.length === 0
+              ? 'No eligible Cloudflare account'
+              : 'Choose a Cloudflare account'}
         </Dialog.Title>
 
         <div className="space-y-4">
           <p className="text-sm text-kumo-subtle">
-            Your Cloudflare connection has access to multiple accounts. Select the one whose credits
-            should be billed for usage beyond the free tier.
+            {accountDiscoveryFailed || accountLoadFailed
+              ? 'Cloudflare account discovery is temporarily unavailable. Try again.'
+              : accounts?.length === 0
+                ? 'This connection has no eligible customer account. Re-authenticate it with access to your own Cloudflare account.'
+                : userFundingRequired
+                  ? 'Select the Cloudflare account whose credits should fund all AI inference.'
+                  : 'Select the Cloudflare account whose credits should fund usage beyond the free tier.'}
           </p>
 
-          {accounts === null ? (
+          {accountDiscoveryFailed || accountLoadFailed ? null : accounts === null ? (
             <div className="flex justify-center py-6"><Loader size="base" /></div>
           ) : accounts.length === 0 ? (
-            <p className="text-sm text-kumo-subtle">No accounts available on this connection.</p>
+            <p className="text-sm text-kumo-subtle">No eligible accounts are available on this connection.</p>
           ) : (
             <Radio.Group
               appearance="card"
@@ -101,16 +149,23 @@ export default function AccountSelectionModal() {
           )}
 
           <div className="flex justify-end gap-2 pt-1">
-            {accounts !== null && accounts.length === 0 ? (
-              // Degenerate case: the connection reported multiple accounts but the list came back
-              // empty (transient API failure, or access changed). Don't trap the user in an
-              // un-actionable modal — let them retry or dismiss (it re-checks on focus).
+            {accountDiscoveryFailed || accountLoadFailed ? (
+              <Button variant="secondary" onClick={retryAccountDiscovery}>
+                Try again
+              </Button>
+            ) : accounts !== null && accounts.length === 0 ? (
+              // No eligible customer account is available. Keep the modal actionable so the user
+              // can re-authenticate with a different Cloudflare identity or retry discovery.
               <>
                 <Button variant="ghost" onClick={() => setNeedsSelection(false)}>
                   Dismiss
                 </Button>
                 <Button variant="secondary" onClick={() => setAccounts(null)}>
                   Try again
+                </Button>
+                <Button variant="primary" onClick={reconnect} loading={connecting}>
+                  <Lightning size={16} weight="bold" />
+                  Re-authenticate Cloudflare
                 </Button>
               </>
             ) : (

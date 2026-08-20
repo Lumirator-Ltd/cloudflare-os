@@ -1,3 +1,19 @@
+/** Backend variables copied from the shell or `.dev.vars` into the generated dev worker config. */
+export const WORKSHOP_BACKEND_OPTIONAL_FEATURE_VARS = [
+  "DISABLE_PASSWORD_AUTH",
+  "AUTH_GATEKEEPERS",
+  "ENABLE_CLOUDFLARE_LIMITS",
+  "REQUIRE_USER_FUNDED_AI",
+  "PUBLIC_BASE_URL",
+  "DAILY_LLM_CALL_LIMIT",
+  "MINIMUM_CLOUDFLARE_BALANCE",
+  "CF_AI_GATEWAY",
+  "CF_AI_GATEWAY_PROVIDERS",
+  "CF_AI_GATEWAY_ACCOUNT_ID",
+  "CF_AI_GATEWAY_API_TOKEN",
+  "CF_AI_GATEWAY_USE_BINDING",
+] as const;
+
 /**
  * The port a `VITE_BACKEND_HOST` names, as a string, or null when it names no port. Throws on a
  * value that is not a bare `host[:port]`.

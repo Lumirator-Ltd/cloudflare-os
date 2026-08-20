@@ -172,6 +172,10 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     return listConnectedAccounts(this.env, this.#user);
   }
 
+  reconnectCloudflareBillingAccount(): Promise<{url: string}> {
+    return this.#user.reconnectCloudflareBillingAccount();
+  }
+
   selectCloudflareAccount(accountId: string): Promise<void> {
     return selectAccount(this.env, this.#user, accountId);
   }

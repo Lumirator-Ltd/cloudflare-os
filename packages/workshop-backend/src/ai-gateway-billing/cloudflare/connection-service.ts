@@ -9,12 +9,24 @@
 // from the RPC layer (status display).
 
 import { listAccounts, fetchCreditBalance } from "./account-service.js";
+import { isUserFundedAiRequired } from "../config.js";
 import type { UserDurableObject } from "../../user.js";
 
 // Treat a cached balance as fresh for this long.
 const CREDITS_CACHE_TTL_MS = 5 * 60 * 1000;
 
 type UserStub = DurableObjectStub<UserDurableObject>;
+
+function excludesPlatformAccount(env: Cloudflare.Env, accountId: string): boolean {
+  return accountId === env.CF_AI_GATEWAY_ACCOUNT_ID?.trim();
+}
+
+function customerAccounts(
+  env: Cloudflare.Env,
+  accounts: CloudflareAccountOption[],
+): CloudflareAccountOption[] {
+  return accounts.filter(account => !excludesPlatformAccount(env, account.accountId));
+}
 
 /** Public-safe connection status for display and for the usage decision. */
 export interface CloudflareConnectionStatus {
@@ -23,10 +35,14 @@ export interface CloudflareConnectionStatus {
   accountName?: string;
   balance: number | null;
   /**
-   * True when connected but the grant sees multiple Cloudflare accounts and none is chosen yet.
-   * The client must prompt the user to select one via selectAccount().
+   * True when connected but no eligible billing account is selected. The client must load the
+   * eligible accounts and offer selection or reconnection when the list is empty.
    */
   needsAccountSelection?: boolean;
+  /** True when the connected OAuth grant is unusable and must be re-authenticated. */
+  needsReconnect?: boolean;
+  /** True when Cloudflare account discovery failed and the client should offer a retry. */
+  accountDiscoveryFailed?: boolean;
 }
 
 /** A Cloudflare account the connected grant can access. */
@@ -71,7 +87,7 @@ async function getUsableAccessToken(userStub: UserStub): Promise<string | null> 
  * caller can derive BYOK routing without re-reading. Never throws; returns a safe default.
  */
 export async function resolveConnection(
-  _env: Cloudflare.Env, userStub: UserStub,
+  env: Cloudflare.Env, userStub: UserStub,
 ): Promise<ResolvedConnection> {
   try {
     // Dispose the connected-account stub at the end of this call (it's a returned RPC stub, not an
@@ -81,40 +97,58 @@ export async function resolveConnection(
 
     const accessToken = await account.getUsableAccessToken();
     if (!accessToken) {
-      // Connected, but the token is broken/expired — treat as connected with unknown balance.
-      return { status: { connected: true, balance: null } };
+      return { status: { connected: true, balance: null, needsReconnect: true } };
     }
 
     const billing = await userStub.getCloudflareBilling();
     let accountId = billing?.accountId;
     let accountName = billing?.accountName;
+    if (accountId && excludesPlatformAccount(env, accountId)) {
+      accountId = undefined;
+      accountName = undefined;
+    }
+
     let needsAccountSelection = false;
+    let accountDiscoveryFailed = false;
     if (!accountId) {
-      const accounts = await listAccounts(accessToken);
-      if (accounts.length === 1) {
-        accountId = accounts[0].accountId;
-        accountName = accounts[0].accountName;
-        await userStub.setCloudflareAccountSelection(accountId, accountName);
-      } else if (accounts.length > 1) {
+      const discovered = await listAccounts(accessToken);
+      if (discovered === null) {
         needsAccountSelection = true;
+        accountDiscoveryFailed = true;
+      } else {
+        const accounts = customerAccounts(env, discovered);
+        if (accounts.length === 1) {
+          accountId = accounts[0].accountId;
+          accountName = accounts[0].accountName;
+          await userStub.setCloudflareAccountSelection(accountId, accountName);
+        } else {
+          needsAccountSelection = true;
+        }
       }
     }
 
-    const base = { connected: true as const, accountId, accountName, needsAccountSelection };
+    const base = {
+      connected: true as const,
+      accountId,
+      accountName,
+      needsAccountSelection,
+      accountDiscoveryFailed,
+    };
     const extra = { accessToken, accountId };
 
     // Serve a fresh cached balance without hitting the API.
     const cacheAge = billing?.creditsUpdatedAt ? Date.now() - billing.creditsUpdatedAt : Infinity;
-    if (cacheAge < CREDITS_CACHE_TTL_MS && billing?.creditsRemaining !== undefined) {
+    if (billing && billing.accountId === accountId && cacheAge < CREDITS_CACHE_TTL_MS &&
+        billing.creditsRemaining !== undefined) {
       return { status: { ...base, balance: billing.creditsRemaining ?? null }, ...extra };
     }
 
-    let balance: number | null = billing?.creditsRemaining ?? null;
+    let balance: number | null = null;
     if (accountId) {
       const fresh = await fetchCreditBalance(accessToken, accountId);
       if (fresh !== null) {
         balance = fresh;
-        await userStub.updateCloudflareCredits(fresh);
+        await userStub.updateCloudflareCredits(fresh, accountId);
       }
     }
     return { status: { ...base, balance }, ...extra };
@@ -134,40 +168,81 @@ export async function getConnectionStatus(
  * Force-refresh the cached credit balance from Cloudflare, bypassing the TTL. Best effort. Call
  * after a BYOK inference so the next billing decision reflects the spend just incurred.
  */
-export async function refreshCachedBalance(_env: Cloudflare.Env, userStub: UserStub): Promise<void> {
+export async function refreshCachedBalance(env: Cloudflare.Env, userStub: UserStub): Promise<void> {
+  const invalidateOnFailure = isUserFundedAiRequired(env);
+  let accountId: string | undefined;
   try {
-    const token = await getUsableAccessToken(userStub);
-    if (!token) return;
     const billing = await userStub.getCloudflareBilling();
-    const accountId = billing?.accountId;
-    if (!accountId) return;
+    accountId = billing?.accountId;
+    if (!accountId || excludesPlatformAccount(env, accountId)) {
+      if (invalidateOnFailure && accountId) {
+        await userStub.updateCloudflareCredits(null, accountId);
+      }
+      return;
+    }
+
+    const token = await getUsableAccessToken(userStub);
+    if (!token) {
+      if (invalidateOnFailure) await userStub.updateCloudflareCredits(null, accountId);
+      return;
+    }
     const fresh = await fetchCreditBalance(token, accountId);
-    if (fresh !== null) await userStub.updateCloudflareCredits(fresh);
+    if (fresh !== null) {
+      await userStub.updateCloudflareCredits(fresh, accountId);
+    } else if (invalidateOnFailure) {
+      await userStub.updateCloudflareCredits(null, accountId);
+    }
   } catch {
-    // Best effort — leave the cached value in place.
+    if (invalidateOnFailure && accountId) {
+      try {
+        await userStub.updateCloudflareCredits(null, accountId);
+      } catch {
+        // The user object is unavailable too; the next uncached resolution still fails closed.
+      }
+    }
+  }
+}
+
+/** Runs user-gateway inference and refreshes its balance afterward, including on failure. */
+export async function runWithUserGatewayBalanceRefresh<T>(
+  env: Cloudflare.Env,
+  userStub: UserStub,
+  operation: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await operation();
+  } finally {
+    await refreshCachedBalance(env, userStub);
   }
 }
 
 /** List the Cloudflare accounts the connected grant can access. Empty if not connected/usable. */
 export async function listConnectedAccounts(
-  _env: Cloudflare.Env, userStub: UserStub,
+  env: Cloudflare.Env, userStub: UserStub,
 ): Promise<CloudflareAccountOption[]> {
+  let token: string | null;
   try {
-    const token = await getUsableAccessToken(userStub);
-    if (!token) return [];
-    return await listAccounts(token);
+    token = await getUsableAccessToken(userStub);
   } catch {
     return [];
   }
+  if (!token) return [];
+  const accounts = await listAccounts(token);
+  if (accounts === null) throw new Error("Cloudflare account discovery is unavailable.");
+  return customerAccounts(env, accounts);
 }
 
 /** Select which Cloudflare account to bill. Validates it's accessible by the connected grant. */
 export async function selectAccount(
-  _env: Cloudflare.Env, userStub: UserStub, accountId: string,
+  env: Cloudflare.Env, userStub: UserStub, accountId: string,
 ): Promise<void> {
+  if (excludesPlatformAccount(env, accountId)) {
+    throw new Error("The platform Cloudflare account cannot fund user inference.");
+  }
   const token = await getUsableAccessToken(userStub);
   if (!token) throw new Error("No usable Cloudflare connection.");
   const accounts = await listAccounts(token);
+  if (accounts === null) throw new Error("Cloudflare account discovery is unavailable.");
   const found = accounts.find(a => a.accountId === accountId);
   if (!found) throw new Error("That Cloudflare account was not found in the connected grant.");
   await userStub.setCloudflareAccountSelection(found.accountId, found.accountName);
