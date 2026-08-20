@@ -207,6 +207,20 @@ describe("AdminSettings.ensureInitialAdminConfig", () => {
     expect(get).not.toHaveBeenCalled();
   });
 
+  it("treats an explicit generic MCP opt-in as non-default authoritative state", async () => {
+    let {durableStorage, makeInstance, put, get} = makeAdminSettings();
+    let existing = {...DEFAULT_ADMIN_CONFIG, disabledGatekeepers: []};
+    durableStorage.kv.put("adminConfig", existing);
+
+    let restartedAdmin = makeInstance();
+    await expect(restartedAdmin.ensureInitialAdminConfig(valid)).rejects.toThrow(/unmarked/i);
+
+    expect(restartedAdmin.getAdminConfig()).toEqual(existing);
+    expect(durableStorage.kv.get("adminBootstrapMarker")).toBeUndefined();
+    expect(put).not.toHaveBeenCalled();
+    expect(get).not.toHaveBeenCalled();
+  });
+
   it("adopts matching unmarked authoritative and KV state without overwriting either", async () => {
     let existing = {
       ...DEFAULT_ADMIN_CONFIG,
@@ -420,7 +434,6 @@ describe("AdminSettings.ensureInitialAdminConfig", () => {
       siteName: "",
       accentColor: "",
       disabledResources: {},
-      disabledGatekeepers: [],
       ambientGatekeeperModes: {},
     };
     let serialized = JSON.stringify(legacy);
