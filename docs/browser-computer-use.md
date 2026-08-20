@@ -63,10 +63,10 @@ A practical first release should include human handoff from the beginning:
 2. It navigates and performs low-risk browsing until authentication, sensitive input, or approval is needed.
 3. Cloudflare OS presents a **Take over browser** control.
 4. The backend creates a short-lived, owner-only Live View URL.
-5. The user opens Live View, logs in or completes the requested step, and selects **Done** or **Failed**.
-6. The agent resumes against the same remote tabs and cookies.
-7. The agent may continue reading, navigating, and drafting.
-8. It pauses immediately before an action that sends data or creates an external effect.
+5. The user opens Live View, logs in or completes the requested step, and selects **Done** or **Failed**. Model observations remain disabled throughout the handoff.
+6. Before returning control, the browser service clears sensitive input values and navigates or reloads to a post-authentication page that no longer exposes passwords, OTPs, payment values, or other handoff-entered secrets. If it cannot establish a safe post-handoff state, it closes the session instead of resuming automation.
+7. The capability-reduced browser agent resumes against the same remote tabs and cookies using a newly sanitized observation.
+8. It may continue low-risk reading and navigation, but pauses before typing or any other action that may transmit data or create an external effect.
 9. The session is closed and its ephemeral data is destroyed when the task ends or expires.
 
 Cloudflare Browser Run exposes structured Human-in-the-Loop CDP commands under the `Cloudflare.*` namespace. These support generating Live View URLs, requesting a handoff, waiting for completion, and resuming the same session.
@@ -90,8 +90,9 @@ The same Browser Run process is not guaranteed to live indefinitely. Durable sta
 
 This may be added as an explicit opt-in after the temporary-session path is proven.
 
-- Persist Playwright/Puppeteer storage state for a specific account and origin
-- Store resulting session cookies and origin storage, never passwords
+- Persist filtered Playwright/Puppeteer storage state for a specific account and approved origin
+- Validate every cookie and storage entry against the approved origin or explicitly authorized domain scope before persistence; discard identity-provider, third-party-frame, and unrelated-origin state
+- Store resulting session cookies and approved-origin storage, never passwords
 - Encrypt stored state and bind it to the stable Cloudflare OS account ID
 - Restore it only into a fresh, isolated browser context for the same owner and origin
 - Provide disconnect, delete, and expiration controls
@@ -101,11 +102,13 @@ Cookies and browser storage are credentials. This mode requires the same ownersh
 
 ## Proposed architecture
 
-### Keep the existing agent loop
+### Keep the existing orchestration and isolate browser execution
 
 The initial implementation should use ordinary Pi tools instead of provider-native computer-use protocols. This keeps behavior consistent across model providers and avoids changes to the Anthropic, OpenAI, and Google transport adapters.
 
-A possible tool surface is:
+The existing user-facing agent should delegate browsing to a capability-reduced browser subagent or enter a browser-only mode. While webpage-derived content is in model context, that execution must omit `executeCode`, prepared chat Gatekeeper bindings, and every unrelated tool or capability. The browser agent may return only a sanitized observation or summary to the user-facing agent.
+
+A possible browser-only tool surface is:
 
 ```text
 browserOpen(url, viewport)
@@ -124,13 +127,15 @@ Add a module such as `packages/workshop-backend/src/browser-use.ts`. It should b
 - Session ownership
 - Allowed URL schemes and destinations
 - Navigation and action limits
-- Browser-level request filtering
+- Browser-level request filtering backed by an enforceable egress boundary
 - Time, byte, tab, and browser-minute budgets
 - Cleanup and cancellation
 - Screenshot minimization and retention
 - Handoff creation and completion
 
-Expose it to `runAgent()` through narrow `AgentHooks` methods rather than passing the full Worker environment.
+Expose it to the capability-reduced browser execution path through narrow `AgentHooks` methods rather than passing the full Worker environment.
+
+URL interception alone cannot safely block DNS rebinding because Chromium performs its own resolution after the application approves a hostname. Arbitrary Internet navigation must remain disabled until either Browser Run provides a verified destination-level policy that blocks private and metadata addresses after resolution, or traffic is forced through an egress proxy that validates the actual destination before connection.
 
 ### Durable state
 
@@ -140,7 +145,7 @@ Record:
 
 - Browser session and task identity
 - Owner account ID
-- Current origin and URL
+- Current origin and a sanitized display location; strip userinfo, query parameters, and fragments, and retain a path only after applying an explicit secret-redaction policy
 - Session mode and expiration
 - Last successful observation
 - Pending handoff or approval
@@ -151,15 +156,17 @@ Record:
 
 Generalize the text-only tool-result helper in `agent.ts` so browser observations can return model image content.
 
-Do not persist large base64 screenshots directly in chat history. Store screenshots as short-lived, tenant-scoped artifacts and record references and hashes in the tool call. Replay should use the recorded observation rather than reissuing navigation or actions.
+Do not persist large base64 screenshots directly in chat history. Store screenshots in deployment-scoped storage with explicit account and workspace ownership. A model-consumable redacted observation must remain available for as long as history can replay it. Before deleting a screenshot, compaction must replace it with a durable sanitized summary that preserves the required model context.
 
-Extend the `AiToolCall` union in `packages/workshop-shared/src/api.ts` with explicit browser operations and results. Never automatically replay a click, form submission, or other external effect after a crash or timeout.
+Authenticated observations and artifact references must live in an owner-private record, not the shared `AiChatMessage` history. Shared chat may receive only an explicitly redacted summary. As the simpler initial rule, disable authenticated browser sessions in collaborative chats until an owner-private replay channel exists.
+
+Extend the `AiToolCall` union in `packages/workshop-shared/src/api.ts` only for information safe to place in shared history. Keep private browser-operation records separate. Never automatically replay a click, form submission, or other external effect after a crash or timeout.
 
 ### Frontend
 
 The chat UI should display:
 
-- Current origin and URL
+- Current origin and sanitized display location, without userinfo, query parameters, fragments, or secret-bearing paths
 - Browser operation summary
 - Screenshot preview when available
 - Session state and expiration
@@ -180,11 +187,11 @@ The browser may automatically:
 - Follow links and navigate within permitted origins
 - Read rendered content
 - Inspect accessibility and DOM state
-- Scroll, expand controls, and change non-persistent local UI state
-- Fill drafts that have not been submitted
+- Scroll, expand controls, and change non-persistent local UI state when the integration can establish that no event transmits data or creates remote state
 
 Pause at action time before:
 
+- Typing into arbitrary pages; input, change, autosave, and analytics handlers can transmit data before submission
 - Submitting forms or transmitting sensitive data
 - Sending messages, comments, invitations, or files
 - Creating, changing, or deleting remote data
@@ -200,17 +207,20 @@ The existing deferred/simulated Gatekeeper action model does not safely compose 
 ## Security invariants
 
 1. Treat all webpage content as hostile input and a possible prompt-injection source.
-2. Keep a browser-driving agent or subagent capability-reduced; webpage instructions do not grant authority.
-3. Use a fresh browser context per owner and task unless the owner explicitly restores origin-bound state.
-4. Enforce network policy inside the browser, not only through Worker `fetch()` controls.
-5. Block private and metadata destinations after DNS resolution and on redirects.
+2. Run webpage-derived content only in a capability-reduced browser subagent or browser-only mode with no `executeCode`, chat Gatekeeper bindings, or unrelated tools.
+3. Use a fresh browser context per owner and task unless the owner explicitly restores filtered, origin-bound state.
+4. Require a provider-level destination policy or enforced egress proxy that blocks private and metadata addresses after Chromium resolves the destination; URL interception alone is insufficient.
+5. Revalidate redirects at the same destination-level boundary.
 6. Block `file:` URLs, arbitrary WebSockets, WebRTC, downloads, extensions, and local filesystem access unless explicitly designed and reviewed.
-7. Never expose raw passwords, refresh tokens, OTPs, or password-manager contents to the model.
-8. Minimize screenshots and mask password, payment, OTP, and unrelated notification regions where practical.
-9. Never retry an action whose external outcome is unknown.
-10. Apply per-user and per-tenant concurrency, duration, action, token, storage, and bandwidth budgets.
-11. Make every live session cancellable by the owner and by an operator kill switch.
-12. Keep authenticated sessions owner-only until a separate collaborator-authorization design is reviewed.
+7. Disable model observations during human handoff and clear sensitive fields or move to a verified post-authentication page before resuming.
+8. Never expose raw passwords, refresh tokens, OTPs, payment values, or password-manager contents to the model.
+9. Minimize screenshots and mask sensitive fields and unrelated notification regions where practical.
+10. Keep authenticated observations in owner-private history; do not place them or their artifact references in collaborative chat history.
+11. Keep replayable redacted observations for the lifetime of model history, or replace them with a durable sanitized summary during compaction before deleting artifacts.
+12. Never retry an action whose external outcome is unknown.
+13. Apply per-account and per-deployment concurrency, duration, action, token, storage, and bandwidth budgets. Resource-level tenant policy belongs to the packaging and deployment layers.
+14. Make every live session cancellable by the owner and by an operator kill switch.
+15. Disable authenticated browser sessions in collaborative chats until an owner-private replay and authorization design is implemented.
 
 ## Initial non-goals
 
@@ -231,22 +241,22 @@ For high-impact authenticated services, prefer dedicated Gatekeepers with narrow
 
 - Browser session manager and ownership enforcement
 - Public navigation and accessibility snapshots
-- Screenshots as ephemeral artifacts
-- Live View and structured handoff
+- Deployment-scoped, account/workspace-owned screenshot artifacts with replay-safe redacted observations
+- Live View, observation suspension, secret cleanup, and structured handoff
 - Session cleanup, quotas, and cancellation
 - Static test-site integration coverage
 
 ### Milestone 2: controlled interaction
 
 - Element-based click, type, scroll, and wait actions
-- Draft filling
-- Pre-effect approval and page revalidation
+- Pre-effect approval before typing or any other potentially transmitting interaction
+- Page and target revalidation immediately before execution
 - Outcome-unknown handling and audit records
 - Prompt-injection containment tests
 
 ### Milestone 3: opt-in authenticated continuity
 
-- Origin-bound encrypted storage state
+- Filtered, origin-bound encrypted storage state with unrelated identity-provider and third-party state removed
 - Remember/disconnect/delete controls
 - Revocation and expiration behavior
 - Privacy and retention review
@@ -262,18 +272,23 @@ Only after the provider-neutral path is measured:
 
 ## Testing requirements
 
-- Browser session ownership and cross-tenant denial
+- Browser session ownership and cross-account/workspace denial within a deployment
 - Owner-only Live View issuance
 - Session timeout, eviction, cancellation, and cleanup
-- Redirect and DNS-based private-network blocking
+- Actual-destination private-network blocking after DNS resolution, including redirects and DNS rebinding
 - Blocked URL schemes, WebSockets, WebRTC, and downloads
+- URL sanitization that strips userinfo, query parameters, fragments, and secret-bearing paths before persistence or display
 - Accessibility and screenshot result handling
-- Model-history replay without repeating actions
+- Observation suspension during handoff and secret-field cleanup before the browser agent resumes
+- Model-history replay without repeating actions or depending on an expired artifact
+- Owner-private authenticated observations never entering collaborative chat history
+- Capability-reduced browser execution without `executeCode`, Gatekeeper bindings, or unrelated tools
 - Crash after action dispatch but before persistence
-- Handoff success, failure, expiration, and revoked user session
+- Handoff success, failure, expiration, unsafe post-handoff state, and revoked user session
+- Approval before typing into pages with autosave, change handlers, or analytics
 - Approval invalidation after navigation or target mutation
-- Persistent-state origin binding, expiry, deletion, and failed decryption
-- Browser-minute and concurrency quota enforcement
+- Persistent-state origin filtering, unrelated-origin rejection, expiry, deletion, and failed decryption
+- Per-account and per-deployment browser-minute and concurrency quota enforcement
 - Prompt injection from page content while unrelated capabilities remain unavailable
 
 ## Alternatives considered
@@ -300,7 +315,7 @@ Cloudflare Sandbox removed its built-in desktop API in version `0.10.2`. Rebuild
 - How long should temporary and remembered sessions live?
 - Is encrypted storage state acceptable under deployment privacy and residency requirements?
 - Which model families provide acceptable results from accessibility snapshots before screenshots are necessary?
-- How should browser costs be budgeted and attributed per tenant?
+- How should browser costs be budgeted per account and attributed at the deployment layer?
 - What evidence can establish whether an external action happened when the browser disconnects mid-operation?
 - Which authenticated workflows should become dedicated Gatekeepers instead of remaining browser automation?
 
