@@ -1,14 +1,16 @@
 # AI Gateway billing
 
-An optional flow that gives each user a **free daily allowance** of AI usage and, once that runs
-out, bills further usage to the user's **own Cloudflare AI Gateway credits**. Off by default
-(`ENABLE_CLOUDFLARE_LIMITS` unset) — usage is then unlimited, as for self-hosted deployments.
+An optional flow that bills inference to a user's **own Cloudflare AI Gateway credits**. A
+deployment can offer a free daily allowance before requiring user funding, or require user funding
+from the first request. Both modes are off by default, leaving usage unlimited for self-hosted
+deployments.
 
 ## How it works
 
-Each user gets a free allowance of LLM calls per UTC day (default 100), counted on the user's own
-`UserDurableObject` (`consumeDailyLlmCall` / `checkDailyLlmCount`). Before each user-initiated agent
-turn, the overseer calls `checkUsageAndBalance`:
+With `ENABLE_CLOUDFLARE_LIMITS=true`, each user gets a free allowance of LLM calls per UTC day
+(default 100), counted on the user's own `UserDurableObject` (`consumeDailyLlmCall` /
+`checkDailyLlmCount`). Before each user-initiated agent turn, the overseer calls
+`checkUsageAndBalance`:
 
 - **Connected, balance ≥ `$2`** → allowed, routed through the user's own account so usage bills
   their Cloudflare credits — even while free-tier allowance remains. The platform is never charged
@@ -18,6 +20,13 @@ turn, the overseer calls `checkUsageAndBalance`:
   (incl. $0).
 - **Free tier exhausted, no Cloudflare account connected** → blocked, with a prompt to connect.
 - **Free tier exhausted, connected but balance below `$2`** → blocked, with a prompt to add credits.
+
+With `REQUIRE_USER_FUNDED_AI=true`, there is no platform-funded allowance or fallback. A request is
+allowed only when the user has connected a Cloudflare account with at least the configured minimum
+balance; it is then routed through that account's default AI Gateway. Disconnected, unresolved,
+expired, unknown-balance, and underfunded connections fail closed. Callback-initiated continuations
+use the same requirement, and `getModel()` independently rejects an attempted platform-gateway
+fallback.
 
 The balance shown to users is read live from their Cloudflare AI Gateway billing
 (`/ai-gateway-billing/credit_balance`), cached for 5 minutes. Topping up means adding credits in the
@@ -40,7 +49,11 @@ the account's auto-created "default" AI Gateway.
 ## Configuration
 
 ```
+# Choose either a free allowance with user-funded overflow:
 ENABLE_CLOUDFLARE_LIMITS=true
+# Or require user funding from the first inference request:
+REQUIRE_USER_FUNDED_AI=true
+
 PUBLIC_BASE_URL=https://your-host
 AUTH_GATEKEEPERS=cloudflare       # allow Cloudflare sign-in/connect (plus any others)
 
@@ -49,7 +62,7 @@ AUTH_GATEKEEPERS=cloudflare       # allow Cloudflare sign-in/connect (plus any o
 CLOUDFLARE_OAUTH_CLIENT_ID=...
 CLOUDFLARE_OAUTH_CLIENT_SECRET=...
 
-# Platform AI Gateway used for the free tier (see existing AI Gateway docs):
+# Platform AI Gateway used for the free tier, or only as the model catalog in required-user-funding mode:
 CF_AI_GATEWAY=your-gateway
 CF_AI_GATEWAY_PROVIDERS=anthropic,openai,google
 
@@ -80,6 +93,9 @@ The Cloudflare dashboard OAuth endpoints and scopes are **hardcoded** in the Clo
 - scopes: `offline_access aig.read aig.run aig.write user-details.read account-settings.read`
 
 Cloudflare gatekeeper redirect URI: `${PUBLIC_BASE_URL}/gatekeeper/cloudflare/oauth`.
+
+`REQUIRE_USER_FUNDED_AI` takes precedence when both billing flags are true: the daily counter is not
+read or consumed, and no request is sent through the platform-funded gateway.
 
 Optional (all have sensible defaults):
 
