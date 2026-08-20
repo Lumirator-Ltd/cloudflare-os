@@ -9,7 +9,11 @@
 
 import { canProceedWithRequest, hasMinimumBalance, LimitWindowKind } from "@gadgets/workshop-shared/limits";
 import { CloudflareUsageInfo } from "@gadgets/workshop-shared/api";
-import { isCloudflareLimitsEnabled, getMinimumCloudflareBalance } from "../config.js";
+import {
+  getMinimumCloudflareBalance,
+  isCloudflareBillingEnabled,
+  isUserFundedAiRequired,
+} from "../config.js";
 import { getDailyLlmCallLimit } from "./config.js";
 import { getConnectionStatus, resolveConnection, ByokGatewayRouting } from "../cloudflare/connection-service.js";
 import type { UserDurableObject } from "../../user.js";
@@ -61,10 +65,11 @@ export async function checkUsageAndBalance(
   env: Cloudflare.Env,
   userStub: DurableObjectStub<UserDurableObject>,
 ): Promise<UsageCheckResult> {
-  if (!isCloudflareLimitsEnabled(env)) {
+  if (!isCloudflareBillingEnabled(env)) {
     return unlimitedResult();
   }
 
+  const requireUserFunding = isUserFundedAiRequired(env);
   const limit = getDailyLlmCallLimit(env);
   const minimumBalance = getMinimumCloudflareBalance(env);
 
@@ -94,6 +99,24 @@ export async function checkUsageAndBalance(
       balance,
       hasUserToken,
       byokRouting,
+    };
+  }
+
+  if (requireUserFunding) {
+    const decision = canProceedWithRequest({
+      withinLimits: false,
+      hasUserToken,
+      balance,
+      minimumBalance,
+      requireUserFunding: true,
+    });
+    return {
+      ...decision,
+      withinLimits: false,
+      remaining: 0,
+      limit: 0,
+      balance,
+      hasUserToken,
     };
   }
 
@@ -127,7 +150,7 @@ export async function getUsageInfo(
   env: Cloudflare.Env,
   userStub: DurableObjectStub<UserDurableObject>,
 ): Promise<CloudflareUsageInfo> {
-  if (!isCloudflareLimitsEnabled(env)) {
+  if (!isCloudflareBillingEnabled(env)) {
     return {
       cloudflareLimitsEnabled: false,
       unlimited: true,
