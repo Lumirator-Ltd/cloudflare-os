@@ -81,9 +81,17 @@ export default function AdminConnectorsPage() {
     try {
       await admin.api.configureConnector(connector.id, values)
       setDrafts((current) => ({ ...current, [connector.id]: {} }))
-      setConnectors(await admin.api.listConnectorConfigurations())
+      let refreshFailed = false
+      try {
+        setConnectors(await admin.api.listConnectorConfigurations())
+      } catch (error) {
+        refreshFailed = true
+        console.error('Failed to reload connector configurations after saving:', error)
+      }
       toasts.add({
-        title: `${connector.displayName} configuration saved. It may take a moment to become available.`,
+        title: refreshFailed
+          ? `${connector.displayName} configuration saved, but status could not be refreshed. Reload this page to check availability.`
+          : `${connector.displayName} configuration saved. It may take a moment to become available.`,
         variant: 'success',
       })
     } catch (error) {

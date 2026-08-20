@@ -233,6 +233,45 @@ describe('/admin/connectors', () => {
     })
   })
 
+  it('keeps a successful save successful when readiness cannot be reloaded', async () => {
+    const configureConnector = vi.fn<() => Promise<void>>(async () => {})
+    const listConnectorConfigurations = vi
+      .fn<() => Promise<AdminConnectorConfiguration[]>>()
+      .mockResolvedValueOnce([CONNECTORS[1]])
+      .mockRejectedValueOnce(new Error('readiness unavailable'))
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    auth({ listConnectorConfigurations, configureConnector })
+    const rendered = await render()
+
+    const idInput = rendered.querySelector('input[name="notion-CLIENT_ID"]') as HTMLInputElement
+    const secretInput = rendered.querySelector('input[name="notion-CLIENT_SECRET"]') as HTMLInputElement
+    await act(async () => {
+      setInput(idInput, 'new-client-id')
+      setInput(secretInput, 'new-client-secret')
+    })
+    const save = [...rendered.querySelectorAll('button')].find((button) =>
+      button.textContent?.includes('Save configuration')) as HTMLButtonElement
+    await act(async () => {
+      save.click()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(configureConnector).toHaveBeenCalledOnce()
+    expect(idInput.value).toBe('')
+    expect(secretInput.value).toBe('')
+    expect(rendered.textContent).toContain('Needs setup')
+    expect(addToast).toHaveBeenCalledWith({
+      title: 'Notion configuration saved, but status could not be refreshed. Reload this page to check availability.',
+      variant: 'success',
+    })
+    expect(addToast).not.toHaveBeenCalledWith(expect.objectContaining({ variant: 'error' }))
+    expect(consoleError).toHaveBeenCalledWith(
+      'Failed to reload connector configurations after saving:',
+      expect.any(Error),
+    )
+  })
+
   it('submits the MCP portal URL and reloads readiness', async () => {
     const configureConnector = vi.fn<() => Promise<void>>(async () => {})
     const listConnectorConfigurations = vi
