@@ -12,52 +12,110 @@ import { createWorkshopLogger } from "./observability.js";
 const logger = createWorkshopLogger("workshop.connector.configuration");
 
 const STATIC_OAUTH_INPUTS = Object.freeze([
-  Object.freeze({ name: "CLIENT_ID", label: "Client ID", secret: true as const }),
-  Object.freeze({ name: "CLIENT_SECRET", label: "Client Secret", secret: true as const }),
+  Object.freeze({ name: "CLIENT_ID", label: "Client ID", secret: true }),
+  Object.freeze({ name: "CLIENT_SECRET", label: "Client Secret", secret: true }),
 ]);
 
-const CONNECTOR_SECRET_INPUTS = Object.freeze({
-  cloudflare: STATIC_OAUTH_INPUTS,
-  confluence: STATIC_OAUTH_INPUTS,
-  github: STATIC_OAUTH_INPUTS,
-  google: STATIC_OAUTH_INPUTS,
-  hubspot: STATIC_OAUTH_INPUTS,
-  linear: STATIC_OAUTH_INPUTS,
-  notion: STATIC_OAUTH_INPUTS,
-  slack: STATIC_OAUTH_INPUTS,
-  spotify: STATIC_OAUTH_INPUTS,
-  supabase: STATIC_OAUTH_INPUTS,
-  zoominfo: STATIC_OAUTH_INPUTS,
-});
+const MCP_PORTAL_INPUTS = Object.freeze([
+  Object.freeze({ name: "MCP_PORTAL_URL", label: "Portal URL", secret: false }),
+]);
 
 const README_BASE_URL =
   "https://github.com/Lumirator-Ltd/cloudflare-os/tree/main/packages";
-const CONNECTOR_SETUP_GUIDES = Object.freeze({
-  cloudflare: `${README_BASE_URL}/gatekeeper-cloudflare#readme`,
-  confluence: `${README_BASE_URL}/gatekeeper-confluence#readme`,
-  github: `${README_BASE_URL}/gatekeeper-github#readme`,
-  google: `${README_BASE_URL}/gatekeeper-google#readme`,
-  hubspot: `${README_BASE_URL}/gatekeeper-hubspot#readme`,
-  linear: "https://linear.app/developers/oauth-2-0-authentication",
-  notion: `${README_BASE_URL}/gatekeeper-notion#readme`,
-  slack: `${README_BASE_URL}/gatekeeper-slack#readme`,
-  spotify: `${README_BASE_URL}/gatekeeper-spotify#readme`,
-  supabase: `${README_BASE_URL}/gatekeeper-supabase#readme`,
-  zoominfo: `${README_BASE_URL}/gatekeeper-zoominfo#readme`,
-});
 
-type ConfigurableConnectorId = keyof typeof CONNECTOR_SECRET_INPUTS;
+type ConnectorDescriptor = {
+  inputs: readonly ConnectorConfigurationInput[];
+  setupGuideUrl: string;
+  workerSuffix: string;
+  showCallback: boolean;
+};
 
-function canonicalInputs(vendorId: string): readonly ConnectorConfigurationInput[] | undefined {
-  return CONNECTOR_SECRET_INPUTS[vendorId as ConfigurableConnectorId];
+const CONNECTOR_DESCRIPTORS = Object.freeze({
+  cloudflare: Object.freeze({
+    inputs: STATIC_OAUTH_INPUTS,
+    setupGuideUrl: `${README_BASE_URL}/gatekeeper-cloudflare#readme`,
+    workerSuffix: "cloudflare",
+    showCallback: true,
+  }),
+  confluence: Object.freeze({
+    inputs: STATIC_OAUTH_INPUTS,
+    setupGuideUrl: `${README_BASE_URL}/gatekeeper-confluence#readme`,
+    workerSuffix: "confluence",
+    showCallback: true,
+  }),
+  github: Object.freeze({
+    inputs: STATIC_OAUTH_INPUTS,
+    setupGuideUrl: `${README_BASE_URL}/gatekeeper-github#readme`,
+    workerSuffix: "github",
+    showCallback: true,
+  }),
+  google: Object.freeze({
+    inputs: STATIC_OAUTH_INPUTS,
+    setupGuideUrl: `${README_BASE_URL}/gatekeeper-google#readme`,
+    workerSuffix: "google",
+    showCallback: true,
+  }),
+  hubspot: Object.freeze({
+    inputs: STATIC_OAUTH_INPUTS,
+    setupGuideUrl: `${README_BASE_URL}/gatekeeper-hubspot#readme`,
+    workerSuffix: "hubspot",
+    showCallback: true,
+  }),
+  linear: Object.freeze({
+    inputs: STATIC_OAUTH_INPUTS,
+    setupGuideUrl: "https://linear.app/developers/oauth-2-0-authentication",
+    workerSuffix: "linear",
+    showCallback: true,
+  }),
+  mcp_portal: Object.freeze({
+    inputs: MCP_PORTAL_INPUTS,
+    setupGuideUrl:
+      "https://developers.cloudflare.com/cloudflare-one/access-controls/ai-controls/mcp-portals/",
+    workerSuffix: "mcp-portal",
+    showCallback: false,
+  }),
+  notion: Object.freeze({
+    inputs: STATIC_OAUTH_INPUTS,
+    setupGuideUrl: `${README_BASE_URL}/gatekeeper-notion#readme`,
+    workerSuffix: "notion",
+    showCallback: true,
+  }),
+  slack: Object.freeze({
+    inputs: STATIC_OAUTH_INPUTS,
+    setupGuideUrl: `${README_BASE_URL}/gatekeeper-slack#readme`,
+    workerSuffix: "slack",
+    showCallback: true,
+  }),
+  spotify: Object.freeze({
+    inputs: STATIC_OAUTH_INPUTS,
+    setupGuideUrl: `${README_BASE_URL}/gatekeeper-spotify#readme`,
+    workerSuffix: "spotify",
+    showCallback: true,
+  }),
+  supabase: Object.freeze({
+    inputs: STATIC_OAUTH_INPUTS,
+    setupGuideUrl: `${README_BASE_URL}/gatekeeper-supabase#readme`,
+    workerSuffix: "supabase",
+    showCallback: true,
+  }),
+  zoominfo: Object.freeze({
+    inputs: STATIC_OAUTH_INPUTS,
+    setupGuideUrl: `${README_BASE_URL}/gatekeeper-zoominfo#readme`,
+    workerSuffix: "zoominfo",
+    showCallback: true,
+  }),
+} satisfies Record<string, ConnectorDescriptor>);
+
+type ConfigurableConnectorId = keyof typeof CONNECTOR_DESCRIPTORS;
+
+function connectorDescriptor(vendorId: string): ConnectorDescriptor | undefined {
+  if (!Object.prototype.hasOwnProperty.call(CONNECTOR_DESCRIPTORS, vendorId)) return undefined;
+  return CONNECTOR_DESCRIPTORS[vendorId as ConfigurableConnectorId];
 }
 
-function canonicalSetupGuideUrl(vendorId: string): string | undefined {
-  return CONNECTOR_SETUP_GUIDES[vendorId as ConfigurableConnectorId];
-}
 const ACCOUNT_ID_PATTERN = /^[0-9a-f]{32}$/;
 const WORKER_PREFIX_PATTERN = /^[a-z0-9][a-z0-9_-]*$/;
-const MAX_SECRET_LENGTH = 4096;
+const MAX_CONFIGURED_VALUE_LENGTH = 4096;
 const SETUP_UNAVAILABLE_ERROR =
   "Connector configuration writes are not available on this deployment.";
 const DISCOVERY_ERROR = "Connector configuration could not be discovered.";
@@ -105,14 +163,13 @@ function callbackUrl(env: Cloudflare.Env, vendorId: string): string {
   return baseUrl ? `${baseUrl}/gatekeeper/${vendorId}/oauth` : "";
 }
 
-async function configurableInputs(
+async function assertConfigurable(
   vendors: Map<string, Service<GatekeeperVendor>>,
   vendorId: string,
-): Promise<readonly ConnectorConfigurationInput[]> {
+): Promise<void> {
   const vendor = vendors.get(vendorId);
-  const inputs = canonicalInputs(vendorId);
-  if (!vendor || !inputs) {
-    throw new Error(`Connector "${vendorId}" is not configurable.`);
+  if (!vendor) {
+    throw new Error("Connector is not configurable.");
   }
   let description;
   try {
@@ -124,9 +181,8 @@ async function configurableInputs(
     throw new Error(DISCOVERY_ERROR);
   }
   if (!description.configuration) {
-    throw new Error(`Connector "${vendorId}" is not configurable.`);
+    throw new Error("Connector is not configurable.");
   }
-  return inputs;
 }
 
 function isPrintable(value: string): boolean {
@@ -137,10 +193,28 @@ function isPrintable(value: string): boolean {
   return true;
 }
 
+function normalizeMcpPortalUrl(value: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error("Invalid connector input: MCP_PORTAL_URL.");
+  }
+  if (parsed.protocol !== "https:" || !parsed.hostname || parsed.username || parsed.password ||
+      value.includes("?") || value.includes("#")) {
+    throw new Error("Invalid connector input: MCP_PORTAL_URL.");
+  }
+  const normalized = parsed.toString();
+  if (normalized.length > MAX_CONFIGURED_VALUE_LENGTH) {
+    throw new Error("Invalid connector input: MCP_PORTAL_URL.");
+  }
+  return normalized;
+}
+
 function validateValues(
   inputs: readonly ConnectorConfigurationInput[],
   values: AdminConnectorConfigurationValues,
-): void {
+): AdminConnectorConfigurationValues {
   if (!values || typeof values !== "object" || Array.isArray(values)) {
     throw new Error("Connector configuration values must be an object.");
   }
@@ -148,19 +222,22 @@ function validateValues(
   for (const name of Object.keys(values)) {
     if (!allowed.has(name)) throw new Error(`Unexpected connector input: ${name}.`);
   }
+  const normalized: AdminConnectorConfigurationValues = {};
   for (const { name } of inputs) {
     if (!Object.prototype.hasOwnProperty.call(values, name)) {
       throw new Error(`Missing connector input: ${name}.`);
     }
     const value = values[name];
     if (typeof value !== "string" || value.length === 0 ||
-        value.length > MAX_SECRET_LENGTH || !isPrintable(value)) {
+        value.length > MAX_CONFIGURED_VALUE_LENGTH || !isPrintable(value)) {
       throw new Error(`Invalid connector input: ${name}.`);
     }
+    normalized[name] = name === "MCP_PORTAL_URL" ? normalizeMcpPortalUrl(value) : value;
   }
+  return normalized;
 }
 
-/** Lists bound static-OAuth connectors without reading back any secret values. */
+/** Lists bound kernel-described connectors without reading back any configured values. */
 export async function listConnectorConfigurations(
   env: Cloudflare.Env,
 ): Promise<AdminConnectorConfiguration[]> {
@@ -168,9 +245,8 @@ export async function listConnectorConfigurations(
   const results: AdminConnectorConfiguration[] = [];
   const writeAvailable = writeSetup(env) !== null;
   for (const [id, vendor] of vendors) {
-    const inputs = canonicalInputs(id);
-    const setupGuideUrl = canonicalSetupGuideUrl(id);
-    if (!inputs || !setupGuideUrl) continue;
+    const descriptor = connectorDescriptor(id);
+    if (!descriptor) continue;
     try {
       const description = await vendor.describe();
       if (!description.configuration) continue;
@@ -179,9 +255,9 @@ export async function listConnectorConfigurations(
         displayName: description.displayName,
         logo: description.logo,
         configured: description.configuration.configured,
-        callbackUrl: callbackUrl(env, id),
-        setupGuideUrl,
-        inputs: inputs.map(input => ({ ...input })),
+        ...(descriptor.showCallback ? { callbackUrl: callbackUrl(env, id) } : {}),
+        setupGuideUrl: descriptor.setupGuideUrl,
+        inputs: descriptor.inputs.map(input => ({ ...input })),
         writeAvailable,
       });
     } catch {
@@ -193,23 +269,25 @@ export async function listConnectorConfigurations(
   return results;
 }
 
-/** Validates and writes every declared connector secret through Cloudflare's Workers API. */
+/** Validates and writes every declared input through Cloudflare's Workers secrets API. */
 export async function configureConnector(
   env: Cloudflare.Env,
   vendorId: string,
   values: AdminConnectorConfigurationValues,
   fetchImpl: typeof fetch = fetch,
 ): Promise<void> {
+  const descriptor = connectorDescriptor(vendorId);
+  if (!descriptor) throw new Error("Connector is not configurable.");
   const setup = writeSetup(env);
   if (!setup) throw new Error(SETUP_UNAVAILABLE_ERROR);
 
-  const inputs = await configurableInputs(buildGatekeeperVendorMap(env), vendorId);
-  validateValues(inputs, values);
+  await assertConfigurable(buildGatekeeperVendorMap(env), vendorId);
+  const normalizedValues = validateValues(descriptor.inputs, values);
   const url =
     `https://api.cloudflare.com/client/v4/accounts/${setup.accountId}/workers/scripts/` +
-    `${setup.workerPrefix}${vendorId}/secrets`;
+    `${setup.workerPrefix}${descriptor.workerSuffix}/secrets`;
 
-  for (const input of inputs) {
+  for (const input of descriptor.inputs) {
     let response: Response;
     try {
       response = await fetchImpl(url, {
@@ -220,7 +298,7 @@ export async function configureConnector(
         },
         body: JSON.stringify({
           name: input.name,
-          text: values[input.name],
+          text: normalizedValues[input.name],
           type: "secret_text",
         }),
       });
