@@ -60,13 +60,13 @@ This isolation should be preserved. Do not make Browser Run ambient by injecting
 A practical first release should include human handoff from the beginning:
 
 1. The agent creates an isolated remote browser session for the current user and task.
-2. It navigates and performs low-risk browsing until authentication, sensitive input, or approval is needed.
+2. It performs low-risk browsing on destinations directly authorized by the user or independently classified as read-only, pausing before every other navigation or interaction.
 3. Cloudflare OS presents a **Take over browser** control.
 4. The backend creates a short-lived, owner-only Live View URL.
 5. The user opens Live View, logs in or completes the requested step, and selects **Done** or **Failed**. Model observations remain disabled throughout the handoff.
-6. Before returning control, the browser service clears sensitive input values and navigates or reloads to a post-authentication page that no longer exposes passwords, OTPs, payment values, or other handoff-entered secrets. If it cannot establish a safe post-handoff state, it closes the session instead of resuming automation.
+6. Before returning control, the user clears sensitive input values and moves to a post-authentication page during Live View. The browser service verifies that the resulting page no longer exposes passwords, OTPs, payment values, or other handoff-entered secrets. If it cannot establish a safe post-handoff state, it closes the session instead of resuming automation.
 7. The capability-reduced browser agent resumes against the same remote tabs and cookies using a newly sanitized observation.
-8. It may continue low-risk reading and navigation, but pauses before typing or any other action that may transmit data or create an external effect.
+8. It may continue low-risk reading, but pauses before navigation, typing, or any other action that may transmit data or create an external effect unless independent policy establishes the exact operation as read-only.
 9. The session is closed and its ephemeral data is destroyed when the task ends or expires.
 
 Cloudflare Browser Run exposes structured Human-in-the-Loop CDP commands under the `Cloudflare.*` namespace. These support generating Live View URLs, requesting a handoff, waiting for completion, and resuming the same session.
@@ -153,8 +153,10 @@ Record:
 - Session mode and expiration
 - Last successful observation
 - Pending handoff or approval
-- Action status, including `outcome-unknown`
+- Durable action state: `pending`, `approved`, `dispatching`, `completed`, rejected, or `outcome-unknown`
 - Artifact references and retention deadlines
+
+Before sending any potentially effectful command to Chromium, atomically commit the action's `dispatching` state. Mark it `completed` only after the browser result is durably recorded. Recovery converts every incomplete `dispatching` record to `outcome-unknown` and prohibits automatic retry.
 
 ### Tool results and artifacts
 
@@ -187,14 +189,14 @@ Remote browser access should be an explicit per-chat capability, not an ambient 
 
 The browser may automatically:
 
-- Open public HTTPS pages in an unauthenticated session
-- Follow links in an unauthenticated session only within permitted origins
-- Read rendered content
+- Read already-loaded rendered content
 - Inspect accessibility and DOM state
 - Scroll, expand controls, and change non-persistent local UI state when the integration can establish that no event transmits data or creates remote state
 
 Pause at action time before:
 
+- Opening or navigating to any URL unless independently maintained policy establishes read-only semantics for the exact destination and current state; unauthenticated links can still consume one-time tokens or mutate server-side state
+- Following redirects that leave the approved, independently classified destination
 - Activating any link after authentication, unless independently maintained policy establishes read-only semantics for that exact destination and account state; authenticated GET requests may mutate state or consume one-time tokens
 - Typing into arbitrary pages; input, change, autosave, and analytics handlers can transmit data before submission
 - Submitting forms or transmitting sensitive data
@@ -205,9 +207,9 @@ Pause at action time before:
 - Installing or executing downloaded content
 - Bypassing browser or website safety barriers
 
-Approval must bind to semantic intent, account, browser session, browser context, tab, frame, stable target-element identity, observed page/version hash, origin, operation, and parameters. Reject the approval if any component changes before execution. Do not approve raw coordinates that may point to a different element by execution time.
+Approval must bind to semantic intent, account, browser session, browser context, tab, frame, stable target-element identity, observed page/version hash, origin, operation, and parameters. For navigation, bind it to the exact sanitized destination and redirect policy. Reject the approval if any component changes before execution. A direct user request that names an exact URL may authorize only the initial request to that URL; redirects and later navigation still require policy or fresh approval. Do not approve raw coordinates that may point to a different element by execution time.
 
-The existing deferred/simulated Gatekeeper action model does not safely compose with irreversible GUI actions. The browser must pause before the effect and revalidate the page immediately after approval.
+The existing deferred/simulated Gatekeeper action model does not safely compose with irreversible GUI actions. The browser must pause before the effect and revalidate the page immediately after approval. It must then durably enter `dispatching` before external I/O so a crash cannot make an attempted action appear safely retryable.
 
 ## Security invariants
 
@@ -225,11 +227,12 @@ The existing deferred/simulated Gatekeeper action model does not safely compose 
 12. Minimize screenshots and mask sensitive fields and unrelated notification regions where practical.
 13. Keep authenticated observations in owner-private history; do not place them or their artifact references in collaborative chat history.
 14. Keep replayable redacted observations for the lifetime of model history, or replace them with a durable sanitized summary during compaction before deleting artifacts.
-15. Require action-time approval before activating authenticated links unless an independent policy proves the exact destination is read-only.
-16. Never retry an action whose external outcome is unknown.
-17. Apply per-account and per-deployment concurrency, duration, action, token, storage, and bandwidth budgets. Resource-level tenant policy belongs to the packaging and deployment layers.
-18. Make every live session cancellable by the owner and by an operator kill switch.
-19. Disable authenticated browser sessions in collaborative chats until an owner-private replay and authorization design is implemented.
+15. Require action-time approval before any navigation unless an independent policy proves the exact destination and current state are read-only; authentication state alone never establishes safety.
+16. Atomically persist `dispatching` before potentially effectful browser I/O and recover every incomplete dispatch as `outcome-unknown`.
+17. Never retry an action whose external outcome is unknown.
+18. Apply per-account and per-deployment concurrency, duration, action, token, storage, and bandwidth budgets. Resource-level tenant policy belongs to the packaging and deployment layers.
+19. Make every live session cancellable by the owner and by an operator kill switch.
+20. Disable authenticated browser sessions in collaborative chats until an owner-private replay and authorization design is implemented.
 
 ## Initial non-goals
 
@@ -249,7 +252,7 @@ For high-impact authenticated services, prefer dedicated Gatekeepers with narrow
 ### Milestone 1: browser and handoff foundation
 
 - Browser session manager and ownership enforcement
-- Public navigation and accessibility snapshots
+- User-approved or independently classified read-only public navigation and accessibility snapshots
 - Deployment-scoped, account/workspace-owned screenshot artifacts with replay-safe redacted observations
 - Live View, observation suspension, secret cleanup, and structured handoff
 - Session cleanup, quotas, and cancellation
@@ -294,10 +297,12 @@ Only after the provider-neutral path is measured:
 - Owner-private authenticated observations never entering collaborative chat history
 - Browser-derived summaries delivered directly to the user or excluded from every later privileged-agent context
 - Capability-reduced browser execution without `executeCode`, Gatekeeper bindings, or unrelated tools
-- Crash after action dispatch but before persistence
+- Write-ahead `dispatching` persistence before browser I/O
+- Crash after dispatch but before result persistence recovering as non-retryable `outcome-unknown`
 - Handoff success, failure, expiration, unsafe post-handoff state, and revoked user session
 - Approval before typing into pages with autosave, change handlers, or analytics
-- Approval before activating authenticated GET links unless independently classified as read-only
+- Approval before any navigation, including unauthenticated and one-time-token URLs, unless the exact destination is independently classified as read-only
+- Redirects outside an approved destination require fresh policy evaluation or approval
 - Approval bound to the exact session, context, tab, frame, element identity, and observed page version
 - Approval invalidation after navigation, DOM replacement, frame change, or target mutation
 - Persistent-state origin filtering, unrelated-origin rejection, expiry, deletion, and failed decryption
