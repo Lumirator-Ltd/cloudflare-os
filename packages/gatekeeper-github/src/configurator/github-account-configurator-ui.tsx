@@ -17,10 +17,10 @@ export default {
 
   render() {
     return <Section title="GitHub Account">
-      {"Grants read access to every repository this GitHub account can access: repository "
-        + "discovery, code and issue search, and file reading. Issues, pull requests, and "
-        + "write access still require connecting a specific repository. Account-wide "
-        + "connections cannot be shared with collaborators."}
+      {"Grants read-only access to every repository this GitHub account can access: repository "
+        + "discovery, code, issue and pull-request details, and pull-request diffs. This "
+        + "owner-only connection is blocked in shared workspaces and prevents future sharing. "
+        + "New write-capable GitHub connections are not available."}
     </Section>;
   },
 } satisfies ConfiguratorUISpec<GitHubAccountConfiguratorRpc, GitHubAccountConfiguratorValues>;

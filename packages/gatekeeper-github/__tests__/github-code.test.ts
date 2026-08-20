@@ -39,45 +39,78 @@ describe("parseGitHubResourceUrl", () => {
     });
   });
 
-  it("treats extra or non-numeric path segments as the enclosing repo", () => {
-    expect(parseGitHubResourceUrl("https://github.com/cloudflare/workerd/tree/main")).toEqual({
-      kind: "repo",
-      owner: "cloudflare",
-      repo: "workerd",
-    });
-    expect(parseGitHubResourceUrl("https://github.com/cloudflare/workerd/issues/abc")).toEqual({
-      kind: "repo",
-      owner: "cloudflare",
-      repo: "workerd",
-    });
+  it.each([
+    "http://github.com/cloudflare/workerd",
+    "https://gitlab.com/cloudflare/workerd",
+    "https://GitHub.com/cloudflare/workerd",
+    "https://user@github.com/cloudflare/workerd",
+    "https://user:pass@github.com/cloudflare/workerd",
+    "https://github.com:8443/cloudflare/workerd",
+    "https://github.com/cloudflare/workerd?tab=readme",
+    "https://github.com/cloudflare/workerd#readme",
+    "https://github.com/cloudflare//workerd",
+    "https://github.com/cloudflare/workerd/",
+    "https://github.com/cloudflare/workerd/tree/main",
+    "https://github.com/cloudflare/workerd/issues/abc",
+    "https://github.com/cloudflare/workerd/issues/0",
+    "https://github.com/cloudflare/workerd/issues/9007199254740992",
+    "https://github.com/cloudflare/workerd/issues/12/comments",
+    "https://github.com/cloudflare/workerd/pull/-1",
+    "https://github.com/cloudflare",
+    "https://github.com/-cloudflare/workerd",
+    "https://github.com/cloudflare-/workerd",
+    "https://github.com/cloudflare/..",
+    "https://github.com/cloudflare/bad%20repo",
+    `https://github.com/${"a".repeat(40)}/workerd`,
+    `https://github.com/cloudflare/${"r".repeat(101)}`,
+  ])("rejects non-canonical or unsupported URL %s", url => {
+    expect(() => parseGitHubResourceUrl(url)).toThrow("Unsupported GitHub URL");
   });
 
-  it("rejects owner-only URLs", () => {
-    expect(() => parseGitHubResourceUrl("https://github.com/cloudflare")).toThrow("Unsupported GitHub URL");
-  });
-
-  it("rejects non-github hosts", () => {
-    expect(() => parseGitHubResourceUrl("https://gitlab.com/cloudflare/workerd")).toThrow("Unsupported GitHub URL");
+  it.each([
+    "http://github.com",
+    "https://github.com?tab=readme",
+    "https://github.com/#fragment",
+    "https://github.com//",
+  ])("rejects non-canonical account URL %s", url => {
+    expect(() => parseGitHubResourceUrl(url)).toThrow("Unsupported GitHub URL");
   });
 });
 
 describe("splitRepoFullName", () => {
-  it("parses owner/name", () => {
+  it("parses exact owner/name identifiers and canonical repository URLs", () => {
     expect(splitRepoFullName("cloudflare/workerd")).toEqual({ owner: "cloudflare", repo: "workerd" });
-  });
-
-  it("parses GitHub URLs and strips .git", () => {
-    expect(splitRepoFullName("https://github.com/cloudflare/workerd.git")).toEqual({
+    expect(splitRepoFullName("https://github.com/cloudflare/workerd")).toEqual({
       owner: "cloudflare",
       repo: "workerd",
     });
   });
 
-  it("rejects malformed names and non-GitHub URLs", () => {
-    expect(splitRepoFullName("cloudflare")).toBeNull();
-    expect(splitRepoFullName("cloudflare/workerd/extra")).toBeNull();
-    expect(splitRepoFullName("https://evil.com/cloudflare/workerd")).toBeNull();
-    expect(splitRepoFullName("bad owner/repo")).toBeNull();
+  it("preserves a .git suffix instead of silently changing the repository name", () => {
+    expect(splitRepoFullName("cloudflare/workerd.git")).toEqual({
+      owner: "cloudflare",
+      repo: "workerd.git",
+    });
+    expect(splitRepoFullName("https://github.com/cloudflare/workerd.git")).toEqual({
+      owner: "cloudflare",
+      repo: "workerd.git",
+    });
+  });
+
+  it.each([
+    " cloudflare/workerd",
+    "cloudflare/workerd ",
+    " https://github.com/cloudflare/workerd",
+    "https://github.com/cloudflare/workerd ",
+    "http://github.com/cloudflare/workerd",
+    "https://github.com/cloudflare/workerd/",
+    "https://github.com/cloudflare/workerd?tab=readme",
+    "cloudflare",
+    "cloudflare/workerd/extra",
+    "https://evil.com/cloudflare/workerd",
+    "bad owner/repo",
+  ])("rejects non-canonical repository input %j", input => {
+    expect(splitRepoFullName(input)).toBeNull();
   });
 });
 

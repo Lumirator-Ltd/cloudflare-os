@@ -5,7 +5,7 @@ import { UserDurableObject } from "../src/user.js";
 const UNCONFIGURED_MESSAGE =
   "This connector is not configured. Ask an administrator to configure it.";
 
-function connectedUser() {
+function connectedUser(newConnectionsAllowed: boolean | undefined = undefined) {
   let ensureCalls = 0;
   let reconnectCalls = 0;
   let capabilityCalls = 0;
@@ -26,6 +26,7 @@ function connectedUser() {
           urlPattern: "https://github.com/:owner/:repo",
           title: "GitHub repository",
           description: "A repository",
+          newConnectionsAllowed,
         },
       };
     },
@@ -50,6 +51,48 @@ function connectedUser() {
     user,
     calls: () => ({ ensureCalls, reconnectCalls, capabilityCalls }),
   };
+}
+
+function configuratorUser() {
+  let configuratorCalls = 0;
+  const resources = [
+    {
+      urlPattern: "https://github.com",
+      title: "GitHub account",
+      description: "An account",
+    },
+    {
+      urlPattern: "https://github.com/:owner/:repo",
+      title: "GitHub repository",
+      description: "A repository",
+      newConnectionsAllowed: false,
+    },
+    {
+      urlPattern: "https://github.com/:owner/:repo/issues/:number",
+      title: "GitHub issue",
+      description: "An issue",
+      newConnectionsAllowed: false,
+    },
+    {
+      urlPattern: "https://github.com/:owner/:repo/pull/:number",
+      title: "GitHub pull request",
+      description: "A pull request",
+      newConnectionsAllowed: false,
+    },
+  ];
+  const account = {
+    async getSupportedResources() { return resources; },
+    async startResourceConfigurator() {
+      configuratorCalls++;
+      return { url: "https://example.com/configurator" };
+    },
+  };
+  const record = { id: 7, account, vendorId: "github", description: { avatar: { url: "" } } };
+  const user = Object.create(UserDurableObject.prototype) as UserDurableObject;
+  Object.assign(user, {
+    storage: { connectedAccounts: { get: (id: number) => id === 7 ? record : undefined } },
+  });
+  return { user, calls: () => configuratorCalls };
 }
 
 describe("UserDurableObject connector readiness", () => {
@@ -112,14 +155,40 @@ describe("UserDurableObject connector readiness", () => {
     expect(calls().reconnectCalls).toBe(0);
   });
 
-  it("does not block existing connected-account capability usage", async () => {
+  it("allows new capabilities when the resource uses the default policy", async () => {
     const { user, calls } = connectedUser();
 
-    await expect(user.getGatekeeperClassFor(7, "https://github.com/cloudflare/workers-sdk"))
+    await expect(user.getGatekeeperClassFor(7, "https://github.com"))
       .resolves.toMatchObject({
         vendorId: "github",
         typeUrlPattern: "https://github.com/:owner/:repo",
       });
     expect(calls().capabilityCalls).toBe(1);
+  });
+
+  it("rejects a direct bypass that tries to mint a blocked scoped capability", async () => {
+    const { user, calls } = connectedUser(false);
+
+    await expect(user.getGatekeeperClassFor(7, "https://github.com/cloudflare/workers-sdk"))
+      .rejects.toThrow("no longer available for new connections");
+    expect(calls().capabilityCalls).toBe(1);
+  });
+
+  it("starts only configurators that allow new connections", async () => {
+    const { user, calls } = configuratorUser();
+
+    await expect(user.startResourceConfigurator(7, "https://github.com"))
+      .resolves.toEqual({ url: "https://example.com/configurator" });
+    for (const pattern of [
+      "https://github.com/:owner/:repo",
+      "https://github.com/:owner/:repo/issues/:number",
+      "https://github.com/:owner/:repo/pull/:number",
+    ]) {
+      await expect(user.startResourceConfigurator(7, pattern))
+        .rejects.toThrow("no longer available for new connections");
+    }
+    await expect(user.startResourceConfigurator(7, "https://github.com/:unknown"))
+      .rejects.toThrow("Unsupported resource configurator");
+    expect(calls()).toBe(1);
   });
 });

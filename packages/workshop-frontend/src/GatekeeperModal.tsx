@@ -18,7 +18,12 @@ import {
   GatekeeperClient,
   Overseer,
 } from '@gadgets/workshop-shared/api'
-import { SupportedResource, VendorDescription, matchesResourceUrlPattern } from '@gadgets/workshop-shared/gatekeeper'
+import {
+  SupportedResource,
+  VendorDescription,
+  matchesResourceUrlPattern,
+  resourceAllowsNewConnections,
+} from '@gadgets/workshop-shared/gatekeeper'
 import { ResourceConfiguratorFrame } from '@gadgets/workshop-shared/gatekeeper'
 import { useAuthenticatedApi } from './AuthContext'
 import { WorkshopButton, WorkshopIconButton } from './components/WorkshopControls'
@@ -266,6 +271,7 @@ export default function GatekeeperModal({
   const allConnections = useMemo(() => [
     ...platformConnectionTypes(siteName),
     ...vendors.flatMap(vendor => vendor.supportedResources
+      .filter(resourceAllowsNewConnections)
       .map(resource => connectionForResource(vendor, resource))),
   ], [siteName, vendors])
 

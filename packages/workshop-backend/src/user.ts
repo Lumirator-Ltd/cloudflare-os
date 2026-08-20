@@ -1,6 +1,6 @@
 import { RpcStub } from "capnweb";
 import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError } from '@gadgets/workshop-shared/api';
-import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, assertConnectorConfigured } from "@gadgets/workshop-shared/gatekeeper";
+import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, assertConnectorConfigured, resourceAllowsNewConnections } from "@gadgets/workshop-shared/gatekeeper";
 import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
 import { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
@@ -1575,6 +1575,13 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       resourceUrlPattern: string): Promise<ResourceConfiguratorFrame> {
     let record = this.storage.connectedAccounts.get(accountId);
     if (!record) throw new Error("No such account.");
+    const resource = (await record.account.getSupportedResources())
+        .find(candidate => candidate.urlPattern === resourceUrlPattern);
+    if (!resource) throw new Error("Unsupported resource configurator.");
+    if (!resourceAllowsNewConnections(resource)) {
+      throw new Error(
+          `The "${resource.title}" resource is no longer available for new connections.`);
+    }
     return record.account.startResourceConfigurator(resourceUrlPattern);
   }
 
@@ -1695,6 +1702,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     let account = this.storage.connectedAccounts.get(accountId);
     if (!account) throw new Error("No such account.");
     let {class: cls, resource} = await account.account.getGatekeeperClassFor(url);
+    if (!resourceAllowsNewConnections(resource)) {
+      throw new Error(
+          `The "${resource.title}" resource is no longer available for new connections.`);
+    }
 
     // Block whole gatekeepers + disabled resources at this single core-side chokepoint where a
     // resourceUrl becomes a capability (reached only via the user/UI-facing Overseer.newGatekeeper

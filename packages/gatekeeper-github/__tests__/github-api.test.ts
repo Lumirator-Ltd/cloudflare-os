@@ -226,6 +226,44 @@ describe("GitHubApi.getContentsConditional", () => {
     expect(requests[0].url.pathname).toBe("/repos/cloudflare/workerd/contents/src/a%20b/c%23d.ts");
     expect(requests[0].url.searchParams.get("ref")).toBe("feature/x");
   });
+
+  it.each(["", ".", "..", "/README.md", "src//index.ts", "src/./index.ts", "src/../README.md", "src/"])(
+    "rejects unsafe file path %j before fetching",
+    async path => {
+      const fetch = vi.fn();
+      vi.stubGlobal("fetch", fetch);
+      const api = new GitHubApi(async () => "test-token");
+
+      await expect(api.getContentsConditional("cloudflare", "workerd", path, "main"))
+        .rejects.toThrow("GitHub API path");
+      expect(fetch).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["", ".", "..", "/main", "heads//main", "heads/./main", "heads/../main", "main/"])(
+    "rejects unsafe contents ref %j before fetching",
+    async ref => {
+      const fetch = vi.fn();
+      vi.stubGlobal("fetch", fetch);
+      const api = new GitHubApi(async () => "test-token");
+
+      await expect(api.getContentsConditional("cloudflare", "workerd", "README.md", ref))
+        .rejects.toThrow("GitHub API ref");
+      expect(fetch).not.toHaveBeenCalled();
+    },
+  );
+});
+
+describe("GitHubApi.getRootContentsConditional", () => {
+  it("uses the fixed repository contents route for a root directory listing", async () => {
+    const requests = stubFetch([]);
+    const api = new GitHubApi(async () => "test-token");
+
+    await api.getRootContentsConditional("cloudflare", "workerd", "main");
+
+    expect(requests[0].url.pathname).toBe("/repos/cloudflare/workerd/contents");
+    expect(requests[0].url.searchParams.get("ref")).toBe("main");
+  });
 });
 
 describe("GitHubApi.getTreeConditional", () => {
@@ -237,6 +275,19 @@ describe("GitHubApi.getTreeConditional", () => {
     expect(requests[0].url.pathname).toBe("/repos/cloudflare/workerd/git/trees/feature%2Fx");
     expect(requests[0].url.searchParams.get("recursive")).toBe("1");
   });
+
+  it.each(["", ".", "..", "/main", "heads//main", "heads/./main", "heads/../main", "main/"])(
+    "rejects unsafe tree ref %j before fetching",
+    async ref => {
+      const fetch = vi.fn();
+      vi.stubGlobal("fetch", fetch);
+      const api = new GitHubApi(async () => "test-token");
+
+      await expect(api.getTreeConditional("cloudflare", "workerd", ref))
+        .rejects.toThrow("GitHub API ref");
+      expect(fetch).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe("GitHubApi.getOwnerType", () => {
@@ -257,6 +308,45 @@ describe("GitHubApi.listBranches", () => {
     expect(requests[0].url.pathname).toBe("/repos/cloudflare/workerd/branches");
     expect(requests[0].url.searchParams.get("per_page")).toBe("100");
     expect(requests[0].url.searchParams.get("page")).toBe("3");
+  });
+
+  it.each([
+    ["", "workerd"],
+    [".", "workerd"],
+    ["..", "workerd"],
+    ["cloudflare", ""],
+    ["cloudflare", "."],
+    ["cloudflare", ".."],
+  ])("rejects unsafe repository route %j/%j before fetching", async (owner, repo) => {
+    const fetch = vi.fn();
+    vi.stubGlobal("fetch", fetch);
+    const api = new GitHubApi(async () => "test-token");
+
+    await expect(api.listBranches(owner, repo, { per_page: 100, page: 1 }))
+      .rejects.toThrow("GitHub API path");
+    expect(fetch).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("GitHubApi.compareBranches", () => {
+  it.each([
+    ["", "main"],
+    [".", "main"],
+    ["..", "main"],
+    ["heads/../main", "next"],
+    ["main", ""],
+    ["main", "."],
+    ["main", ".."],
+    ["main", "heads//next"],
+  ])("rejects unsafe compare refs %j and %j before fetching", async (base, head) => {
+    const fetch = vi.fn();
+    vi.stubGlobal("fetch", fetch);
+    const api = new GitHubApi(async () => "test-token");
+
+    await expect(api.compareBranches("cloudflare", "workerd", base, head))
+      .rejects.toThrow("GitHub API ref");
+    expect(fetch).not.toHaveBeenCalled();
   });
 });
 

@@ -19,9 +19,10 @@ Users can connect GitHub, but agents cannot:
 
 Two additions to the GitHub gatekeeper, sharing one parameterized code-read layer:
 
-### A. Code browsing on the existing `GitHubRepo` session
+### A. Code browsing on grandfathered `GitHubRepo` sessions
 
-New read-only session methods (all authorize an observation; none touch the ApprovalQueue
+These methods remain available only on already-persisted legacy scoped bindings; new scoped
+bindings cannot be created. New read-only session methods (all authorize an observation; none touch the ApprovalQueue
 action path, since they cannot mutate anything):
 
 - `getMetadata()` — extended: `GitHubRepoMetadata` gains `defaultBranch: string`.
@@ -62,9 +63,9 @@ precedent: Confluence's site-wide resource). Session type `GitHubAccount`:
   `readFile(repo, path, options?)`.
 
 **Deliberately excluded from the account session:** issue/PR capability objects and all
-write operations. Working with a discovered repo's issues/PRs (or any mutation) requires a
-repo-scoped connection, which the agent can request via the existing connection-request
-flow. This keeps the broad-read grant separate from write consent.
+write operations. New scoped connections are unavailable. Only already-persisted legacy
+repository, issue, and pull-request bindings retain their scoped discussions and writes for
+compatibility; the account session remains read-only.
 
 ## Architecture & Data Flow
 
@@ -105,9 +106,9 @@ Agent code (executeCode)
   error explains that account-wide connections cannot be shared). `addObserver` is only
   invoked for non-owner collaborators (verified in `overseer.ts ensureObserver`), so the
   connecting user is unaffected.
-- **Observation authorization.** Every new read calls `authorizeObservation` with a
-  specific title/description (file path + ref, search text, repo name), preserving the
-  audit trail.
+- **Observation authorization.** Every account read calls `authorizeObservation` with a
+  specific title/description and `prohibitAllSharing: true`. The Overseer rejects reads in
+  already-shared workspaces and prevents future sharing after a successful read.
 - **Scope verification on search results** (above) prevents a prompt-injected qualifier
   from exfiltrating results outside the connected scope.
 
