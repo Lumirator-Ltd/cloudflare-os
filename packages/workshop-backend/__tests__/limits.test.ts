@@ -57,6 +57,7 @@ describe("canProceedWithRequest", () => {
     expect(r.allowed).toBe(false);
     expect(r.shouldUseByok).toBe(true);
     expect(r.reason).toContain("add credits");
+    expect(r.reason).not.toContain("use BYOK");
   });
 
   it("connected with $0 balance still uses the daily free tier", () => {

@@ -1,5 +1,4 @@
-// Configuration for the optional AI Gateway billing feature: a per-user free daily allowance, and
-// (once exhausted) billing through the user's own connected Cloudflare AI Gateway. OFF by default.
+// Configuration for optional free-tier and required-user-funding AI Gateway billing modes.
 
 import { MINIMUM_CLOUDFLARE_BALANCE } from "@gadgets/workshop-shared/limits";
 
@@ -11,7 +10,7 @@ function readNumber(raw: string | undefined, fallback: number): number {
   return parsed;
 }
 
-/** Minimum connected-account balance (USD) required to proceed via BYOK once the free tier is spent. */
+/** Minimum connected-account balance (USD) required to proceed via BYOK. */
 export function getMinimumCloudflareBalance(env: Cloudflare.Env): number {
   return readNumber(env.MINIMUM_CLOUDFLARE_BALANCE, MINIMUM_CLOUDFLARE_BALANCE);
 }

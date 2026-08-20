@@ -2,10 +2,9 @@
 // whether a user's request may proceed, and whose credentials to use.
 //
 // Billing rules (see canProceedWithRequest):
-//   - Connected + balance >= minimum -> billed to the user's own gateway, no daily cap; the daily
-//     counter is NOT consumed (the platform free tier is reserved for everyone else).
-//   - Connected + balance below minimum (incl. $0), or not connected -> platform free tier; the
-//     daily counter is consumed and, once exhausted, the request is blocked.
+//   - Connected + balance >= minimum -> billed to the user's own gateway with no daily cap.
+//   - Required user funding without sufficient balance -> blocked without consuming a daily quota.
+//   - Otherwise, unfunded users consume the platform free tier until it is exhausted.
 
 import { canProceedWithRequest, hasMinimumBalance, LimitWindowKind } from "@gadgets/workshop-shared/limits";
 import { CloudflareUsageInfo } from "@gadgets/workshop-shared/api";
@@ -61,9 +60,9 @@ function unlimitedResult(): UsageCheckResult {
 /**
  * Check whether the user may proceed with an LLM-backed request.
  *
- * When limits are disabled, always allows without touching the user object. Otherwise: connected +
- * funded users bill their own gateway and skip the daily counter entirely; everyone else draws on
- * the platform free tier (consuming one call against the user object) until it's exhausted.
+ * When billing controls are disabled, always allows without touching the user object. Otherwise,
+ * funded users bill their own gateway; required-user-funding mode blocks everyone else, while the
+ * free-tier mode consumes a platform-funded allowance.
  */
 export async function checkUsageAndBalance(
   env: Cloudflare.Env,
