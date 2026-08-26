@@ -3368,6 +3368,8 @@ export const ChatInput = ({
                 }
               }}
               onKeyDown={(e) => {
+                // Safari's composition-confirming keydown reports keyCode 229 after composition ends.
+                if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
                 if (slashCommandPicker.open && e.key === "Escape") {
                   e.preventDefault();
                   slashCommandPicker.dismiss();
