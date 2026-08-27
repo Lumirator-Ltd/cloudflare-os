@@ -6326,15 +6326,16 @@ function ChatInterface({
   const renderConnectionRequestCard = (
     msg: AiChatMessage & { type: "connectionRequest" },
   ) => {
+    const activityLanguage = msg.activityLanguage ?? "en";
     const isPending = msg.state === "pending";
     const isAccepted = msg.state === "accepted";
     const isDenied = msg.state === "denied";
     const isProc = processingConnections.has(msg.requestId);
 
     const stateLabel = isAccepted
-      ? t("workspace.chat.connection.connected")
+      ? t("workspace.chat.connection.connected", { lng: activityLanguage })
       : isDenied
-        ? t("workspace.activity.status.denied")
+        ? t("workspace.activity.status.denied", { lng: activityLanguage })
         : null;
     const stateLabelCls = isDenied ? "text-kumo-danger" : "text-kumo-success";
     const scope = msg.resourceTitle ?? msg.resourceUrl;
@@ -6351,7 +6352,10 @@ function ChatInterface({
             <div className="min-w-0 flex-1">
               <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
                 <span className="font-medium text-kumo-default">
-                  {t("workspace.chat.connection.connectVendor", { vendor: msg.vendorName })}
+                  {t("workspace.chat.connection.connectVendor", {
+                    lng: activityLanguage,
+                    vendor: msg.vendorName,
+                  })}
                 </span>
                 {scope && (
                   <span className="rounded-full bg-kumo-tint px-2 py-0.5 text-[11px] leading-4 text-kumo-subtle">
@@ -6400,6 +6404,7 @@ function ChatInterface({
     const log = msg.actionLog;
     if (!log) return null;
 
+    const activityLanguage = msg.activityLanguage ?? "en";
     const isAct = log.type === "action";
     const state = log.state;
     const open = expandedActions.has(msg.actionId);
@@ -6412,7 +6417,7 @@ function ChatInterface({
         ? "workspace.activity.status.deleted"
         : log.enabled
           ? "workspace.activity.status.enabled"
-          : "workspace.activity.status.disabled");
+          : "workspace.activity.status.disabled", { lng: activityLanguage });
       const stateLabelCls = isDeleted
         ? "text-kumo-inactive"
         : log.enabled
@@ -6430,7 +6435,10 @@ function ChatInterface({
               <div className="min-w-0 flex-1">
                 <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
                   <span className="font-medium text-kumo-default">
-                    {t("workspace.chat.connection.hook", { name: log.description.title })}
+                    {t("workspace.chat.connection.hook", {
+                      lng: activityLanguage,
+                      name: log.description.title,
+                    })}
                   </span>
                   <span className={`text-[12px] font-medium ${stateLabelCls}`}>
                     {stateLabel}
@@ -6527,9 +6535,9 @@ function ChatInterface({
     const showDescription = isPending || open;
     const metadata = log.resourceTitle;
     const stateLabel = isApproved
-      ? t("workspace.activity.status.approved")
+      ? t("workspace.activity.status.approved", { lng: activityLanguage })
       : isRejected
-        ? t("workspace.activity.status.denied")
+        ? t("workspace.activity.status.denied", { lng: activityLanguage })
         : null;
     const stateLabelCls = isRejected
       ? "text-kumo-danger"
@@ -7552,6 +7560,7 @@ function ChatInterface({
 
                         {(msg.type === "merge" || msg.type === "revert") &&
                           (() => {
+                            const activityLanguage = msg.activityLanguage ?? "en";
                             const isMerge = msg.type === "merge";
                             const ts = isMerge
                               ? messageStates.mergeTimestamps.get(msg.sequence)
@@ -7564,21 +7573,27 @@ function ChatInterface({
                                   content={
                                     isMerge
                                       ? t("workspace.chat.acceptedThrough", {
+                                        lng: activityLanguage,
                                         through: ts
                                           ? t("workspace.chat.throughTime", {
-                                            time: formatFullTimestamp(ts, locale),
+                                            lng: activityLanguage,
+                                            time: formatFullTimestamp(ts, activityLanguage),
                                           })
                                           : "",
                                       })
                                       : t("workspace.chat.returnedBeforePrompt", {
+                                        lng: activityLanguage,
                                         when: ts
                                           ? t("workspace.chat.atTime", {
-                                            time: ts.toLocaleTimeString(locale, {
+                                            lng: activityLanguage,
+                                            time: ts.toLocaleTimeString(activityLanguage, {
                                               hour: "2-digit",
                                               minute: "2-digit",
                                             }),
                                           })
-                                          : t("workspace.chat.earlier"),
+                                          : t("workspace.chat.earlier", {
+                                            lng: activityLanguage,
+                                          }),
                                       })
                                   }
                                   asChild
@@ -7591,7 +7606,9 @@ function ChatInterface({
                                       {msg.author.name}{" "}
                                       {t(isMerge
                                         ? "workspace.chat.acceptedChanges"
-                                        : "workspace.chat.discardedChanges")}
+                                        : "workspace.chat.discardedChanges", {
+                                        lng: activityLanguage,
+                                      })}
                                     </span>
                                   </span>
                                 </Tooltip>
@@ -7606,13 +7623,19 @@ function ChatInterface({
                         {msg.type === "useGadget" && (
                           <div className="max-w-[860px] text-[14px] leading-5 tracking-[-0.25px] text-kumo-subtle">
                             <Tooltip content={t("workspace.chat.usedGadgetAt", {
-                              time: formatFullTimestamp(msg.timestamp, locale),
+                              lng: msg.activityLanguage ?? "en",
+                              time: formatFullTimestamp(
+                                msg.timestamp,
+                                msg.activityLanguage ?? "en",
+                              ),
                             })} asChild>
                               <span className="inline-flex items-center gap-3 px-1.5 py-1">
                                 <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center text-kumo-inactive" aria-hidden="true">
                                   <Plug size={16} />
                                 </span>
-                                <span>{t("workspace.chat.usedGadget")}</span>
+                                <span>{t("workspace.chat.usedGadget", {
+                                  lng: msg.activityLanguage ?? "en",
+                                })}</span>
                               </span>
                             </Tooltip>
                           </div>
@@ -7641,7 +7664,9 @@ function ChatInterface({
                                         </span>
                                         <span className="flex min-w-0 flex-1 items-center gap-1">
                                           <span className="min-w-0 truncate">
-                                            <span className="font-medium text-kumo-danger">{t("workspace.chat.errorPrefix")}</span>
+                                            <span className="font-medium text-kumo-danger">{t("workspace.chat.errorPrefix", {
+                                              lng: msg.activityLanguage ?? "en",
+                                            })}</span>
                                             <span className="text-kumo-subtle">{msg.message}</span>
                                           </span>
                                           <CaretRight

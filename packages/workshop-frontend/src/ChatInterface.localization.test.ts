@@ -1,16 +1,61 @@
 // @vitest-environment jsdom
 
-import { describe, expect, it } from "vitest";
+import { act, createElement } from "react";
+import { createRoot } from "react-dom/client";
+import { Toasty, TooltipProvider } from "@cloudflare/kumo";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   AiChatMessage,
+  AiChatMessageBody,
+  AiChatMetadata,
   AiToolCall,
   ChatActivityLanguage,
+  Overseer,
 } from "@gadgets/workshop-shared/api";
-import {
+import type { RpcStub } from "capnweb";
+import ChatInterface, {
   buildChatDisplayEntries,
   buildProvisionalToolSummary,
 } from "./ChatInterface";
 import i18n from "./i18n/config";
+
+(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+vi.mock("./AuthContext", () => ({
+  useAuthenticatedApi: () => ({
+    authenticatedApi: null,
+    currentUser: { id: "current-user", name: "Current User" },
+  }),
+}));
+vi.mock("./useVendorBranding", () => ({
+  useVendorBranding: () => new Map(),
+}));
+vi.mock("./useActions", () => ({
+  useActionEntries: () => {},
+}));
+vi.mock("./useAlwaysApproveTag", () => ({
+  useAlwaysApproveTag: () => ({
+    alwaysApproveTag: async () => false,
+    isTagAutoApproved: () => false,
+  }),
+}));
+vi.mock("./useResolveAction", () => ({
+  useResolveAction: () => async () => {},
+}));
+vi.mock("./GatekeeperModal", () => ({ default: () => null }));
+vi.mock("./components/HookToggle", () => ({ HookToggle: () => null }));
+vi.mock("./components/DeleteConfirmationDialog", () => ({ default: () => null }));
+vi.mock("./components/AutoApproveConfirmDialog", () => ({ default: () => null }));
+vi.mock("./components/billing/OutOfCreditsModal", () => ({ default: () => null }));
+
+class ResizeObserverMock {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+
+globalThis.ResizeObserver = ResizeObserverMock;
+HTMLElement.prototype.scrollTo = () => {};
 
 const AUTHOR = { type: "agent", id: "test-model", name: "Test" } as const;
 
@@ -150,6 +195,165 @@ function labels(messages: AiChatMessage[]): string[] {
   );
 }
 
+const USER = { type: "user", id: "reviewer", name: "作成者原文" } as const;
+
+function durableMessage(
+  sequence: number,
+  body: AiChatMessageBody,
+  activityLanguage?: ChatActivityLanguage,
+  author = AUTHOR as AiChatMessage["author"],
+): AiChatMessage {
+  return {
+    chatId: 7,
+    sequence,
+    timestamp: new Date(Date.UTC(2025, 0, 1, 0, sequence)),
+    author,
+    activityLanguage,
+    ...body,
+  } as AiChatMessage;
+}
+
+function durableActivityMessages(
+  activityLanguage?: ChatActivityLanguage,
+): AiChatMessage[] {
+  return [
+    durableMessage(0, {
+      type: "connectionRequest",
+      requestId: "pending-connection",
+      vendorId: "provider",
+      vendorName: "プロバイダー原文",
+      resourceTitle: "リソース原文",
+      reason: "理由原文",
+      state: "pending",
+    }, activityLanguage),
+    durableMessage(1, {
+      type: "connectionRequest",
+      requestId: "accepted-connection",
+      vendorId: "provider",
+      vendorName: "接続済みプロバイダー原文",
+      resourceUrl: "https://resource.example/raw",
+      reason: "接続理由原文",
+      state: "accepted",
+      gatekeeperId: 22,
+    }, activityLanguage),
+    durableMessage(2, {
+      type: "action",
+      actionId: 2,
+      actionLog: {
+        id: 2,
+        type: "action",
+        resourceTitle: "承認リソース原文",
+        createdAt: new Date(Date.UTC(2025, 0, 1)),
+        state: "approved",
+        description: {
+          title: "承認タイトル原文",
+          description: "承認説明原文",
+          implementsRevert: false,
+        },
+      },
+    }, activityLanguage),
+    durableMessage(3, {
+      type: "action",
+      actionId: 3,
+      actionLog: {
+        id: 3,
+        type: "bindHook",
+        resourceTitle: "フックリソース原文",
+        createdAt: new Date(Date.UTC(2025, 0, 1)),
+        state: "approved",
+        description: {
+          title: "フックタイトル原文",
+          description: "フック説明原文",
+        },
+        hookId: 3,
+        enabled: true,
+      },
+    }, activityLanguage),
+    durableMessage(4, { type: "changes" }, activityLanguage),
+    durableMessage(5, { type: "merge", mergeThrough: 4, version: 1 }, activityLanguage, USER),
+    durableMessage(6, { type: "changes" }, activityLanguage),
+    durableMessage(7, { type: "revert", revertFrom: 6 }, activityLanguage, USER),
+    durableMessage(8, { type: "useGadget" }, activityLanguage),
+    durableMessage(9, { type: "error", message: "エラー本文原文" }, activityLanguage),
+  ];
+}
+
+function fakeOverseer(messages: AiChatMessage[]): RpcStub<Overseer> {
+  const metadata: AiChatMetadata = {
+    id: 7,
+    title: "Raw chat title",
+    started: new Date(Date.UTC(2025, 0, 1)),
+    lastActive: new Date(Date.UTC(2025, 0, 1, 0, 9)),
+  };
+  const subscription = Object.assign(new Promise<never>(() => {}), {
+    [Symbol.dispose]() {},
+  });
+  return {
+    subscribeToChat: () => subscription,
+    listChats: async () => [metadata],
+    listModels: async () => [AUTHOR],
+    getChatHistory: async () => ({ messages }),
+  } as unknown as RpcStub<Overseer>;
+}
+
+async function renderDurableActivity(messages: AiChatMessage[]) {
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(createElement(
+      TooltipProvider,
+      null,
+      createElement(
+        Toasty,
+        null,
+        createElement(ChatInterface, {
+          workspaceId: "workspace",
+          overseer: fakeOverseer(messages),
+          selectedChatId: 7,
+          onNavigateToChat: () => {},
+          pendingConsoleLogCount: 0,
+          consoleLogPreview: "",
+          consoleLogSeverity: "info",
+          onConsumeConsoleLogs: () => "",
+          onDiscardConsoleLogs: () => {},
+          onOpenGadget: () => {},
+          outputOfWorkpiece: () => undefined,
+        }),
+      ),
+    ));
+  });
+  for (let attempt = 0; attempt < 10 && !container.textContent?.includes("エラー本文原文"); attempt++) {
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+  }
+  expect(container.textContent).toContain("エラー本文原文");
+  return { container, root };
+}
+
+function expectEnglishDurableActivity(container: HTMLElement) {
+  const text = container.textContent ?? "";
+  expect.soft(text).toContain("Connect プロバイダー原文");
+  expect.soft(text).toContain("Connect 接続済みプロバイダー原文");
+  expect.soft(text).toContain("Connected");
+  expect.soft(text).toContain("リソース原文");
+  expect.soft(text).toContain("https://resource.example/raw");
+  expect.soft(text).toContain("理由原文");
+  expect.soft(text).toContain("接続理由原文");
+  expect.soft(text).toContain("承認タイトル原文");
+  expect.soft(text).toContain("Approved");
+  expect.soft(text).toContain("Hook: フックタイトル原文");
+  expect.soft(text).toContain("Enabled");
+  expect.soft(text).toContain("作成者原文 accepted changes");
+  expect.soft(text).toContain("作成者原文 discarded changes");
+  expect.soft(text).toContain("Used the gadget");
+  expect.soft(text).toContain("Error: エラー本文原文");
+  expect.soft(text).toContain("拒否");
+  expect.soft(text).toContain("設定");
+  expect.soft(text).toContain("再試行");
+}
+
 describe("completed chat activity localization", () => {
   it("renders every completed tool variant in stamped Japanese while preserving raw values", () => {
     const expected: Record<AiToolCall["toolName"], string> = {
@@ -213,6 +417,35 @@ describe("completed chat activity localization", () => {
   it("uses English for legacy unstamped activity", () => {
     expect(labels([toolMessage(1, [TOOL_CALLS.readFile])])).toEqual(["Read src/app.ts"]);
   });
+});
+
+describe("durable non-tool semantic activity localization", () => {
+  let rendered: Awaited<ReturnType<typeof renderDurableActivity>> | undefined;
+
+  afterEach(async () => {
+    if (rendered) {
+      await act(async () => rendered?.root.unmount());
+      rendered.container.remove();
+      rendered = undefined;
+    }
+    await i18n.changeLanguage("en");
+  });
+
+  it("uses each stamped turn language while keeping Japanese UI controls and raw payloads", async () => {
+    expect.hasAssertions();
+    await i18n.changeLanguage("ja");
+    rendered = await renderDurableActivity(durableActivityMessages("en"));
+
+    expectEnglishDurableActivity(rendered.container);
+  }, 15_000);
+
+  it("falls back legacy unstamped activity to English while keeping Japanese UI controls", async () => {
+    expect.hasAssertions();
+    await i18n.changeLanguage("ja");
+    rendered = await renderDurableActivity(durableActivityMessages());
+
+    expectEnglishDurableActivity(rendered.container);
+  }, 15_000);
 });
 
 describe("provisional and status activity catalog", () => {
