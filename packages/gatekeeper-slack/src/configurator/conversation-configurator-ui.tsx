@@ -1,4 +1,4 @@
-import { Autocomplete, Field, h, Section, type ConfiguratorUISpec } from "@gadgets/configurator-ui";
+import { localize, Autocomplete, Field, h, Section, type ConfiguratorUISpec } from "@gadgets/configurator-ui";
 import type {
   ConversationConfiguratorRpc, ConversationConfiguratorValues,
 } from "./conversation-configurator-types";
@@ -21,16 +21,16 @@ export default {
     return conversationId ? { conversationId: decodeURIComponent(conversationId) } : {};
   },
 
-  render({ values, setValues, ui }) {
+  render({ values, setValues, ui, language }) {
     return <Section>
       <Field
-        label="Conversation"
-        description="Choose a channel or direct message this connection can read."
+        label={localize(language, { en: "Conversation", ja: "会話" })}
+        description={localize(language, { en: "Choose a channel or direct message this connection can read.", ja: "この接続が読み取れるチャンネルまたはダイレクトメッセージを選択します。" })}
       >
         <Autocomplete
           name="conversationId"
           value={values.conversationId}
-          placeholder="Search channels and DMs..."
+          placeholder={localize(language, { en: "Search channels and DMs...", ja: "チャンネルと DM を検索..." })}
           loadOptions={query => ui.listConversations(query)}
           onChange={conversationId => setValues({ conversationId })}
         />

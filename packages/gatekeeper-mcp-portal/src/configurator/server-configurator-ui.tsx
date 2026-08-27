@@ -1,4 +1,4 @@
-import {
+import { localize,
   Autocomplete, CheckboxList, Field, h, RadioCards, Section,
   type ConfiguratorUIOption, type ConfiguratorUISpec,
 } from "@gadgets/configurator-ui";
@@ -52,8 +52,13 @@ export default {
       || (values.tools ?? "").split(",").some(name => name.trim().length > 0);
   },
 
-  async resourceUrl({ values, ui }) {
-    if (!values.server) throw new Error("Choose a server behind this portal before adding it.");
+  async resourceUrl({ values, ui, language }) {
+    if (!values.server) {
+      throw new Error(localize(language, {
+        en: "Choose a server behind this portal before adding it.",
+        ja: "追加する前に、このポータルの背後にあるサーバーを選択してください。",
+      }));
+    }
     const endpoint = await ui.getEndpoint();
     const params = new URLSearchParams({ server: values.server });
     if (values.mode !== "all") {
@@ -65,7 +70,7 @@ export default {
     return `${endpoint}#${params}`;
   },
 
-  render({ values, setValues, ui }) {
+  render({ values, setValues, ui, language }) {
     if (values.endpointKind === "unknown") {
       void serverOptions(ui).then(
         servers => setValues({
@@ -79,11 +84,11 @@ export default {
     if (values.endpointKind === "unavailable") {
       return <Section>
         <Field
-          label="Server"
+          label={localize(language, { en: "Server", ja: "サーバー" })}
           description={
-            "Could not reach the portal to list the servers behind it, so there is nothing to " +
-            "grant yet. Close this and try again; if it keeps happening, ask an administrator to " +
-            "check the portal configuration."
+            localize(language, { en: "Could not reach the portal to list the servers behind it, so there is nothing to ", ja: "ポータルに接続して背後のサーバー一覧を取得できなかったため、" }) +
+            localize(language, { en: "grant yet. Close this and try again; if it keeps happening, ask an administrator to ", ja: "現時点では許可できるものがありません。閉じて再試行してください。問題が続く場合は、管理者に" }) +
+            localize(language, { en: "check the portal configuration.", ja: "ポータル設定の確認を依頼してください。" })
           }
         />
       </Section>;
@@ -97,13 +102,13 @@ export default {
 
     return <Section>
       {!soleServer && <Field
-        label="Server"
-        description="Which server behind this portal to grant. Its tools appear next."
+        label={localize(language, { en: "Server", ja: "サーバー" })}
+        description={localize(language, { en: "Which server behind this portal to grant. Its tools appear next.", ja: "このポータルの背後にある、アクセスを許可するサーバーを選択します。次にツールが表示されます。" })}
       >
         <Autocomplete
           name="server"
           value={values.server}
-          placeholder="Search servers behind this portal..."
+          placeholder={localize(language, { en: "Search servers behind this portal...", ja: "ポータルの背後にあるサーバーを検索..." })}
           loadOptions={query => loadServerOptions(ui, query)}
           onChange={server => setValues({ server, tools: null })}
           onClear={() => setValues({ server: null, tools: null })}
@@ -111,22 +116,27 @@ export default {
       </Field>}
 
       {toolsReady && <Field
-        label={soleServer ? `Tools · ${soleServer.title}` : "Tools"}
-        description="Choose how much of this server this connection may call."
+        label={soleServer
+          ? localize(language, {
+              en: `Tools · ${soleServer.title}`,
+              ja: `ツール · ${soleServer.title}`,
+            })
+          : localize(language, { en: "Tools", ja: "ツール" })}
+        description={localize(language, { en: "Choose how much of this server this connection may call.", ja: "この接続が呼び出せるサーバーのツール範囲を選択します。" })}
       >
         <RadioCards
           value={mode}
           options={[
             {
               value: "all",
-              title: "All tools",
-              description: "Every tool this server offers, including ones it adds later.",
+              title: localize(language, { en: "All tools", ja: "すべてのツール" }),
+              description: localize(language, { en: "Every tool this server offers, including ones it adds later.", ja: "このサーバーが提供するすべてのツール（今後追加されるものを含む）。" }),
             },
             {
               value: "choose",
-              title: "Choose tools",
+              title: localize(language, { en: "Choose tools", ja: "ツールを選択" }),
               description:
-                "Only the tools you tick. Anything else is refused, including tools added later.",
+                localize(language, { en: "Only the tools you tick. Anything else is refused, including tools added later.", ja: "チェックしたツールのみ。今後追加されるツールを含め、それ以外は拒否されます。" }),
             },
           ]}
           onChange={next => setValues({ mode: next })}
@@ -134,13 +144,15 @@ export default {
       </Field>}
 
       {toolsReady && <Field
-        label="Allowed tools"
+        label={localize(language, { en: "Allowed tools", ja: "許可するツール" })}
         description={mode === "all"
-          ? "Read-only tools return data straight away; the rest queue for your approval."
+          ? localize(language, { en: "Read-only tools return data straight away; the rest queue for your approval.", ja: "読み取り専用ツールはすぐにデータを返し、それ以外は承認待ちになります。" })
           : selectedCount > 0
-            ? `${selectedCount} selected. Read-only tools return data straight away; the rest `
-              + "queue for your approval."
-            : "Tick at least one tool to grant anything."}
+            ? localize(language, {
+                en: `${selectedCount} selected. Read-only tools return data straight away; the rest queue for your approval.`,
+                ja: `${selectedCount} 件を選択。読み取り専用ツールはすぐにデータを返し、それ以外は承認待ちになります。`,
+              })
+            : localize(language, { en: "Tick at least one tool to grant anything.", ja: "許可するツールを 1 つ以上チェックしてください。" })}
       >
         <CheckboxList
           name={`tools:${serverKey}`}

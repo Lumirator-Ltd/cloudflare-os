@@ -1,6 +1,17 @@
 /** Languages a sandboxed configurator UI can receive from Workshop. */
 export type ConfiguratorUILanguage = "en" | "ja";
 
+/** A complete localized choice for every supported configurator language. */
+export type ConfiguratorUILocalizedText = Record<ConfiguratorUILanguage, string>;
+
+/** Selects localized text. Provided by the configurator UI sandbox runtime. */
+export function localize(
+  _language: ConfiguratorUILanguage,
+  _choices: ConfiguratorUILocalizedText,
+): string {
+  throw new Error("localize is provided by the configurator UI sandbox runtime.");
+}
+
 /** Values owned by a sandboxed configurator UI. */
 export type ConfiguratorUIValues = Record<string, string | null | undefined>;
 

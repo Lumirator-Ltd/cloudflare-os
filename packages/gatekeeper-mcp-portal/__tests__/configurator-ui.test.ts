@@ -8,6 +8,7 @@ import type {
 // The real `h` and the controls throw: the sandbox runtime supplies them at load time. These tests
 // exercise the data flow in `render`, not the markup, so a plain tree is enough.
 vi.mock("@gadgets/configurator-ui", () => ({
+  localize: (language: "en" | "ja", choices: Record<"en" | "ja", string>) => choices[language],
   h: (component: unknown, props: unknown, ...children: unknown[]) =>
     ({ component, props, children }),
   Section: "Section",
@@ -45,6 +46,7 @@ function harness(
     render: () => spec.render({
       values,
       setValues: (patch: Partial<Values>) => { values = { ...values, ...patch }; },
+      language: "en",
       ui,
     } as never),
     get values() { return values; },
@@ -102,7 +104,7 @@ describe("portal configurator", () => {
     await vi.waitFor(() => expect(app.values.endpointKind).toBe("portal"));
     expect(app.values.server).toBeNull();
     expect(spec.isReady({ values: app.values })).toBe(false);
-    await expect(spec.resourceUrl({ values: app.values, ui } as never))
+    await expect(spec.resourceUrl({ values: app.values, ui, language: "en" } as never))
       .rejects.toThrow(/Choose a server/);
   });
 

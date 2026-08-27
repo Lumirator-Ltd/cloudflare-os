@@ -1,4 +1,4 @@
-import { Autocomplete, Field, h, Section, type ConfiguratorUISpec } from "@gadgets/configurator-ui";
+import { localize, Autocomplete, Field, h, Section, type ConfiguratorUISpec } from "@gadgets/configurator-ui";
 import type {
   LinearTeamConfiguratorRpc,
   LinearTeamConfiguratorValues,
@@ -23,13 +23,13 @@ export default {
     return `https://linear.app/${workspaceUrlKey}/team/${values.teamKey}`;
   },
 
-  render({ values, setValues, ui }) {
+  render({ values, setValues, ui, language }) {
     return <Section>
-      <Field label="Team" description="Search the teams in your workspace.">
+      <Field label={localize(language, { en: "Team", ja: "チーム" })} description={localize(language, { en: "Search the teams in your workspace.", ja: "ワークスペース内のチームを検索します。" })}>
         <Autocomplete
           name="teamKey"
           value={values.teamKey}
-          placeholder="Search teams..."
+          placeholder={localize(language, { en: "Search teams...", ja: "チームを検索..." })}
           loadOptions={query => ui.listTeams(query)}
           onChange={teamKey => setValues({ teamKey })}
         />

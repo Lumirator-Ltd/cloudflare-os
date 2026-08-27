@@ -25,7 +25,9 @@ const noUi = new Proxy({}, {
 
 describe("configurator resource URLs", () => {
   it("builds the same account URL the server-side builder does", () => {
-    const url = accountConfigurator.resourceUrl!({ values: { accountId: ACCOUNT_ID }, ui: noUi });
+    const url = accountConfigurator.resourceUrl!({
+      values: { accountId: ACCOUNT_ID }, ui: noUi, language: "en",
+    });
 
     expect(url).toBe(accountObservabilityUrl(ACCOUNT_ID));
     expect(parseObservabilityResourceUrl(url as string)).toEqual({ accountId: ACCOUNT_ID });
@@ -34,7 +36,7 @@ describe("configurator resource URLs", () => {
   it("builds the same Worker URL the server-side builder does", () => {
     const values = { accountId: ACCOUNT_ID, workerName: "api-worker" };
 
-    const url = workerConfigurator.resourceUrl!({ values, ui: noUi });
+    const url = workerConfigurator.resourceUrl!({ values, ui: noUi, language: "en" });
 
     expect(url).toBe(workerObservabilityUrl(ACCOUNT_ID, "api-worker"));
     expect(parseObservabilityResourceUrl(url as string))
@@ -50,6 +52,7 @@ describe("configurator resource URLs", () => {
     const url = workerConfigurator.resourceUrl!({
       values: { accountId: ACCOUNT_ID, workerName },
       ui: noUi,
+      language: "en",
     }) as string;
 
     expect(url).toBe(workerObservabilityUrl(ACCOUNT_ID, workerName));

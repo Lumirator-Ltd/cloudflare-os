@@ -1,4 +1,4 @@
-import { Autocomplete, Field, h, Section, type ConfiguratorUISpec } from "@gadgets/configurator-ui";
+import { localize, Autocomplete, Field, h, Section, type ConfiguratorUISpec } from "@gadgets/configurator-ui";
 import type {
   LinearWorkspaceConfiguratorRpc,
   LinearWorkspaceConfiguratorValues,
@@ -20,13 +20,13 @@ export default {
     return `https://linear.app/${values.workspaceUrlKey}`;
   },
 
-  render({ values, setValues, ui }) {
+  render({ values, setValues, ui, language }) {
     return <Section>
-      <Field label="Workspace" description="The Linear workspace this account is connected to.">
+      <Field label={localize(language, { en: "Workspace", ja: "ワークスペース" })} description={localize(language, { en: "The Linear workspace this account is connected to.", ja: "このアカウントが接続されている Linear ワークスペースです。" })}>
         <Autocomplete
           name="workspaceUrlKey"
           value={values.workspaceUrlKey}
-          placeholder="Select your workspace..."
+          placeholder={localize(language, { en: "Select your workspace...", ja: "ワークスペースを選択..." })}
           loadOptions={() => ui.listWorkspaces()}
           onChange={workspaceUrlKey => setValues({ workspaceUrlKey })}
         />

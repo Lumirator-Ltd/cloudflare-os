@@ -1,4 +1,4 @@
-import { Autocomplete, Field, h, Section, type ConfiguratorUISpec } from "@gadgets/configurator-ui";
+import { localize, Autocomplete, Field, h, Section, type ConfiguratorUISpec } from "@gadgets/configurator-ui";
 import type {
   CloudflareAccountConfiguratorValues,
   CloudflareAccountConfiguratorRpc,
@@ -15,13 +15,13 @@ export default {
     return `https://dash.cloudflare.com/${encodeURIComponent(values.accountId!)}/workers-and-pages/observability`;
   },
 
-  render({ values, setValues, ui }) {
+  render({ values, setValues, ui, language }) {
     return <Section>
-      <Field label="Cloudflare account" description="Queries telemetry across every Worker in this account.">
+      <Field label={localize(language, { en: "Cloudflare account", ja: "Cloudflare アカウント" })} description={localize(language, { en: "Queries telemetry across every Worker in this account.", ja: "このアカウント内のすべての Worker を横断してテレメトリを照会します。" })}>
         <Autocomplete
           name="accountId"
           value={values.accountId}
-          placeholder="Choose an account"
+          placeholder={localize(language, { en: "Choose an account", ja: "アカウントを選択" })}
           loadOptions={query => ui.listAccounts(query)}
           onChange={accountId => setValues({ accountId })}
         />

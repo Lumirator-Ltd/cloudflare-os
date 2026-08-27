@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 // The real `h` and the controls throw: the sandbox runtime supplies them at load time. These tests
 // exercise how a resource URL is read and written, not the markup.
 vi.mock("@gadgets/configurator-ui", () => ({
+  localize: (language: "en" | "ja", choices: Record<"en" | "ja", string>) => choices[language],
   h: (component: unknown, props: unknown, ...children: unknown[]) =>
     ({ component, props, children }),
   Section: "Section",
@@ -61,6 +62,7 @@ describe("an ordinary grant", () => {
     const rendered = JSON.stringify(spec.render({
       values: { mode: "all", tools: null },
       setValues: vi.fn(),
+      language: "en",
       ui: { listToolOptions: vi.fn() },
     } as never));
     expect(rendered).toContain("CheckboxList");
@@ -92,7 +94,7 @@ describe("an ordinary grant", () => {
   it("encodes server tool names before passing them to CheckboxList", async () => {
     const spec = await loadSpec();
     const rendered = spec.render({
-      values: { mode: "choose", tools: null }, setValues: vi.fn(),
+      values: { mode: "choose", tools: null }, setValues: vi.fn(), language: "en",
       ui: { listToolOptions: async () => [{ value: "a,b", title: "A, B" }] },
     } as never);
     const loadOptions = propsFor(rendered, "CheckboxList").loadOptions as () => Promise<unknown[]>;

@@ -1,4 +1,4 @@
-import { Field, h, Section, TextInput, type ConfiguratorUISpec } from "@gadgets/configurator-ui";
+import { localize, Field, h, Section, TextInput, type ConfiguratorUISpec } from "@gadgets/configurator-ui";
 import type { EmailMailboxConfiguratorRpc, EmailMailboxConfiguratorValues } from "./email-configurator-types";
 
 export default {
@@ -18,13 +18,13 @@ export default {
     return ui.resourceUrl(values.emailName);
   },
 
-  render({ values, setValues }) {
+  render({ values, setValues, language }) {
     return <Section>
-      <Field label="Email name" description="Choose the local part of the mailbox address this connection can receive.">
+      <Field label={localize(language, { en: "Email name", ja: "メール名" })} description={localize(language, { en: "Choose the local part of the mailbox address this connection can receive.", ja: "この接続が受信できるメールボックスアドレスのローカル部を選択します。" })}>
         <TextInput
           name="emailName"
           value={values.emailName}
-          placeholder="alerts"
+          placeholder={localize(language, { en: "alerts", ja: "alerts" })}
           onChange={emailName => setValues({ emailName })}
         />
       </Field>

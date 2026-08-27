@@ -10,6 +10,7 @@ import { describe, expect, it, vi } from "vitest";
 vi.mock("@gadgets/configurator-ui", () => {
   const runtimeComponent = (name: string) => Object.assign(() => undefined, { componentName: name });
   return {
+    localize: (language: "en" | "ja", choices: Record<"en" | "ja", string>) => choices[language],
     h: (component: unknown, props: unknown, ...children: unknown[]) =>
       ({ component, props: props ?? {}, children: children.flat() }),
     Fragment: runtimeComponent("Fragment"),
@@ -51,6 +52,7 @@ function renderWith(values: { accountId: string | null; workerName: string | nul
     values,
     setValues: patch => void patches.push(patch),
     clearFields: (...names) => void cleared.push(...names),
+    language: "en",
     ui: new Proxy({}, {
       get() { throw new Error("render must not call the ui capability"); },
     }) as never,
