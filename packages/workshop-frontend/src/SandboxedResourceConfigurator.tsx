@@ -2,10 +2,12 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { RpcStub, RpcTarget, newMessagePortRpcSession } from 'capnweb'
 import { ResourceConfiguratorFrame, ResourceConfiguratorHost, ResourceConfiguratorIframe } from '@gadgets/workshop-shared/gatekeeper'
+import type { SupportedLanguage } from '@gadgets/workshop-shared/api'
 import { createRateLimitedCapability } from './rateLimitedCapability'
 import { useTheme } from './ThemeContext'
 import { forwardTrustedFrameError } from './errorReporting'
 import { useTranslation } from 'react-i18next'
+import { useLanguage } from './i18n/LanguageProvider'
 
 // Upper bound on iframe height. Sized to leave room for a typical configurator form plus an open
 // autocomplete popup, while staying within a reasonable viewport even on short screens.
@@ -15,6 +17,9 @@ const MIN_CONFIGURATOR_HEIGHT = 80
 // extreme values to scroll-jack the host modal.
 const SCROLL_FORWARD_MAX_DELTA = 1000
 const COLLECT_VALUES_TIMEOUT_MS = 5000
+
+type LanguageAwareResourceConfiguratorIframe = ResourceConfiguratorIframe &
+  Required<Pick<ResourceConfiguratorIframe, 'setLanguage'>>
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value))
@@ -29,6 +34,7 @@ class ResourceConfiguratorHostImpl extends RpcTarget implements ResourceConfigur
     private readonly onSelectionReady: (ready: boolean) => void,
     private readonly onScroll: (deltaX: number, deltaY: number) => void,
     private readonly getInitialResourceImpl: () => { resourceUrl: string; resourceUrlPattern: string } | null,
+    private readonly getLanguageImpl: () => SupportedLanguage,
   ) {
     super()
     // The configurator form is short-lived, so a burst past the per-minute cap is always a bug:
@@ -48,6 +54,10 @@ class ResourceConfiguratorHostImpl extends RpcTarget implements ResourceConfigur
 
   async getInitialResource(): Promise<{ resourceUrl: string; resourceUrlPattern: string } | null> {
     return this.getInitialResourceImpl()
+  }
+
+  async getLanguage(): Promise<SupportedLanguage> {
+    return this.getLanguageImpl()
   }
 
   resize(height: number, layoutHeight: number): void {
@@ -84,11 +94,12 @@ export default function SandboxedResourceConfigurator({
   resourceUrlPattern?: string,
 }) {
   const { t } = useTranslation()
+  const { effectiveLanguage } = useLanguage()
   const { resolvedThemeMode } = useTheme()
   const placeholderRef = useRef<HTMLDivElement>(null)
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const rpcSessionRef = useRef<{ [Symbol.dispose]?(): void } | null>(null)
-  const iframeRpcRef = useRef<RpcStub<ResourceConfiguratorIframe> | null>(null)
+  const iframeRpcRef = useRef<RpcStub<LanguageAwareResourceConfiguratorIframe> | null>(null)
   // The configurator stub is an arbitrary gatekeeper-defined capability: its method shape is
   // unknown to Workshop, so we treat it as `any` and let Cap'n Web carry calls through.
   const configuratorRef = useRef<any>(null)
@@ -113,6 +124,8 @@ export default function SandboxedResourceConfigurator({
   initialResourceRef.current = (initialResourceUrl && resourceUrlPattern)
     ? { resourceUrl: initialResourceUrl, resourceUrlPattern }
     : null
+  const languageRef = useRef(effectiveLanguage)
+  languageRef.current = effectiveLanguage
 
   // Cached scroll ancestor of the placeholder. We rediscover it lazily because the modal DOM is
   // stable for the lifetime of the configurator, so walking up via getComputedStyle on every event is
@@ -213,7 +226,7 @@ export default function SandboxedResourceConfigurator({
       return
     }
     rpcSessionRef.current?.[Symbol.dispose]?.()
-    const iframe = newMessagePortRpcSession<ResourceConfiguratorIframe>(port, new ResourceConfiguratorHostImpl(
+    const iframe = newMessagePortRpcSession<LanguageAwareResourceConfiguratorIframe>(port, new ResourceConfiguratorHostImpl(
       configuratorRef.current,
       (nextHeight, nextLayoutHeight) => {
         if (!Number.isFinite(nextHeight)) return
@@ -228,6 +241,7 @@ export default function SandboxedResourceConfigurator({
         clamp(Number(deltaY) || 0, -SCROLL_FORWARD_MAX_DELTA, SCROLL_FORWARD_MAX_DELTA),
       ),
       () => initialResourceRef.current,
+      () => languageRef.current,
     ))
     rpcSessionRef.current = iframe
     iframeRpcRef.current?.[Symbol.dispose]?.()
@@ -301,6 +315,14 @@ export default function SandboxedResourceConfigurator({
     setLayoutHeight(MIN_CONFIGURATOR_HEIGHT)
     updateFrameRect()
   }, [frame.iframeHtml])
+
+  useEffect(() => {
+    const iframe = iframeRpcRef.current
+    if (!iframe || !iframeConnectedRef.current) return
+    try {
+      Promise.resolve(iframe.setLanguage(effectiveLanguage)).catch(() => {})
+    } catch {}
+  }, [effectiveLanguage])
 
   useEffect(() => {
     onCollectResourceUrlChange?.(collectResourceUrl)

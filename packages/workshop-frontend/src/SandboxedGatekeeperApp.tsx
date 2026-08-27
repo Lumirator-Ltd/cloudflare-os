@@ -14,6 +14,7 @@ import { useServerConfig } from './ServerConfigContext'
 import { forwardTrustedFrameError } from './errorReporting'
 import { useAuthenticatedApi } from './AuthContext'
 import { useTranslation } from 'react-i18next'
+import { useLanguage } from './i18n/LanguageProvider'
 import {
   normalizeGatekeeperAppPrompt,
   parseGatekeeperAppWorkspaceTarget,
@@ -220,6 +221,7 @@ export default function SandboxedGatekeeperApp({ frame, gatekeeperVendorId }: {
 }) {
   const navigate = useNavigate()
   const { t } = useTranslation()
+  const { effectiveLanguage } = useLanguage()
   const { authenticatedApi } = useAuthenticatedApi()
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const sessionRef = useRef<{ [Symbol.dispose]?(): void } | null>(null)
@@ -228,17 +230,25 @@ export default function SandboxedGatekeeperApp({ frame, gatekeeperVendorId }: {
   const invalidatedRef = useRef(false)
   const [overlay, setOverlay] = useState<OverlayState>(null)
   const overlayRef = useRef<OverlayState>(null)
-  // Push the Workshop's resolved light/dark mode and deployment accent whenever either changes.
+  // Push Workshop presentation state whenever it changes.
   const { resolvedThemeMode } = useTheme()
   const configuredAccentColor = useServerConfig()?.accentColor
   const accentColor = configuredAccentColor && isHexColor(configuredAccentColor)
     ? configuredAccentColor
     : null
-  const themeRef = useRef<GatekeeperAppTheme>({ mode: resolvedThemeMode, accentColor })
-  themeRef.current = { mode: resolvedThemeMode, accentColor }
+  const themeRef = useRef<GatekeeperAppTheme>({
+    mode: resolvedThemeMode,
+    accentColor,
+    language: effectiveLanguage,
+  })
+  themeRef.current = { mode: resolvedThemeMode, accentColor, language: effectiveLanguage }
   useEffect(() => {
-    hostRef.current?.updateTheme({ mode: resolvedThemeMode, accentColor })
-  }, [resolvedThemeMode, accentColor])
+    hostRef.current?.updateTheme({
+      mode: resolvedThemeMode,
+      accentColor,
+      language: effectiveLanguage,
+    })
+  }, [resolvedThemeMode, accentColor, effectiveLanguage])
 
   const setOverlayPhase = useCallback((next: OverlayState) => {
     if (overlayRef.current === next) return

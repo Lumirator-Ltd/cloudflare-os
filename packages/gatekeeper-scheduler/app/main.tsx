@@ -8,6 +8,7 @@ import SchedulerPage, { type ScheduleManagementClient } from "./SchedulerPage";
 import ErrorBoundary from "./ErrorBoundary";
 import { installErrorReporting, reportIssue } from "./error-reporting";
 import { applyAppTheme } from "./theme";
+import { AppLanguageProvider } from "./i18n";
 import "./styles.css";
 
 installErrorReporting();
@@ -47,14 +48,16 @@ function main() {
         captureMechanism: "react",
       }),
   }).render(
-    <ErrorBoundary>
-      <SchedulerPage
-        api={host.ui}
-        openWorkspace={(workspaceId, gadgetId) => host.openWorkspace(workspaceId, gadgetId)}
-        resolveWorkspaceTitles={(ids) => host.resolveWorkspaceTitles(ids)}
-        openPrompt={(prompt) => host.openPrompt(prompt)}
-      />
-    </ErrorBoundary>,
+    <AppLanguageProvider>
+      <ErrorBoundary>
+        <SchedulerPage
+          api={host.ui}
+          openWorkspace={(workspaceId, gadgetId) => host.openWorkspace(workspaceId, gadgetId)}
+          resolveWorkspaceTitles={(ids) => host.resolveWorkspaceTitles(ids)}
+          openPrompt={(prompt) => host.openPrompt(prompt)}
+        />
+      </ErrorBoundary>
+    </AppLanguageProvider>,
   );
 }
 

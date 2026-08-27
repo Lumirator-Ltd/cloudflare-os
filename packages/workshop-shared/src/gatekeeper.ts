@@ -17,6 +17,7 @@
 // `Adapter` type is the root interface implemented by the service binding.
 
 import type { WorkerEntrypoint, DurableObject, RpcTarget, RpcStub } from "cloudflare:workers";
+import type { SupportedLanguage } from "./theme.js";
 
 /**
  * A pagination cursor.
@@ -419,6 +420,9 @@ export interface ResourceConfiguratorIframe extends RpcTarget {
    * to close open autocomplete dropdowns.
    */
   windowResized(): void;
+
+  /** Applies a live Workshop language change. Optional for compatibility with older runtimes. */
+  setLanguage?(language: SupportedLanguage): void;
 }
 
 /** RPC interface exposed by Workshop to the selection/configuration iframe. */
@@ -432,6 +436,9 @@ export interface ResourceConfiguratorHost extends RpcTarget {
    * pre-filled and editable.
    */
   getInitialResource(): Promise<{ resourceUrl: string; resourceUrlPattern: string } | null>;
+
+  /** Returns the current Workshop language. Optional for compatibility with older hosts. */
+  getLanguage?(): Promise<SupportedLanguage>;
 
   /**
    * Update the parent's iframe sizing to match content in selection/configuration UI.

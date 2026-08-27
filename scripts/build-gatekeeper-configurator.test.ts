@@ -239,6 +239,18 @@ describe("generated configurator error reporting", () => {
   });
 });
 
+describe("generated configurator language propagation", () => {
+  it("applies initial and live host language to the document and configurator contexts", async () => {
+    const runtime = await readRuntime(fixtureDir);
+
+    assert.match(runtime, /await host\.getLanguage\(\)/);
+    assert.match(runtime, /document\.documentElement\.lang = language/);
+    assert.match(runtime, /setLanguage\(nextLanguage\)/);
+    assert.match(runtime, /spec\.render\(\{ ui, values, language, setValues, clearFields, components \}\)/);
+    assert.match(runtime, /spec\?\.resourceUrl\?\.\(\{ values, ui, language \}\)/);
+  });
+});
+
 describe("generated configurator option sanitizing", () => {
   it("truncates an overflowing suggestion list but refuses an overflowing grant list", async () => {
     const { sanitizeOptions } = readRuntimeFunctions(

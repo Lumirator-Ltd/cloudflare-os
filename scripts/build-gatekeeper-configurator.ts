@@ -111,6 +111,7 @@ let host;
 let ui;
 let spec;
 let values = {};
+let language = "en";
 let queryByName = {};
 let validationErrorByName = {};
 let touchedInputs = {};
@@ -209,6 +210,14 @@ function setValues(patch) {
   values = { ...values, ...patch };
   postSelectionState();
   render(active);
+}
+
+function applyLanguage(nextLanguage, rerender = true) {
+  if (nextLanguage !== "en" && nextLanguage !== "ja") return;
+  const changed = language !== nextLanguage;
+  language = nextLanguage;
+  document.documentElement.lang = language;
+  if (changed && rerender) render();
 }
 
 function clearFields(...names) {
@@ -655,7 +664,7 @@ function render(focusState = undefined) {
   renderedCheckboxNames = new Set();
   isRendering = true;
   root.replaceChildren(el("div", { id: "layout-root" }, [
-    spec.render({ ui, values, setValues, clearFields, components }),
+    spec.render({ ui, values, language, setValues, clearFields, components }),
   ]));
   isRendering = false;
   pruneCheckboxEntries(checkboxOptionsByName, renderedCheckboxNames);
@@ -677,7 +686,7 @@ class ResourceConfiguratorIframe extends RpcTarget {
     if (hasBlockingCheckboxFailure(checkboxOptionsByName)) {
       throw new Error("Configurator options did not load.");
     }
-    const resourceUrl = await spec?.resourceUrl?.({ values, ui });
+    const resourceUrl = await spec?.resourceUrl?.({ values, ui, language });
     if (typeof resourceUrl !== "string" || resourceUrl.length === 0) {
       throw new Error("Configurator did not provide a resource URL.");
     }
@@ -700,6 +709,10 @@ class ResourceConfiguratorIframe extends RpcTarget {
         popup.dispatchEvent(new Event("__force-close"));
       }
     }
+  }
+
+  setLanguage(nextLanguage) {
+    applyLanguage(nextLanguage);
   }
 }
 
@@ -743,6 +756,7 @@ async function seedInitialValues() {
       ? await spec.initialValuesFromResourceUrl({
           resourceUrl: initialResource.resourceUrl,
           resourceUrlPattern: initialResource.resourceUrlPattern,
+          language,
           ui,
         })
       : defaultValuesFromResourceUrl(initialResource.resourceUrl, initialResource.resourceUrlPattern);
@@ -766,6 +780,11 @@ async function main() {
   window.parent.postMessage({ type: "handshake" }, "*", [port2]);
   host = newMessagePortRpcSession(port1, new ResourceConfiguratorIframe());
   ui = host.gatekeeper;
+  try {
+    applyLanguage(await host.getLanguage(), false);
+  } catch {
+    applyLanguage("en", false);
+  }
 
   Object.assign(globalThis, { h, Fragment, Section, Field, TextInput, RadioCards, CheckboxList, Autocomplete });
   spec = new Function(${JSON.stringify(configuratorUIModuleSource)})();

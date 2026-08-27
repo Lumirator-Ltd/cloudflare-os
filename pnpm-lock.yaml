@@ -178,9 +178,15 @@ importers:
       capnweb-validate:
         specifier: 'catalog:'
         version: 0.2.4(capnweb@0.11.1)(esbuild@0.28.1)(rollup@4.62.3)(vite@7.3.6(@types/node@26.1.0)(jiti@2.7.0)(lightningcss@1.33.0)(terser@5.49.2)(yaml@2.9.0))
+      i18next:
+        specifier: 26.4.0
+        version: 26.4.0(typescript@7.0.2)
       isomorphic-git:
         specifier: ^1.40.5
         version: 1.40.5
+      react-i18next:
+        specifier: 17.0.12
+        version: 17.0.12(i18next@26.4.0(typescript@7.0.2))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(typescript@7.0.2)
       yaml:
         specifier: ^2.9.0
         version: 2.9.0
@@ -548,6 +554,12 @@ importers:
       capnweb-validate:
         specifier: 'catalog:'
         version: 0.2.4(capnweb@0.11.1)(esbuild@0.28.1)(rollup@4.62.3)(vite@7.3.6(@types/node@26.1.0)(jiti@2.7.0)(lightningcss@1.33.0)(terser@5.49.2)(yaml@2.9.0))
+      i18next:
+        specifier: 26.4.0
+        version: 26.4.0(typescript@7.0.2)
+      react-i18next:
+        specifier: 17.0.12
+        version: 17.0.12(i18next@26.4.0(typescript@7.0.2))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(typescript@7.0.2)
       temporal-polyfill:
         specifier: 1.0.2
         version: 1.0.2

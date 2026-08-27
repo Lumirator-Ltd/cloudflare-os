@@ -26,6 +26,7 @@
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { AccountDescription, ActionKind, ActionDescription, AvatarImage, ConnectorConfigurationInput, GatekeeperUiFrame, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription } from "./gatekeeper.js";
 import type { UiFeatureFlags } from "./feature-flags.js";
+import type { SupportedLanguage } from "./theme.js";
 
 export const SERVICE_SALT = new Uint8Array([
   0xd9, 0x4e, 0x54, 0x1d, 0x29, 0xc1, 0x03, 0x74, 0x73, 0x7e, 0xb3, 0xe3, 0x34, 0x6d, 0x8f, 0x21
@@ -1063,7 +1064,7 @@ export type AdminFormatPatch = {
 };
 
 /** Languages supported by first-party Workshop localization. */
-export type SupportedLanguage = "en" | "ja";
+export type { SupportedLanguage } from "./theme.js";
 
 /** A user's persisted UI language choice. */
 export type LanguagePreference = "auto" | SupportedLanguage;

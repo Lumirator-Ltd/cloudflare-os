@@ -18,6 +18,8 @@
     "@gadgets/workshop-shared": "workspace:*",
     "capnweb": "catalog:",
     "capnweb-validate": "catalog:",
+    "i18next": "26.4.0",
+    "react-i18next": "17.0.12",
     "temporal-polyfill": "1.0.2"
   },
   "devDependencies": {
