@@ -3,16 +3,18 @@ import { DropdownMenu } from '@cloudflare/kumo'
 import { useAuthenticatedApi } from '../AuthContext'
 import { useAvatar } from '../useAvatar'
 import { MENU_CONTENT, MENU_ITEM, MENU_ITEM_DANGER, MENU_POSITIONER_STYLE } from './menuStyles'
+import { useTranslation } from 'react-i18next'
 
 export default function UserMenu() {
   const { authenticatedApi, logout, currentUser, isAdmin } = useAuthenticatedApi()
   const navigate = useNavigate()
+  const { t } = useTranslation()
 
   const avatarUrl = useAvatar(authenticatedApi, currentUser?.id)
 
   const initials = currentUser?.name
     ? currentUser.name.split(' ').map(n => n[0]).join('').slice(0, 2).toUpperCase()
-    : 'U'
+    : t('shell.navigation.defaultUserInitial')
 
   return (
     <DropdownMenu>
@@ -20,8 +22,8 @@ export default function UserMenu() {
         render={
           <button
             className="w-7 h-7 cursor-pointer rounded-full flex items-center justify-center bg-kumo-tint hover:bg-kumo-fill transition-colors overflow-hidden"
-            title="Open profile menu"
-            aria-label="Open profile menu"
+            title={t('shell.navigation.openProfileMenu')}
+            aria-label={t('shell.navigation.openProfileMenu')}
           >
             {avatarUrl ? (
               <img src={avatarUrl} alt="" className="w-full h-full object-cover" />
@@ -36,20 +38,20 @@ export default function UserMenu() {
           onClick={() => navigate({ to: '/profile' })}
           className={MENU_ITEM}
         >
-          Profile
+          {t('shell.navigation.profile')}
         </DropdownMenu.Item>
         <DropdownMenu.Item
           onClick={() => navigate({ to: '/providers' })}
           className={MENU_ITEM}
         >
-          Providers
+          {t('shell.navigation.providers')}
         </DropdownMenu.Item>
         {isAdmin && (
           <DropdownMenu.Item
             onClick={() => navigate({ to: '/admin' })}
             className={MENU_ITEM}
           >
-            Admin
+            {t('shell.navigation.admin')}
           </DropdownMenu.Item>
         )}
         <DropdownMenu.Separator />
@@ -58,7 +60,7 @@ export default function UserMenu() {
           onClick={logout}
           className={MENU_ITEM_DANGER}
         >
-          Sign out
+          {t('shell.navigation.signOut')}
         </DropdownMenu.Item>
       </DropdownMenu.Content>
     </DropdownMenu>

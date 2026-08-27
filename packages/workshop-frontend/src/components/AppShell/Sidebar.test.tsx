@@ -12,6 +12,7 @@ import {
 } from '@tanstack/react-router'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { useOptionalAuthenticatedApi } from '../../AuthContext'
+import i18n from '../../i18n/config'
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 Object.defineProperty(window, 'scrollTo', {
@@ -67,12 +68,13 @@ describe('Sidebar admin navigation', () => {
   let root: Root | undefined
   let container: HTMLDivElement | undefined
 
-  afterEach(() => {
+  afterEach(async () => {
     act(() => root?.unmount())
     container?.remove()
     root = undefined
     container = undefined
     vi.clearAllMocks()
+    await i18n.changeLanguage('en')
   })
 
   async function render({
@@ -192,6 +194,17 @@ describe('Sidebar admin navigation', () => {
 
     expect(toggle?.getAttribute('aria-expanded')).toBe('false')
     expect(rendered.querySelector('a[href^="/admin"]')).toBeNull()
+  })
+
+  it('renders primary and admin navigation in Japanese', async () => {
+    await i18n.changeLanguage('ja')
+    const rendered = await render()
+
+    expect(rendered.textContent).toContain('ホーム')
+    expect(rendered.textContent).toContain('ワークスペース')
+    expect(rendered.textContent).toContain('管理')
+    expect(rendered.textContent).toContain('一般')
+    expect(rendered.textContent).toContain('コネクター')
   })
 
   it('shows icon-only admin links with accessible labels and tooltips when collapsed', async () => {

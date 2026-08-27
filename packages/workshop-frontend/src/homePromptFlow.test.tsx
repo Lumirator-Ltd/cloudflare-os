@@ -3,7 +3,9 @@
 
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import { I18nextProvider } from "react-i18next";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import i18n from "./i18n/config";
 
 const testState = vi.hoisted(() => {
   const classifyRpcError = vi.fn<(error: unknown) => string | undefined>(() => undefined);
@@ -13,6 +15,7 @@ const testState = vi.hoisted(() => {
     options?: unknown,
   ) => boolean>(() => false);
   const listModels = vi.fn<() => Promise<never[]>>(async () => []);
+  const addToast = vi.fn<(toast: unknown) => void>();
   const setTitle = vi.fn<(title: string) => Promise<void>>(async () => {});
   const newChat = vi.fn<() => Promise<number>>(async () => 0);
   const getMetadata = vi.fn<() => Promise<{ id: string }>>(async () => ({ id: "workspace-1" }));
@@ -20,7 +23,8 @@ const testState = vi.hoisted(() => {
   const overseer = { setTitle, newChat, getMetadata, [Symbol.dispose]: dispose };
   const newGadget = vi.fn<() => typeof overseer>(() => overseer);
   return {
-    addToast: vi.fn<(toast: unknown) => void>(),
+    addToast,
+    toastManager: { add: addToast },
     authenticatedApi: { listModels, newGadget },
     classifyRpcError,
     currentUser: { id: "user-a", name: "User A" },
@@ -44,7 +48,7 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
 }));
 
 vi.mock("@cloudflare/kumo", () => ({
-  useKumoToastManager: () => ({ add: testState.addToast }),
+  useKumoToastManager: () => testState.toastManager,
 }));
 
 vi.mock("./AuthContext", () => ({
@@ -99,7 +103,11 @@ describe("Home prompt route flow", () => {
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
-    await act(async () => root!.render(<HomePageContent prompt="Create a daily brief." />));
+    await act(async () => root!.render(
+      <I18nextProvider i18n={i18n}>
+        <HomePageContent prompt="Create a daily brief." />
+      </I18nextProvider>,
+    ));
 
     expect(container.querySelector<HTMLTextAreaElement>('[aria-label="Prompt"]')?.value).toBe(
       "Create a daily brief.",
@@ -114,7 +122,11 @@ describe("Home prompt route flow", () => {
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
-    await act(async () => root!.render(<HomePageContent />));
+    await act(async () => root!.render(
+      <I18nextProvider i18n={i18n}>
+        <HomePageContent />
+      </I18nextProvider>,
+    ));
 
     await act(async () => testState.send!("Plan the Q3 launch", null));
 
@@ -131,7 +143,11 @@ describe("Home prompt route flow", () => {
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
-    await act(async () => root!.render(<HomePageContent />));
+    await act(async () => root!.render(
+      <I18nextProvider i18n={i18n}>
+        <HomePageContent />
+      </I18nextProvider>,
+    ));
 
     await act(async () => testState.send!("Plan the Q3 launch", null));
 

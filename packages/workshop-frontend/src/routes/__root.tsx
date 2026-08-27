@@ -15,6 +15,8 @@ import LoginPage from '../LoginPage'
 import OnboardingWizard from '../OnboardingWizard'
 import AccountSelectionModal from '../components/billing/AccountSelectionModal'
 import { LanguageProvider } from '../i18n/LanguageProvider'
+import AnnouncementBanner from '../components/AnnouncementBanner'
+import { useTranslation } from 'react-i18next'
 
 export const Route = createRootRoute({
   component: RootComponent,
@@ -26,7 +28,10 @@ function RootComponent() {
   const { isAuthenticated, authenticatedApi, isLoading, error, logout, login } = useAuth(rpcStub)
   const pathname = useRouterState({ select: (s) => s.location.pathname })
   const withLanguage = (children: ReactNode) => (
-    <LanguageProvider authenticatedApi={authenticatedApi}>{children}</LanguageProvider>
+    <LanguageProvider authenticatedApi={authenticatedApi}>
+      <AnnouncementBanner />
+      {children}
+    </LanguageProvider>
   )
 
   // When authenticatedApi becomes available, the connection is proven alive.
@@ -59,7 +64,7 @@ function RootComponent() {
     return withLanguage(
       <div className="min-h-screen flex items-center justify-center flex-col gap-4 bg-kumo-base">
         <div className="w-8 h-8 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin" />
-        <p className="text-sm text-kumo-subtle">{connectionLost ? 'Waiting for server…' : 'Loading...'}</p>
+        <BootStatus kind={connectionLost ? 'waiting' : 'loading'} />
       </div>,
     )
   }
@@ -68,12 +73,12 @@ function RootComponent() {
   if (error && !standalone) {
     return withLanguage(
       <div className="min-h-screen flex items-center justify-center flex-col gap-4 bg-kumo-base p-6">
-        <p className="text-sm text-kumo-danger">Authentication error: {error}</p>
+        <BootStatus kind="error" error={error} />
         <button
           onClick={() => window.location.reload()}
           className="px-4 py-2 text-sm font-medium text-kumo-inverse bg-kumo-brand rounded-lg hover:bg-kumo-brand-hover transition-colors"
         >
-          Retry
+          <BootStatus kind="retry" />
         </button>
       </div>,
     )
@@ -84,7 +89,7 @@ function RootComponent() {
     return withLanguage(
       <div className="min-h-screen flex items-center justify-center flex-col gap-4 bg-kumo-base">
         <div className="w-8 h-8 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin" />
-        <p className="text-sm text-kumo-subtle">Authenticating...</p>
+        <BootStatus kind="authenticating" />
       </div>,
     )
   }
@@ -125,6 +130,27 @@ function RootComponent() {
       </FeatureFlagsProvider>
     </AuthProvider>,
   )
+}
+
+function BootStatus({
+  kind,
+  error,
+}: {
+  kind: 'waiting' | 'loading' | 'error' | 'retry' | 'authenticating'
+  error?: string
+}) {
+  const { t } = useTranslation()
+  const message = {
+    waiting: t('shell.status.waitingForServer'),
+    loading: t('shell.status.loading'),
+    error: t('shell.status.authenticationError', { error }),
+    retry: t('shell.status.retry'),
+    authenticating: t('shell.status.authenticating'),
+  }[kind]
+  const className = kind === 'error'
+    ? 'text-sm text-kumo-danger'
+    : kind === 'retry' ? undefined : 'text-sm text-kumo-subtle'
+  return <span className={className}>{message}</span>
 }
 
 /**

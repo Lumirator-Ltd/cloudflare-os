@@ -5,25 +5,26 @@ import {
   OPEN_GADGET_ERROR_CODES,
 } from '@gadgets/workshop-shared/api'
 import { WorkshopButton } from './WorkshopControls'
+import { useTranslation } from 'react-i18next'
 
 export type WorkspaceOpenFailureKind = 'access-denied' | 'not-found' | 'unexpected'
 
 const CONTENT = {
   'access-denied': {
-    title: "You don't have access to this workspace",
-    message: 'Ask the workspace owner to grant you access, then try again.',
+    titleKey: 'shell.workspaces.openError.accessDeniedTitle',
+    messageKey: 'shell.workspaces.openError.accessDeniedMessage',
     Icon: Lock,
     retryable: true,
   },
   'not-found': {
-    title: 'Workspace not found',
-    message: 'The link may be incorrect, or the workspace may have been deleted.',
+    titleKey: 'shell.workspaces.openError.notFoundTitle',
+    messageKey: 'shell.workspaces.openError.notFoundMessage',
     Icon: MagnifyingGlass,
     retryable: false,
   },
   unexpected: {
-    title: "We couldn't load this workspace",
-    message: 'Try again. If the problem continues, return to your workspaces.',
+    titleKey: 'shell.workspaces.openError.unexpectedTitle',
+    messageKey: 'shell.workspaces.openError.unexpectedMessage',
     Icon: WarningCircle,
     retryable: true,
   },
@@ -47,7 +48,8 @@ type Props = {
 }
 
 export default function WorkspaceOpenErrorPage({ kind, onRetry, onGoToWorkspaces }: Props) {
-  const { title, message, Icon, retryable } = CONTENT[kind]
+  const { titleKey, messageKey, Icon, retryable } = CONTENT[kind]
+  const { t } = useTranslation()
   const titleId = useId()
   const descriptionId = useId()
   const titleRef = useRef<HTMLHeadingElement>(null)
@@ -74,13 +76,13 @@ export default function WorkspaceOpenErrorPage({ kind, onRetry, onGoToWorkspaces
           tabIndex={-1}
           className="mt-5 text-[20px] leading-7 font-semibold tracking-[-0.35px] text-kumo-default outline-none"
         >
-          {title}
+          {t(titleKey)}
         </h1>
         <p
           id={descriptionId}
           className="mt-2 text-[13px] leading-[18px] tracking-[-0.25px] text-kumo-subtle"
         >
-          {message}
+          {t(messageKey)}
         </p>
         <div className="mt-6 flex flex-wrap items-center justify-center gap-2">
           <WorkshopButton
@@ -88,11 +90,11 @@ export default function WorkspaceOpenErrorPage({ kind, onRetry, onGoToWorkspaces
             className="!h-9"
             onClick={onGoToWorkspaces}
           >
-            Go to workspaces
+            {t('shell.workspaces.openError.goToWorkspaces')}
           </WorkshopButton>
           {retryable && (
             <WorkshopButton tone="primary" onClick={onRetry}>
-              Try again
+              {t('shell.workspaces.openError.tryAgain')}
             </WorkshopButton>
           )}
         </div>

@@ -7,6 +7,7 @@ import {
   AiGatewayInfo,
 } from '@gadgets/workshop-shared/api'
 import {
+  CONNECTOR_NOT_CONFIGURED_MESSAGE,
   VendorDescription,
 } from '@gadgets/workshop-shared/gatekeeper'
 import {
@@ -31,12 +32,9 @@ import { useTheme } from './ThemeContext'
 import { useSiteName } from './ServerConfigContext'
 import SiteLogo from './components/SiteLogo'
 import { useDocumentTitle } from './useDocumentTitle'
-import {
-  CONNECTOR_SETUP_GUIDANCE,
-  connectionErrorMessage,
-  connectorIsConfigured,
-} from './connectorReadiness'
+import { connectorIsConfigured } from './connectorReadiness'
 import { AccountsSubscriberAdapter } from './accountsSubscriber'
+import { useTranslation } from 'react-i18next'
 
 // ─── constants ──────────────────────────────────────────────────────────────────
 
@@ -78,6 +76,7 @@ export function OnboardingConnectorButton({
   const Logo = logoComponents[VENDOR_LOGO_MAP[vendorId] ?? vendorId.toLowerCase()]
   const configured = connectorIsConfigured(description)
   const disabled = connected || connecting || !configured
+  const { t } = useTranslation()
 
   return (
     <button
@@ -111,12 +110,12 @@ export function OnboardingConnectorButton({
         </p>
         <p className="text-xs text-kumo-subtle">
           {connected
-            ? 'Connected'
+            ? t('shell.onboarding.connected')
             : connecting
-              ? 'Connecting...'
+              ? t('shell.onboarding.connecting')
               : configured
-                ? 'Not connected'
-                : CONNECTOR_SETUP_GUIDANCE}
+                ? t('shell.onboarding.notConnected')
+                : t('shell.onboarding.connectorSetup')}
         </p>
       </div>
       {connected && (
@@ -144,7 +143,8 @@ export default function OnboardingWizard({
   const { resolvedThemeMode } = useTheme()
   const toasts = useKumoToastManager()
   const siteName = useSiteName()
-  useDocumentTitle('Setup')
+  const { t } = useTranslation()
+  useDocumentTitle(t('shell.pageTitle.setup'))
 
   // Wizard state
   const [step, setStep] = useState(0) // 0 = avatar, 1 = model, 2 = connections
@@ -301,7 +301,7 @@ export default function OnboardingWizard({
 
   const handleFileSelect = async (file: File) => {
     if (!file.type.startsWith('image/')) {
-      toasts.add({ title: 'Please select an image file', variant: 'error' })
+      toasts.add({ title: t('shell.onboarding.imageRequired'), variant: 'error' })
       return
     }
     setAvatarProcessing(true)
@@ -312,7 +312,7 @@ export default function OnboardingWizard({
       setAvatarPreview(avatarBlobUrl(compressed))
     } catch (err) {
       console.error('Failed to process avatar:', err)
-      toasts.add({ title: 'Failed to process image', variant: 'error' })
+      toasts.add({ title: t('shell.onboarding.imageProcessingError'), variant: 'error' })
     } finally {
       setAvatarProcessing(false)
     }
@@ -334,7 +334,9 @@ export default function OnboardingWizard({
     } catch (err) {
       console.error('Failed to start connection:', err)
       toasts.add({
-        title: connectionErrorMessage(err, 'Failed to start connection'),
+        title: err instanceof Error && err.message === CONNECTOR_NOT_CONFIGURED_MESSAGE
+          ? t('shell.onboarding.connectorSetup')
+          : t('shell.onboarding.connectionStartError'),
         variant: 'error',
       })
     } finally {
@@ -377,7 +379,7 @@ export default function OnboardingWizard({
       onComplete()
     } catch (err) {
       console.error('Failed to complete onboarding:', err)
-      toasts.add({ title: 'Something went wrong. Please try again.', variant: 'error' })
+      toasts.add({ title: t('shell.onboarding.completionError'), variant: 'error' })
       setFinishing(false)
     }
   }
@@ -432,14 +434,14 @@ export default function OnboardingWizard({
               mounted ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-2'
             }`}
           >
-            Let&apos;s set you up
+            {t('shell.onboarding.title')}
           </h1>
           <p
             className={`mt-2 text-sm text-kumo-subtle transition-all duration-500 delay-200 ${
               mounted ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-2'
             }`}
           >
-            Just a few things before you start building
+            {t('shell.onboarding.subtitle')}
           </p>
         </div>
 
@@ -468,10 +470,10 @@ export default function OnboardingWizard({
             {/* ── Step 0: Profile ───────────────────────────────────────────── */}
             <div className="w-full flex-shrink-0 p-8 min-h-[420px]">
               <h2 className="text-lg font-medium text-kumo-default mb-1">
-                Create your profile
+                {t('shell.onboarding.profileTitle')}
               </h2>
               <p className="text-sm text-kumo-subtle mb-12">
-                This is how you&apos;ll appear in conversations
+                {t('shell.onboarding.profileDescription')}
               </p>
 
               {/* Avatar + Display name side by side */}
@@ -497,7 +499,7 @@ export default function OnboardingWizard({
                       <>
                         <img
                           src={avatarPreview}
-                          alt="Avatar preview"
+                          alt={t('shell.onboarding.avatarPreview')}
                           className="w-full h-full rounded-full object-cover"
                         />
                         <div className="absolute inset-0 rounded-full bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
@@ -529,7 +531,7 @@ export default function OnboardingWizard({
                     }}
                   />
                   <p className="text-xs text-kumo-inactive mt-1.5">
-                    {avatarPreview ? 'Change' : 'Add photo'}
+                    {avatarPreview ? t('shell.onboarding.changePhoto') : t('shell.onboarding.addPhoto')}
                   </p>
                 </div>
 
@@ -539,14 +541,14 @@ export default function OnboardingWizard({
                     htmlFor="onboarding-display-name"
                     className="block text-xs font-medium text-kumo-subtle mb-1.5"
                   >
-                    Display name
+                    {t('shell.onboarding.displayName')}
                   </label>
                   <input
                     id="onboarding-display-name"
                     type="text"
                     value={displayName}
                     onChange={(e) => setDisplayName(e.target.value)}
-                    placeholder="How should we call you?"
+                    placeholder={t('shell.onboarding.displayNamePlaceholder')}
                     className="w-full px-3 py-2.5 text-sm rounded-lg border border-kumo-line bg-kumo-base text-kumo-default placeholder:text-kumo-inactive focus:outline-none focus:border-kumo-brand transition-colors"
                   />
                 </div>
@@ -557,10 +559,10 @@ export default function OnboardingWizard({
             <div className="w-full flex-shrink-0 p-8 min-h-[420px]">
               <div>
                 <h2 className="text-lg font-medium text-kumo-default mb-1">
-                  Choose your model
+                  {t('shell.onboarding.modelTitle')}
                 </h2>
                 <p className="text-sm text-kumo-subtle mb-6">
-                  Pick the AI model you&apos;d like to use by default
+                  {t('shell.onboarding.modelDescription')}
                 </p>
 
                 {modelsLoading ? (
@@ -616,10 +618,10 @@ export default function OnboardingWizard({
                       {models.length === 0 && (
                         <div className="text-center py-8">
                           <p className="text-sm text-kumo-subtle mb-1">
-                            No models configured yet
+                            {t('shell.onboarding.noModels')}
                           </p>
                           <p className="text-xs text-kumo-inactive">
-                            Add a model to get started
+                            {t('shell.onboarding.addModelGuidance')}
                           </p>
                         </div>
                       )}
@@ -630,7 +632,7 @@ export default function OnboardingWizard({
                       className="mt-3 w-full flex items-center justify-center gap-2 px-4 py-2.5 text-sm font-medium text-kumo-subtle border border-dashed border-kumo-line rounded-xl hover:border-kumo-fill hover:text-kumo-default hover:bg-kumo-tint transition-colors"
                     >
                       <Plus size={14} weight="bold" />
-                      Add new model...
+                      {t('shell.onboarding.addModel')}
                     </button>
                   </>
                 )}
@@ -641,10 +643,10 @@ export default function OnboardingWizard({
             <div className={`w-full flex-shrink-0 p-8 min-h-[420px] ${showConnectionsStep ? '' : 'hidden'}`}>
               <div>
                 <h2 className="text-lg font-medium text-kumo-default mb-1">
-                  Connect your services
+                  {t('shell.onboarding.connectionsTitle')}
                 </h2>
                 <p className="text-sm text-kumo-subtle mb-6">
-                  Link your accounts so your gadgets can access them. You can always add more later.
+                  {t('shell.onboarding.connectionsDescription')}
                 </p>
 
                 {vendorsLoading ? (
@@ -654,7 +656,7 @@ export default function OnboardingWizard({
                 ) : vendors.length === 0 ? (
                   <div className="text-center py-8">
                     <p className="text-sm text-kumo-subtle">
-                      No services available
+                      {t('shell.onboarding.noServices')}
                     </p>
                   </div>
                 ) : (
@@ -674,7 +676,7 @@ export default function OnboardingWizard({
                 )}
 
                 <p className="text-xs text-kumo-inactive mt-4 text-center">
-                  Optional &middot; you can manage connections any time
+                  {t('shell.onboarding.connectionsOptional')}
                 </p>
               </div>
             </div>
@@ -693,7 +695,7 @@ export default function OnboardingWizard({
                 onClick={goBack}
                 className="text-sm text-kumo-subtle hover:text-kumo-default transition-colors"
               >
-                Back
+                {t('shell.onboarding.back')}
               </button>
             ) : (
               <span />
@@ -706,7 +708,7 @@ export default function OnboardingWizard({
                   onClick={goNext}
                   className="flex items-center gap-2 px-5 py-2.5 text-sm font-medium rounded-lg transition-all duration-150 text-kumo-inverse bg-kumo-brand hover:bg-kumo-brand-hover"
                 >
-                  Next
+                  {t('shell.onboarding.next')}
                   <ArrowRight size={14} weight="bold" />
                 </button>
               ) : (
@@ -725,11 +727,11 @@ export default function OnboardingWizard({
                   {finishing ? (
                     <>
                       <div className="w-4 h-4 border-2 border-kumo-inverse/30 border-t-kumo-inverse rounded-full animate-spin" />
-                      Setting up...
+                      {t('shell.onboarding.settingUp')}
                     </>
                   ) : (
                     <>
-                      Let&apos;s build
+                      {t('shell.onboarding.letsBuild')}
                       <ArrowRight size={14} weight="bold" />
                     </>
                   )}
@@ -764,8 +766,7 @@ interface ShowcaseFeature {
   icon: typeof Sparkle
   iconColor: string
   iconBg: string
-  title: string
-  description: string
+  translationKey: string
 }
 
 const SHOWCASE_FEATURES: ShowcaseFeature[] = [
@@ -773,37 +774,30 @@ const SHOWCASE_FEATURES: ShowcaseFeature[] = [
     icon: Sparkle,
     iconColor: 'text-media-100',
     iconBg: 'bg-media-200',
-    title: 'Build gadgets or just chat',
-    description:
-      'Create full web apps, or keep it simple with agent-only conversations. Your call.',
+    translationKey: 'build',
   },
   {
     icon: UsersThree,
     iconColor: 'text-compute-100',
     iconBg: 'bg-compute-200',
-    title: 'Collaborate in real time',
-    description:
-      'Share a workspace with teammates and work on it together, live.',
+    translationKey: 'collaborate',
   },
   {
     icon: Key,
     iconColor: 'text-kumo-warning',
     iconBg: 'bg-kumo-warning-tint',
-    title: 'Bring your own models',
-    description:
-      'Plug in personal API tokens from any provider to use the models you love.',
+    translationKey: 'models',
   },
   {
     icon: Plugs,
     iconColor: 'text-storage-100',
     iconBg: 'bg-storage-200',
-    title: 'AI meets your tools',
-    description:
-      'Have AI review a Google Doc, summarize Slack threads, triage Jira tickets, and more.',
+    translationKey: 'tools',
   },
 ]
 
 function ShowcaseStep({ active, siteName }: { active: boolean; siteName: string }) {
+  const { t } = useTranslation()
   // Mount-trigger for staggered fade-in when the step becomes visible
   const [revealed, setRevealed] = useState(false)
 
@@ -819,10 +813,10 @@ function ShowcaseStep({ active, siteName }: { active: boolean; siteName: string 
     <div>
       <div className="text-center mb-6">
         <h2 className="text-lg font-medium text-kumo-default mb-1">
-          You&apos;re all set
+          {t('shell.onboarding.showcaseTitle')}
         </h2>
         <p className="text-sm text-kumo-subtle">
-          Here&apos;s a taste of what you can do with {siteName}
+          {t('shell.onboarding.showcaseDescription', { siteName })}
         </p>
       </div>
 
@@ -831,7 +825,7 @@ function ShowcaseStep({ active, siteName }: { active: boolean; siteName: string 
           const Icon = feature.icon
           return (
             <div
-              key={feature.title}
+              key={feature.translationKey}
               className={`
                 flex items-start gap-3 p-3.5 rounded-xl border border-kumo-line bg-kumo-base
                 transition-all ease-out
@@ -852,10 +846,10 @@ function ShowcaseStep({ active, siteName }: { active: boolean; siteName: string 
               </div>
               <div className="flex-1 min-w-0 pt-0.5">
                 <p className="text-sm font-medium text-kumo-default">
-                  {feature.title}
+                  {t(`shell.onboarding.showcase.${feature.translationKey}.title`)}
                 </p>
                 <p className="text-xs text-kumo-subtle mt-0.5 leading-relaxed">
-                  {feature.description}
+                  {t(`shell.onboarding.showcase.${feature.translationKey}.description`)}
                 </p>
               </div>
             </div>

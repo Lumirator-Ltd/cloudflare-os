@@ -3,8 +3,10 @@
 
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
+import { I18nextProvider } from 'react-i18next'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { VendorDescription } from '@gadgets/workshop-shared/gatekeeper'
+import i18n from './i18n/config'
 import { OnboardingConnectorButton } from './OnboardingWizard'
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -24,9 +26,10 @@ describe('onboarding connectors', () => {
   let root: Root | undefined
   let container: HTMLDivElement | undefined
 
-  afterEach(() => {
+  afterEach(async () => {
     act(() => root?.unmount())
     container?.remove()
+    await i18n.changeLanguage('en')
   })
 
   function render(description: VendorDescription) {
@@ -36,14 +39,16 @@ describe('onboarding connectors', () => {
     const onConnect = vi.fn<() => void>()
     act(() => {
       root!.render(
-        <OnboardingConnectorButton
-          vendorId="example"
-          description={description}
-          resolvedThemeMode="light"
-          connected={false}
-          connecting={false}
-          onConnect={onConnect}
-        />,
+        <I18nextProvider i18n={i18n}>
+          <OnboardingConnectorButton
+            vendorId="example"
+            description={description}
+            resolvedThemeMode="light"
+            connected={false}
+            connecting={false}
+            onConnect={onConnect}
+          />
+        </I18nextProvider>,
       )
     })
     return { button: container.querySelector('button') as HTMLButtonElement, onConnect }
@@ -66,5 +71,13 @@ describe('onboarding connectors', () => {
     expect(button.textContent).toContain('Not connected')
     act(() => button.click())
     expect(onConnect).toHaveBeenCalledOnce()
+  })
+
+  it('renders connector status in Japanese while preserving the vendor name', async () => {
+    await i18n.changeLanguage('ja')
+    const { button } = render(CONFIGURED)
+
+    expect(button.textContent).toContain('Configured')
+    expect(button.textContent).toContain('未接続')
   })
 })

@@ -11,32 +11,34 @@ import {
 import { useOptionalAuthenticatedApi } from '../../AuthContext'
 import { adminTabFromSearch, type AdminTab } from '../../adminNavigation'
 import SidebarItem from './SidebarItem'
+import { useTranslation } from 'react-i18next'
 
 type AdminSidebarItem = {
-  label: string
+  labelKey: string
   to: '/admin' | '/admin/connectors'
   icon: ReactNode
   tab?: AdminTab
 }
 
 const ADMIN_ITEMS: AdminSidebarItem[] = [
-  { label: 'General', to: '/admin', tab: 'general', icon: <GearSix size={14} /> },
-  { label: 'Gatekeepers', to: '/admin', tab: 'gatekeepers', icon: <PlugsConnected size={14} /> },
-  { label: 'Access', to: '/admin', tab: 'access', icon: <ShieldCheck size={14} /> },
-  { label: 'Formats', to: '/admin', tab: 'formats', icon: <FileCode size={14} /> },
-  { label: 'Connectors', to: '/admin/connectors', icon: <Key size={14} /> },
+  { labelKey: 'shell.navigation.adminGeneral', to: '/admin', tab: 'general', icon: <GearSix size={14} /> },
+  { labelKey: 'shell.navigation.adminGatekeepers', to: '/admin', tab: 'gatekeepers', icon: <PlugsConnected size={14} /> },
+  { labelKey: 'shell.navigation.adminAccess', to: '/admin', tab: 'access', icon: <ShieldCheck size={14} /> },
+  { labelKey: 'shell.navigation.adminFormats', to: '/admin', tab: 'formats', icon: <FileCode size={14} /> },
+  { labelKey: 'shell.navigation.adminConnectors', to: '/admin/connectors', icon: <Key size={14} /> },
 ]
 
 export default function AdminSidebarSection({ collapsed }: { collapsed: boolean }) {
   const auth = useOptionalAuthenticatedApi()
   const location = useRouterState({ select: (state) => state.location })
   const [open, setOpen] = useState(true)
+  const { t } = useTranslation()
 
   if (!auth?.isAdmin) return null
 
   const activeTab = adminTabFromSearch(location.search.tab)
   const links = (
-    <nav aria-label="Admin" className="flex flex-col gap-0.5">
+    <nav aria-label={t('shell.navigation.admin')} className="flex flex-col gap-0.5">
       {ADMIN_ITEMS.map((item) => {
         const search = item.tab === 'general'
           ? { tab: undefined }
@@ -46,10 +48,10 @@ export default function AdminSidebarSection({ collapsed }: { collapsed: boolean 
           : location.pathname === '/admin' && activeTab === item.tab
         return (
           <SidebarItem
-            key={item.label}
+            key={item.labelKey}
             to={item.to}
             search={search}
-            label={item.label}
+            label={t(item.labelKey)}
             icon={item.icon}
             collapsed={collapsed}
             active={active}
@@ -76,7 +78,7 @@ export default function AdminSidebarSection({ collapsed }: { collapsed: boolean 
           weight="bold"
           className={['transition-transform', open ? '' : '-rotate-90'].join(' ')}
         />
-        <span>Admin</span>
+        <span>{t('shell.navigation.admin')}</span>
       </button>
       {open && <div className="mt-0.5">{links}</div>}
     </section>
