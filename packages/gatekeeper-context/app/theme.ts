@@ -40,12 +40,13 @@ export function applyThemeMode(mode: ResolvedThemeMode): void {
 
 /** Applies a host presentation update to the app document. */
 export function applyAppTheme(theme: GatekeeperAppTheme): void {
+  const language: SupportedLanguage = theme.language === "ja" ? "ja" : "en";
   applyThemeMode(theme.mode);
   applyAccentColor(document.documentElement.style, theme.accentColor);
-  document.documentElement.lang = theme.language;
-  if (theme.language === currentLanguage) return;
-  currentLanguage = theme.language;
-  for (const listener of languageListeners) listener(theme.language);
+  document.documentElement.lang = language;
+  if (language === currentLanguage) return;
+  currentLanguage = language;
+  for (const listener of languageListeners) listener(language);
 }
 
 /** Subscribe to mode changes. Returns an unsubscribe function. */

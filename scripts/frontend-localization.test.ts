@@ -50,6 +50,14 @@ const SOURCE_LITERAL_ALLOWLIST = new Set([
 ]);
 
 const CATALOG_EQUALITY_ALLOWLIST = {
+  common: new Set([
+    "language.english",
+    "language.japanese",
+  ]),
+  chat: new Set<string>(),
+  admin: new Set([
+    "models.apiUrl",
+  ]),
   shell: new Set<string>(),
   workspace: new Set([
     "workspace.files.filenamePlaceholder",
@@ -186,14 +194,24 @@ function leafEntries(value: unknown, prefix = ""): Array<[string, string]> {
   );
 }
 
-async function loadTypeScriptExport(path: string, exportName: string): Promise<unknown> {
-  const output = ts.transpileModule(readFileSync(path, "utf8"), {
+async function loadTypeScriptExport(
+  path: string,
+  exportName: string,
+  importedValues: Record<string, unknown> = {},
+): Promise<unknown> {
+  let output = ts.transpileModule(readFileSync(path, "utf8"), {
     compilerOptions: {
       module: ts.ModuleKind.ESNext,
       target: ts.ScriptTarget.ES2022,
     },
     fileName: path,
   }).outputText;
+  if (Object.keys(importedValues).length > 0) {
+    output = output.replaceAll(/^import\s+\{[^}]+\}\s+from\s+["'][^"']+["'];\n?/gm, "");
+    output = Object.entries(importedValues)
+      .map(([name, value]) => `const ${name} = ${JSON.stringify(value)};`)
+      .join("\n") + output;
+  }
   const module = await import(`data:text/javascript;base64,${Buffer.from(output).toString("base64")}`) as
     Record<string, unknown>;
   assert.ok(exportName in module, `${path} does not export ${exportName}`);
@@ -238,13 +256,36 @@ describe("frontend localization completion gate", () => {
     assert.deepEqual(findings, []);
   });
 
-  it("keeps shell and workspace Japanese catalogs complete and translated", async () => {
-    const [enShell, jaShell, enWorkspace, jaWorkspace] = await Promise.all([
+  it("keeps Workshop Japanese catalogs complete and translated", async () => {
+    const [
+      enCommon,
+      jaCommon,
+      enChat,
+      jaChat,
+      enAdmin,
+      enShell,
+      jaShell,
+      enWorkspace,
+      jaWorkspace,
+    ] = await Promise.all([
+      loadTypeScriptExport("packages/workshop-frontend/src/i18n/locales/en/common.ts", "enCommon"),
+      loadTypeScriptExport("packages/workshop-frontend/src/i18n/locales/ja/common.ts", "jaCommon"),
+      loadTypeScriptExport("packages/workshop-frontend/src/i18n/locales/en/chat.ts", "enChat"),
+      loadTypeScriptExport("packages/workshop-frontend/src/i18n/locales/ja/chat.ts", "jaChat"),
+      loadTypeScriptExport("packages/workshop-frontend/src/i18n/locales/en/admin.ts", "enAdmin"),
       loadTypeScriptExport("packages/workshop-frontend/src/i18n/locales/en/shell.ts", "enShell"),
       loadTypeScriptExport("packages/workshop-frontend/src/i18n/locales/ja/shell.ts", "jaShell"),
       loadTypeScriptExport("packages/workshop-frontend/src/i18n/locales/en/workspace.ts", "enWorkspace"),
       loadTypeScriptExport("packages/workshop-frontend/src/i18n/locales/ja/workspace.ts", "jaWorkspace"),
     ]);
+    const jaAdmin = await loadTypeScriptExport(
+      "packages/workshop-frontend/src/i18n/locales/ja/admin.ts",
+      "jaAdmin",
+      { enAdmin },
+    );
+    assertCatalogCoverage("common", enCommon, jaCommon);
+    assertCatalogCoverage("chat", enChat, jaChat);
+    assertCatalogCoverage("admin", enAdmin, jaAdmin);
     assertCatalogCoverage("shell", enShell, jaShell);
     assertCatalogCoverage("workspace", enWorkspace, jaWorkspace);
   });

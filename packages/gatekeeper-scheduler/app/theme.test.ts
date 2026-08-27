@@ -1,5 +1,9 @@
-import { afterEach, describe, expect, it } from "vitest";
-import { applyAppTheme } from "./theme";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  applyAppTheme,
+  getAppLanguage,
+  subscribeAppLanguage,
+} from "./theme";
 
 describe("applyAppTheme", () => {
   afterEach(() => {
@@ -23,5 +27,33 @@ describe("applyAppTheme", () => {
     expect(document.documentElement.lang).toBe("en");
     expect(document.documentElement.style.colorScheme).toBe("light");
     expect(document.documentElement.style.getPropertyValue("--color-kumo-brand")).toBe("");
+  });
+
+  it("defaults a legacy theme without language to English", () => {
+    applyAppTheme({ mode: "dark", accentColor: null, language: "ja" });
+    const listener = vi.fn();
+    const unsubscribe = subscribeAppLanguage(listener);
+
+    applyAppTheme({ mode: "light", accentColor: null });
+
+    expect(document.documentElement.lang).toBe("en");
+    expect(getAppLanguage()).toBe("en");
+    expect(listener).toHaveBeenCalledWith("en");
+
+    unsubscribe();
+  });
+
+  it("defaults an unknown live theme language to English", () => {
+    applyAppTheme({ mode: "dark", accentColor: null, language: "ja" });
+    const listener = vi.fn();
+    const unsubscribe = subscribeAppLanguage(listener);
+
+    applyAppTheme({ mode: "light", accentColor: null, language: "fr" as never });
+
+    expect(document.documentElement.lang).toBe("en");
+    expect(getAppLanguage()).toBe("en");
+    expect(listener).toHaveBeenCalledWith("en");
+
+    unsubscribe();
   });
 });

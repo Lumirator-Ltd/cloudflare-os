@@ -7,7 +7,13 @@ import type {
 import type { GatekeeperAppTheme } from "@gadgets/workshop-shared/theme";
 
 it("documents supported language on embedded interface contracts", () => {
-  expectTypeOf<GatekeeperAppTheme["language"]>().toEqualTypeOf<SupportedLanguage>();
+  expectTypeOf<GatekeeperAppTheme["language"]>()
+    .toEqualTypeOf<SupportedLanguage | undefined>();
+  expectTypeOf<GatekeeperAppTheme>().toMatchTypeOf<{
+    mode: "light" | "dark";
+    accentColor: string | null;
+    language?: SupportedLanguage;
+  }>();
   expectTypeOf<ResourceConfiguratorHost["getLanguage"]>()
     .toEqualTypeOf<(() => Promise<SupportedLanguage>) | undefined>();
   expectTypeOf<ResourceConfiguratorIframe["setLanguage"]>()

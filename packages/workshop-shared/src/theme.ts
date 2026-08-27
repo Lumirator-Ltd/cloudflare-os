@@ -9,8 +9,11 @@ export interface GatekeeperAppTheme {
   mode: "light" | "dark";
   /** The deployment accent seed, or null to use the app's base palette. */
   accentColor: string | null;
-  /** The current Workshop interface language. */
-  language: SupportedLanguage;
+  /**
+   * The current Workshop interface language. Omitted by legacy hosts; receivers must default
+   * missing or unrecognized wire values to English.
+   */
+  language?: SupportedLanguage;
 }
 
 /** A sandboxed gatekeeper app capability that receives complete presentation updates. */
