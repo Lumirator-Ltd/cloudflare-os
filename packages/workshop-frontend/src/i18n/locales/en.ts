@@ -12,7 +12,7 @@ export const en = {
     auto: "Auto",
     autoWithLanguage: "Auto ({{language}})",
     english: "English",
-    japanese: "Japanese",
+    japanese: "日本語",
     saveError: "Couldn't save the language preference.",
   },
   chat: {

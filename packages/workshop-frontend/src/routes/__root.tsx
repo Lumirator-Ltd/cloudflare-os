@@ -1,5 +1,5 @@
 import { logRpcFailure } from '../rpcErrors'
-import { useState, useEffect } from 'react'
+import { useState, useEffect, type ReactNode } from 'react'
 import { createRootRoute, Outlet, useRouterState } from '@tanstack/react-router'
 import { TooltipProvider, Toasty } from '@cloudflare/kumo'
 import { RpcStub } from 'capnweb'
@@ -14,6 +14,7 @@ import AppShell from '../components/AppShell/AppShell'
 import LoginPage from '../LoginPage'
 import OnboardingWizard from '../OnboardingWizard'
 import AccountSelectionModal from '../components/billing/AccountSelectionModal'
+import { LanguageProvider } from '../i18n/LanguageProvider'
 
 export const Route = createRootRoute({
   component: RootComponent,
@@ -24,6 +25,9 @@ function RootComponent() {
   const connectionLost = useConnectionLost()
   const { isAuthenticated, authenticatedApi, isLoading, error, logout, login } = useAuth(rpcStub)
   const pathname = useRouterState({ select: (s) => s.location.pathname })
+  const withLanguage = (children: ReactNode) => (
+    <LanguageProvider authenticatedApi={authenticatedApi}>{children}</LanguageProvider>
+  )
 
   // When authenticatedApi becomes available, the connection is proven alive.
   useEffect(() => {
@@ -52,17 +56,17 @@ function RootComponent() {
 
   // Loading state
   if (isLoading && !standalone) {
-    return (
+    return withLanguage(
       <div className="min-h-screen flex items-center justify-center flex-col gap-4 bg-kumo-base">
         <div className="w-8 h-8 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin" />
         <p className="text-sm text-kumo-subtle">{connectionLost ? 'Waiting for server…' : 'Loading...'}</p>
-      </div>
+      </div>,
     )
   }
 
   // Auth error
   if (error && !standalone) {
-    return (
+    return withLanguage(
       <div className="min-h-screen flex items-center justify-center flex-col gap-4 bg-kumo-base p-6">
         <p className="text-sm text-kumo-danger">Authentication error: {error}</p>
         <button
@@ -71,43 +75,43 @@ function RootComponent() {
         >
           Retry
         </button>
-      </div>
+      </div>,
     )
   }
 
   // CF Access mode: show spinner while pipelined auth resolves
   if (!isAuthenticated && CF_ACCESS_MODE && !standalone) {
-    return (
+    return withLanguage(
       <div className="min-h-screen flex items-center justify-center flex-col gap-4 bg-kumo-base">
         <div className="w-8 h-8 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin" />
         <p className="text-sm text-kumo-subtle">Authenticating...</p>
-      </div>
+      </div>,
     )
   }
 
   // Not authenticated and not a public route — show login
   if (!isAuthenticated && !standalone) {
-    return <LoginPage rpcStub={rpcStub} onLoginSuccess={handleLoginSuccess} />
+    return withLanguage(<LoginPage rpcStub={rpcStub} onLoginSuccess={handleLoginSuccess} />)
   }
 
   // Signed-out visitors of public routes render without the auth wrapper / app shell.
   if (standalone) {
     const showHeader = !isSignup
-    return (
+    return withLanguage(
       <TooltipProvider>
         <Toasty>
           {showHeader && <Header />}
           <Outlet />
         </Toasty>
-      </TooltipProvider>
+      </TooltipProvider>,
     )
   }
 
   // Authenticated — render the full shell (with onboarding gate)
   // authenticatedApi is guaranteed non-null here: isLoading, error, and
   // !isAuthenticated branches all return early above.
-  if (!authenticatedApi) return null
-  return (
+  if (!authenticatedApi) return withLanguage(null)
+  return withLanguage(
     <AuthProvider authenticatedApi={authenticatedApi} onLogout={logout}>
       <FeatureFlagsProvider>
         <TooltipProvider>
@@ -119,7 +123,7 @@ function RootComponent() {
           </Toasty>
         </TooltipProvider>
       </FeatureFlagsProvider>
-    </AuthProvider>
+    </AuthProvider>,
   )
 }
 

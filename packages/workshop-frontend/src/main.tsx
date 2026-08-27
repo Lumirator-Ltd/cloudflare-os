@@ -1,5 +1,6 @@
 import { StrictMode, useState, useEffect } from 'react'
 import { createRoot } from 'react-dom/client'
+import { I18nextProvider } from 'react-i18next'
 import { RouterProvider } from '@tanstack/react-router'
 import { RpcStub, newWebSocketRpcSession } from 'capnweb'
 import { PublicApi, ServerConfig } from '@gadgets/workshop-shared/api'
@@ -13,6 +14,7 @@ import './styles.css'
 import FrontendErrorBoundary from './FrontendErrorBoundary'
 import { installWorkshopErrorReporting, reportIssue } from './errorReporting'
 import { applySiteFavicon, cacheBustSiteLogoUrl } from './siteLogoUtils'
+import i18n from './i18n/config'
 
 // ---------------------------------------------------------------------------
 // Dev auto-login: if VITE_DEV_AUTO_LOGIN=true, automatically create/login
@@ -191,7 +193,9 @@ devAutoLogin(currentStub).catch(() => {})
 root.render(
   <StrictMode>
     <FrontendErrorBoundary>
-      <AppWithConnection />
+      <I18nextProvider i18n={i18n}>
+        <AppWithConnection />
+      </I18nextProvider>
     </FrontendErrorBoundary>
   </StrictMode>
 )

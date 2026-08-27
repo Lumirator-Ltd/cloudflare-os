@@ -1,7 +1,7 @@
 import { useKumoToastManager } from '@cloudflare/kumo'
 import { useAuthenticatedApi } from './AuthContext'
 import { useState, useEffect, useRef } from 'react'
-import { AiChatAuthorInfo } from '@gadgets/workshop-shared/api'
+import { AiChatAuthorInfo, type LanguagePreference } from '@gadgets/workshop-shared/api'
 import { hashPassword } from './passwordHash'
 import { CF_ACCESS_MODE } from './useAuth'
 import { User, Pencil, Check, X, Lock, Camera, Copy, Eye, EyeSlash } from '@phosphor-icons/react'
@@ -9,6 +9,8 @@ import { useAvatar, invalidateAvatarCache } from './useAvatar'
 import { compressAvatar, avatarBlobUrl } from './avatarUtils'
 import UsageSettings from './components/billing/UsageSettings'
 import { useDocumentTitle } from './useDocumentTitle'
+import { useTranslation } from 'react-i18next'
+import { useLanguage } from './i18n/LanguageProvider'
 
 // Shared, on-language control classes (match the rest of the app: Workspaces/Blueprints headers,
 // the gatekeepers toolbar, the command palette). Kept here so the profile page reads as part of the
@@ -88,6 +90,8 @@ export default function SettingsPage() {
   useDocumentTitle('Profile')
 
   const { authenticatedApi } = useAuthenticatedApi()
+  const { t } = useTranslation()
+  const { preference, deploymentDefault, loading: languageLoading, setPreference } = useLanguage()
   const toasts = useKumoToastManager()
   const [userInfo, setUserInfo] = useState<AiChatAuthorInfo | null>(null)
   const [loading, setLoading] = useState(true)
@@ -176,6 +180,14 @@ export default function SettingsPage() {
       toasts.add({ title: 'User ID copied', variant: 'success' })
     } catch {
       toasts.add({ title: 'Failed to copy', variant: 'error' })
+    }
+  }
+
+  const handleLanguageChange = async (nextPreference: LanguagePreference) => {
+    try {
+      await setPreference(nextPreference)
+    } catch {
+      toasts.add({ title: t('language.saveError'), variant: 'error' })
     }
   }
 
@@ -374,6 +386,27 @@ export default function SettingsPage() {
                 <Copy size={14} />
               </button>
             </div>
+          </div>
+        </section>
+
+        <section className="flex flex-col gap-3">
+          <SectionLabel>{t('language.title')}</SectionLabel>
+          <div className="rounded-xl border border-kumo-line bg-kumo-base px-5 py-4">
+            <select
+              aria-label={t('language.title')}
+              value={preference}
+              disabled={languageLoading}
+              onChange={(event) => void handleLanguageChange(event.target.value as LanguagePreference)}
+              className={`${INPUT} max-w-sm cursor-pointer disabled:cursor-wait disabled:opacity-60`}
+            >
+              <option value="auto">
+                {t('language.autoWithLanguage', {
+                  language: t(deploymentDefault === 'ja' ? 'language.japanese' : 'language.english'),
+                })}
+              </option>
+              <option value="en">{t('language.english')}</option>
+              <option value="ja">{t('language.japanese')}</option>
+            </select>
           </div>
         </section>
 
