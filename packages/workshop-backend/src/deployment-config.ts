@@ -2,7 +2,7 @@
 // AI Gateway billing (ai-gateway-billing/), and the admin-configured branding (admin-config.ts).
 // Contains no secrets.
 
-import { AuthVendorInfo, ServerConfig } from "@gadgets/workshop-shared/api";
+import { AuthVendorInfo, ServerConfig, SupportedLanguage } from "@gadgets/workshop-shared/api";
 import { connectorIsConfigured } from "@gadgets/workshop-shared/gatekeeper";
 import { createWorkshopLogger } from "./observability";
 import { getAuthGatekeeperAllowlist, isPasswordAuthEnabled } from "./auth/config.js";
@@ -53,6 +53,16 @@ function passwordAuthEnabled(
   return isPasswordAuthEnabled(env) || !authVendors.some(vendor => vendor.configured);
 }
 
+function defaultLanguage(env: Cloudflare.Env): SupportedLanguage {
+  if (env.DEFAULT_LANGUAGE === undefined) return "en";
+  if (env.DEFAULT_LANGUAGE === "en" || env.DEFAULT_LANGUAGE === "ja") {
+    return env.DEFAULT_LANGUAGE;
+  }
+  throw new Error(
+    `Unsupported DEFAULT_LANGUAGE "${env.DEFAULT_LANGUAGE}"; expected "en" or "ja".`,
+  );
+}
+
 /** Resolves password availability without allowing unconfigured OAuth connectors to lock users out. */
 export async function isPasswordAuthAvailable(env: Cloudflare.Env): Promise<boolean> {
   if (isPasswordAuthEnabled(env)) return true;
@@ -68,6 +78,7 @@ export async function getServerConfig(env: Cloudflare.Env): Promise<ServerConfig
     getAuthVendors(env),
   ]);
   return {
+    defaultLanguage: defaultLanguage(env),
     authVendors,
     passwordAuthEnabled: passwordAuthEnabled(env, authVendors),
     cloudflareLimitsEnabled: isCloudflareBillingEnabled(env),

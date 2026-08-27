@@ -1056,6 +1056,15 @@ export type AdminFormatPatch = {
   overrides?: {[K in keyof BlueprintOutput]?: BlueprintOutput[K] | null};
 };
 
+/** Languages supported by first-party Workshop localization. */
+export type SupportedLanguage = "en" | "ja";
+
+/** A user's persisted UI language choice. */
+export type LanguagePreference = "auto" | SupportedLanguage;
+
+/** Language used to render semantic activity for one chat turn. */
+export type ChatActivityLanguage = SupportedLanguage;
+
 /**
  * A gatekeeper vendor offered as a sign-in method. The login/signup pages render a "Continue with
  * ..." button per entry, alongside (never replacing) username/password. Built from auth-capable
@@ -1077,6 +1086,9 @@ export type AuthVendorInfo = {
  * Returned by `PublicApi.getServerConfig()`. Contains no secrets.
  */
 export type ServerConfig = {
+  /** Default language for signed-out users and users whose language preference is `"auto"`. */
+  defaultLanguage: SupportedLanguage;
+
   /**
    * Auth-capable, allowlisted gatekeeper vendors shown as sign-in methods, including unconfigured
    * vendors with disabled buttons. Empty when no allowlisted bound vendor provides authentication.
@@ -2122,6 +2134,11 @@ export type AiChatMetadata = {
   lastActive: Date,
 
   /**
+   * Language governing semantic activity for the current chat turn. Absent on legacy metadata.
+   */
+  activityLanguage?: ChatActivityLanguage;
+
+  /**
    * If present, an LLM (described by the author info) is currently actively responding to the
    * chat.
    */
@@ -2206,6 +2223,8 @@ export type AiChatMessage = {
   sequence: number;
   timestamp: Date;
   author: AiChatAuthorInfo;
+  /** Language used to render this turn's semantic activity. Absent on legacy messages. */
+  activityLanguage?: ChatActivityLanguage;
 } & AiChatMessageBody;
 
 export type AiChatMessageBody = {

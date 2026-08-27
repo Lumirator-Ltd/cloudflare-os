@@ -83,6 +83,9 @@ declare global {
       // Public base URL of the deployment.
       PUBLIC_BASE_URL?: string;
 
+      // Default Workshop UI language. Defaults to English when omitted.
+      DEFAULT_LANGUAGE?: string;
+
       // Optional Cloudflare Workers secret control plane for static-OAuth connectors.
       CONNECTOR_CONFIG_ACCOUNT_ID?: string;
       CONNECTOR_CONFIG_WORKER_PREFIX?: string;
