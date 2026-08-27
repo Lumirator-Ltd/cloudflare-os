@@ -62,7 +62,11 @@ import {
   mcpGatekeeperUserContext,
   type McpGatekeeperUserProps,
 } from "@gadgets/mcp-shared/user";
-import { connectFormHtml } from "./connect-form.js";
+import {
+  buildConnectUrl,
+  connectFormHtml,
+  resolveConnectFormLanguage,
+} from "./connect-form.js";
 import { serverIdFromEndpoint } from "./server-id.js";
 import { mcpResourceFor, mcpResources } from "./resources.js";
 import type { ConfiguratorUIOption } from "@gadgets/configurator-ui";
@@ -122,7 +126,7 @@ export async function handleConnectRequest(
     return new Response("Method Not Allowed", { status: 405 });
   }
 
-  const queryLanguage = new URL(request.url).searchParams.get("language") ?? undefined;
+  const queryLanguage = resolveConnectFormLanguage(request.url);
 
   // A reconnect already knows its endpoint. Ignore a stale or malicious replacement URL.
   if (await account.hasEndpoint()) {
@@ -141,7 +145,7 @@ export async function handleConnectRequest(
     String(form.get("url") ?? ""),
     env,
     path,
-    String(form.get("language") ?? queryLanguage ?? ""),
+    resolveConnectFormLanguage(request.url, form),
   );
 }
 
@@ -212,9 +216,14 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
     const accountId = this.ctx.exports.McpAccount.newUniqueId();
     const initiationNonce = generateNonce();
     await this.ctx.exports.McpAccount.get(accountId).setCallback(callback, initiationNonce);
-    const url = new URL(`${getBaseUrl(this.env)}/${accountId.toString()}/${initiationNonce}`);
-    url.searchParams.set("language", options?.language ?? "en");
-    return { url: url.href };
+    return {
+      url: buildConnectUrl(
+        getBaseUrl(this.env),
+        accountId.toString(),
+        initiationNonce,
+        options?.language,
+      ),
+    };
   }
 
   async getSupportedResources(): Promise<SupportedResource[]> {

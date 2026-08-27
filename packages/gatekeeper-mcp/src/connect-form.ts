@@ -59,6 +59,32 @@ const CONNECT_FORM_COPY = {
   },
 } satisfies Record<ConnectFormLanguage, ConnectFormCopy>;
 
+function supportedLanguage(language: unknown): ConnectFormLanguage {
+  return language === "ja" ? "ja" : "en";
+}
+
+/** Builds the one-time account connection URL with its resolved form language. */
+export function buildConnectUrl(
+  baseUrl: string,
+  accountId: string,
+  initiationNonce: string,
+  language?: string,
+): string {
+  const url = new URL(`${baseUrl}/${accountId}/${initiationNonce}`);
+  url.searchParams.set("language", supportedLanguage(language));
+  return url.href;
+}
+
+/** Resolves the connect form language, preferring a submitted form value over the URL query. */
+export function resolveConnectFormLanguage(
+  requestUrl: string,
+  form?: Pick<FormData, "get">,
+): ConnectFormLanguage {
+  return supportedLanguage(
+    form?.get("language") ?? new URL(requestUrl).searchParams.get("language"),
+  );
+}
+
 /**
  * Renders the endpoint prompt shown when the user starts connecting.
  *
@@ -66,7 +92,7 @@ const CONNECT_FORM_COPY = {
  * user's preference. Omitted or unsupported values deterministically use English.
  */
 export function connectFormHtml(path: string, error?: string, language?: string): string {
-  const resolvedLanguage: ConnectFormLanguage = language === "ja" ? "ja" : "en";
+  const resolvedLanguage = supportedLanguage(language);
   const copy = CONNECT_FORM_COPY[resolvedLanguage];
   return `<!DOCTYPE html>
 <html lang="${resolvedLanguage}"><head><meta charset="utf-8">
