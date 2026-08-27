@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { useKumoToastManager } from '@cloudflare/kumo'
 import type { RpcStub } from 'capnweb'
 import type { Overseer, PreApprovableAction } from '@gadgets/workshop-shared/api'
 import type { ActionKind } from '@gadgets/workshop-shared/gatekeeper'
+import './i18n/config'
 
 export interface AutoApprovalEntry {
   gatekeeperId: number
@@ -19,6 +21,7 @@ export function autoApprovalKey(entry: { gatekeeperId: number; actionKind: Actio
 }
 
 export function useAutoApproval(overseer: RpcStub<Overseer> | null) {
+  const { t } = useTranslation()
   const toasts = useKumoToastManager()
   const [catalog, setCatalog] = useState<PreApprovableAction[]>([])
   const [rules, setRules] = useState<Array<{ gatekeeperId: number; actionKind: ActionKind }>>([])
@@ -114,7 +117,9 @@ export function useAutoApproval(overseer: RpcStub<Overseer> | null) {
     } catch (err) {
       console.error('Failed to update auto-approval rule:', err)
       toasts.add({
-        title: `Failed to ${enabled ? 'enable' : 'disable'} auto-approval`,
+        title: t(enabled
+          ? 'workspace.activity.autoApproval.updateFailedEnable'
+          : 'workspace.activity.autoApproval.updateFailedDisable'),
         variant: 'error',
       })
     } finally {
@@ -125,7 +130,7 @@ export function useAutoApproval(overseer: RpcStub<Overseer> | null) {
         return next
       })
     }
-  }, [overseer, refresh, toasts])
+  }, [overseer, refresh, toasts, t])
 
   return { entries, isLoading, loadError, pending, refresh, setEnabled }
 }

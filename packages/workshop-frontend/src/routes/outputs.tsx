@@ -1,5 +1,7 @@
 import { createFileRoute, useNavigate } from '@tanstack/react-router'
 import { useEffect, useMemo, useRef, useState } from 'react'
+import type { TFunction } from 'i18next'
+import { useTranslation } from 'react-i18next'
 import { Dialog, DropdownMenu, useKumoToastManager } from '@cloudflare/kumo'
 import {
   MagnifyingGlass,
@@ -27,6 +29,7 @@ import { useOutputFormats } from '../components/format/useOutputFormats'
 import NewFormatRow from '../components/format/NewFormatRow'
 import DeleteConfirmationDialog from '../components/DeleteConfirmationDialog'
 import { WorkshopButton, WorkshopIconButton } from '../components/WorkshopControls'
+import '../i18n/config'
 
 // The Outputs page: everything the user's workspaces have produced, in one place, so they don't
 // have to remember which workspace they made a thing in. Backed by an index in the user's own
@@ -36,15 +39,14 @@ export const Route = createFileRoute('/outputs')({
   component: OutputsPage,
 })
 
-function formatRelativeTime(date: Date): string {
+function formatRelativeTime(date: Date, t: TFunction): string {
   const diff = Date.now() - date.getTime()
   const minutes = Math.floor(diff / 60000)
-  if (minutes < 1) return 'just now'
-  if (minutes < 60) return `${minutes}m ago`
+  if (minutes < 1) return t('workspace.activity.justNow')
+  if (minutes < 60) return t('workspace.activity.minutesAgo', { count: minutes })
   const hours = Math.floor(minutes / 60)
-  if (hours < 24) return `${hours}h ago`
-  const days = Math.floor(hours / 24)
-  return `${days}d ago`
+  if (hours < 24) return t('workspace.activity.hoursAgo', { count: hours })
+  return t('workspace.activity.daysAgo', { count: Math.floor(hours / 24) })
 }
 
 function outputKey(output: OutputSummary): string {
@@ -74,6 +76,7 @@ function OutputMenu({
   onRename?: () => void
   onRemove?: () => void
 }) {
+  const { t } = useTranslation()
   return (
     <div
       className="press-exempt"
@@ -87,7 +90,7 @@ function OutputMenu({
           render={
             <button
               type="button"
-              aria-label="Output actions"
+              aria-label={t('workspace.outputs.actions')}
               className="cursor-pointer rounded-md p-1.5 text-kumo-subtle transition-colors hover:bg-kumo-fill hover:text-kumo-default focus:opacity-100 sm:opacity-0 sm:group-hover:opacity-100"
             >
               <DotsThreeVertical size={16} />
@@ -96,19 +99,19 @@ function OutputMenu({
         />
         <DropdownMenu.Content className={MENU_CONTENT}>
           <DropdownMenu.Item onClick={onOpen} className={MENU_ITEM}>
-            <ArrowSquareOut size={13} className="mr-2" /> Open
+            <ArrowSquareOut size={13} className="mr-2" /> {t('workspace.outputs.open')}
           </DropdownMenu.Item>
           <DropdownMenu.Item onClick={onOpenWorkspace} className={MENU_ITEM}>
-            <Cube size={13} className="mr-2" /> Open workspace
+            <Cube size={13} className="mr-2" /> {t('workspace.outputs.openWorkspace')}
           </DropdownMenu.Item>
           {onRename && (
             <DropdownMenu.Item onClick={onRename} className={MENU_ITEM}>
-              <PencilSimple size={13} className="mr-2" /> Rename
+              <PencilSimple size={13} className="mr-2" /> {t('workspace.outputs.rename')}
             </DropdownMenu.Item>
           )}
           {onRemove && (
             <DropdownMenu.Item onClick={onRemove} className={`${MENU_ITEM} text-kumo-danger`}>
-              <Trash size={13} className="mr-2" /> Remove
+              <Trash size={13} className="mr-2" /> {t('workspace.outputs.remove')}
             </DropdownMenu.Item>
           )}
         </DropdownMenu.Content>
@@ -118,22 +121,29 @@ function OutputMenu({
 }
 
 // Secondary line under an output's title in the grid, where there's no room for meta columns.
-function subtitle(output: OutputSummary): string {
-  const parts = [output.workspaceTitle || 'Untitled workspace']
-  if (output.owner) parts.push(`Shared by ${output.owner.name}`)
-  parts.push(`Workspace active ${formatRelativeTime(output.lastActive)}`)
+function subtitle(output: OutputSummary, t: TFunction): string {
+  const parts = [output.workspaceTitle || t('workspace.general.untitledWorkspace')]
+  if (output.owner) parts.push(t('workspace.outputs.sharedBy', { name: output.owner.name }))
+  parts.push(t('workspace.outputs.workspaceActiveAt', {
+    time: formatRelativeTime(output.lastActive, t),
+  }))
   return parts.join(' · ')
 }
 
 // Provenance for a list row: the output came out of the user's own workspace or a shared one.
 function OutputProvenance({ owner }: { owner?: OutputSummary['owner'] }) {
+  const { t } = useTranslation()
   return (
     <span
       className="flex w-52 items-center gap-1 truncate whitespace-nowrap"
-      title={owner ? `In a workspace shared by ${owner.name}` : 'In a workspace you created'}
+      title={owner
+        ? t('workspace.outputs.sharedWorkspaceBy', { name: owner.name })
+        : t('workspace.outputs.ownWorkspace')}
     >
       {owner ? <ShareNetwork size={11} /> : <User size={11} />}
-      <span className="truncate">{owner ? `Shared by ${owner.name}` : 'Created by you'}</span>
+      <span className="truncate">{owner
+        ? t('workspace.outputs.sharedBy', { name: owner.name })
+        : t('workspace.outputs.createdByYou')}</span>
     </span>
   )
 }
@@ -148,6 +158,7 @@ type OutputActions = {
 function OutputCard({
   output, onOpen, onOpenWorkspace, onRename, onRemove,
 }: { output: OutputSummary } & OutputActions) {
+  const { t } = useTranslation()
   return (
     <div
       role="button"
@@ -163,10 +174,10 @@ function OutputCard({
         <FormatTile output={output.output} size="sm" />
         <div className="min-w-0 flex-1">
           <p className="truncate text-[13px] font-medium leading-[18px] tracking-[-0.25px] text-kumo-default">
-            {output.title || 'Untitled'}
+            {output.title || t('workspace.general.untitled')}
           </p>
           <p className="mt-0.5 truncate text-[12px] leading-4 tracking-[-0.2px] text-kumo-subtle">
-            {subtitle(output)}
+            {subtitle(output, t)}
           </p>
         </div>
         <OutputMenu onOpen={onOpen} onOpenWorkspace={onOpenWorkspace}
@@ -179,6 +190,7 @@ function OutputCard({
 function OutputRow({
   output, onOpen, onOpenWorkspace, onRename, onRemove,
 }: { output: OutputSummary } & OutputActions) {
+  const { t } = useTranslation()
   return (
     <div
       role="button"
@@ -190,10 +202,10 @@ function OutputRow({
       <FormatTile output={output.output} />
       <div className="min-w-0 flex-1">
         <p className="truncate text-sm font-medium tracking-[-0.25px] text-kumo-default">
-          {output.title || 'Untitled'}
+          {output.title || t('workspace.general.untitled')}
         </p>
         <p className="mt-0.5 truncate text-[12px] leading-4 tracking-[-0.2px] text-kumo-subtle">
-          {formatOf(output.output).noun} · {output.workspaceTitle || 'Untitled workspace'}
+          {formatOf(output.output).noun} · {output.workspaceTitle || t('workspace.general.untitledWorkspace')}
         </p>
       </div>
       {/* Fixed-width meta columns so rows line up like a table. */}
@@ -201,7 +213,9 @@ function OutputRow({
         <OutputProvenance owner={output.owner} />
         <span className="flex w-40 items-center justify-end gap-1 whitespace-nowrap">
           <Clock size={10} />
-          Workspace active {formatRelativeTime(output.lastActive)}
+          {t('workspace.outputs.workspaceActiveAt', {
+            time: formatRelativeTime(output.lastActive, t),
+          })}
         </span>
       </div>
       <OutputMenu onOpen={onOpen} onOpenWorkspace={onOpenWorkspace}
@@ -257,13 +271,14 @@ function ScopeSelect({
   counts: Record<OwnerFilter, number>
   onChange: (value: OwnerFilter) => void
 }) {
+  const { t } = useTranslation()
   // The trigger shows the chosen option verbatim, so the default label has to spell out the union
   // of the other two. Anything shorter ("Anyone", "All") reads as a directory of other people,
   // when nothing here is reachable without having made it or been given access.
   const options: { value: OwnerFilter; label: string }[] = [
-    { value: 'all', label: 'Yours and shared' },
-    { value: 'mine', label: 'Created by you' },
-    { value: 'shared', label: 'Shared with you' },
+    { value: 'all', label: t('workspace.outputs.scopes.all') },
+    { value: 'mine', label: t('workspace.outputs.scopes.owned') },
+    { value: 'shared', label: t('workspace.outputs.scopes.shared') },
   ]
   const current = options.find((o) => o.value === value)!
   const CurrentIcon = SCOPE_ICON[value]
@@ -335,6 +350,7 @@ function RenameOutputDialog({
   onClose: () => void
   onSave: () => void
 }) {
+  const { t } = useTranslation()
   return (
     <Dialog.Root open={output !== null} onOpenChange={(open) => { if (!open && !busy) onClose() }}>
       <Dialog
@@ -345,21 +361,23 @@ function RenameOutputDialog({
           <div className="flex items-start justify-between gap-4 border-b border-kumo-line px-5 py-4">
             <div className="min-w-0">
               <Dialog.Title className="text-[15px] font-medium leading-5 tracking-[-0.3px] text-kumo-default">
-                Rename output
+                {t('workspace.outputs.renameTitle')}
               </Dialog.Title>
               {/* Renames the output itself, unlike the sidebar's workspace rename, which relabels
                   only your own copy. */}
               <Dialog.Description className="mt-1 text-[12px] leading-4 text-kumo-subtle">
-                Renames the output for everyone with access to “{output?.workspaceTitle}”.
+                {t('workspace.outputs.renameDescription', {
+                  workspace: output?.workspaceTitle,
+                })}
               </Dialog.Description>
             </div>
-            <WorkshopIconButton type="button" className="!h-7 !w-7" disabled={busy} aria-label="Close" onClick={onClose}>
+            <WorkshopIconButton type="button" className="!h-7 !w-7" disabled={busy} aria-label={t('common.close')} onClick={onClose}>
               <X size={16} />
             </WorkshopIconButton>
           </div>
           <div className="px-5 py-4">
             <label className="block text-[12px] font-medium text-kumo-subtle" htmlFor="rename-output-title">
-              Name
+              {t('workspace.outputs.name')}
             </label>
             <input
               id="rename-output-title"
@@ -371,9 +389,9 @@ function RenameOutputDialog({
             />
           </div>
           <div className="flex items-center justify-end gap-2 border-t border-kumo-line px-5 py-3">
-            <WorkshopButton type="button" disabled={busy} onClick={onClose}>Cancel</WorkshopButton>
+            <WorkshopButton type="button" disabled={busy} onClick={onClose}>{t('common.cancel')}</WorkshopButton>
             <WorkshopButton tone="primary" type="submit" disabled={busy || !value.trim()}>
-              {busy ? 'Saving…' : 'Save'}
+              {busy ? t('workspace.outputs.saving') : t('common.save')}
             </WorkshopButton>
           </div>
         </form>
@@ -388,7 +406,8 @@ function RenameOutputDialog({
 type TypeFilter = 'all' | string
 
 function OutputsPage() {
-  useDocumentTitle('Outputs')
+  const { t } = useTranslation()
+  useDocumentTitle(t('workspace.outputs.title'))
   const { authenticatedApi } = useAuthenticatedApi()
   const navigate = useNavigate()
   const toasts = useKumoToastManager()
@@ -445,13 +464,13 @@ function OutputsPage() {
       // A failed *refresh* must not discard a page already showing something: it is still the last
       // good answer, and the next focus retries. The error state is for having nothing to show.
       if (loadedOnce.current) {
-        toastsRef.current.add({ title: "Couldn't refresh outputs", variant: 'error' })
+        toastsRef.current.add({ title: t('workspace.outputs.refreshFailed'), variant: 'error' })
       } else {
         setLoadError(true)
       }
     })
     return () => { cancelled = true }
-  }, [authenticatedApi, reloadToken])
+  }, [authenticatedApi, reloadToken, t])
 
   // A cheap snapshot rather than another live subscription, so refetch when the user returns to
   // the window.
@@ -494,7 +513,7 @@ function OutputsPage() {
       setRenameOutput(null)
     } catch (err) {
       console.error('Failed to rename output:', err)
-      toasts.add({ title: "Couldn't rename this output", variant: 'error' })
+      toasts.add({ title: t('workspace.outputs.renameFailed'), variant: 'error' })
     } finally {
       gadget?.[Symbol.dispose]()
       overseer?.[Symbol.dispose]()
@@ -516,7 +535,7 @@ function OutputsPage() {
       setRemoveOutput(null)
     } catch (err) {
       console.error('Failed to remove output:', err)
-      toasts.add({ title: "Couldn't remove this output", variant: 'error' })
+      toasts.add({ title: t('workspace.outputs.removeFailed'), variant: 'error' })
     } finally {
       gadget?.[Symbol.dispose]()
       overseer?.[Symbol.dispose]()
@@ -576,9 +595,9 @@ function OutputsPage() {
     <div className="mx-auto flex h-full w-full max-w-5xl flex-col px-6 sm:px-10">
       <header className="flex items-end justify-between gap-4 px-3 pb-4 pt-10">
         <div className="min-w-0">
-          <h1 className="text-2xl font-semibold tracking-tight text-kumo-default">Outputs</h1>
+          <h1 className="text-2xl font-semibold tracking-tight text-kumo-default">{t('workspace.outputs.title')}</h1>
           <p className="mt-1 text-[13px] leading-[18px] tracking-[-0.25px] text-kumo-subtle">
-            Everything your workspaces have produced, in one place.
+            {t('workspace.outputs.description')}
           </p>
         </div>
         <ViewToggle view={view} onChange={setView} />
@@ -591,7 +610,7 @@ function OutputsPage() {
         <div className="-mx-1 flex items-center gap-1 overflow-x-auto px-1 sidebar-scroll">
           {showTypeFilters && (
             <>
-              <FilterChip active={typeFilter === 'all'} label="All" count={inTypeScope.length}
+              <FilterChip active={typeFilter === 'all'} label={t('workspace.outputs.all')} count={inTypeScope.length}
                           onClick={() => setTypeFilter('all')} />
               {presentTypes.map(([id, plural]) => (
                 <FilterChip
@@ -623,7 +642,7 @@ function OutputsPage() {
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search outputs…"
+              placeholder={t('workspace.outputs.search')}
               className="h-9 w-full rounded-lg border border-kumo-line bg-kumo-base pl-9 pr-4 text-[13px] tracking-[-0.25px] text-kumo-default placeholder:text-kumo-inactive transition-[border-color,box-shadow] duration-150 ease-out focus:border-kumo-ring focus:outline-none focus:ring-[3px] focus:ring-kumo-ring/15"
             />
           </div>
@@ -639,9 +658,9 @@ function OutputsPage() {
           </div>
         ) : loadError ? (
           <div className="py-12 text-center text-sm">
-            <p className="text-kumo-danger">Something went wrong loading your outputs.</p>
+            <p className="text-kumo-danger">{t('workspace.outputs.loadFailed')}</p>
             <button onClick={() => setReloadToken((n) => n + 1)} className="mt-1 text-kumo-brand underline">
-              Try again
+              {t('common.retry')}
             </button>
           </div>
         ) : filtered.length === 0 ? (
@@ -651,16 +670,16 @@ function OutputsPage() {
             </div>
             <div>
               <p className="text-sm font-medium text-kumo-default">
-                {isFiltered ? 'No outputs match' : 'No outputs yet'}
+                {t(isFiltered ? 'workspace.outputs.noMatch' : 'workspace.outputs.empty')}
               </p>
               <p className="mt-1 text-[13px] leading-[18px] text-kumo-subtle">
-                {isFiltered
-                  ? 'Try a different filter or search term.'
-                  : 'Anything your workspaces build will show up here.'}
+                {t(isFiltered
+                  ? 'workspace.outputs.noMatchDescription'
+                  : 'workspace.outputs.emptyDescription')}
               </p>
             </div>
             {/* Offer the deployment's formats here rather than sending them to the home page. */}
-            {!isFiltered && <NewFormatRow label="Start with" />}
+            {!isFiltered && <NewFormatRow label={t('workspace.outputs.startWith')} />}
           </div>
         ) : view === 'grid' ? (
           <div className="grid grid-cols-2 gap-4 px-3 sm:grid-cols-3 lg:grid-cols-4">
@@ -695,16 +714,15 @@ function OutputsPage() {
       />
       <DeleteConfirmationDialog
         open={removeOutput !== null}
-        title={`Remove “${removeOutput?.title || 'Untitled'}”?`}
-        description={
-          <>
-            This permanently removes the output from “{removeOutput?.workspaceTitle}”
-            {removeOutput?.owner ? ', for everyone with access to that workspace' : ''}. Other
-            outputs in that workspace stay available. This can’t be undone.
-          </>
-        }
-        confirmLabel="Remove"
-        confirmingLabel="Removing…"
+        title={t('workspace.outputs.removeTitle', {
+          title: removeOutput?.title || t('workspace.general.untitled'),
+        })}
+        description={t('workspace.outputs.removeDescription', {
+          workspace: removeOutput?.workspaceTitle,
+          scope: removeOutput?.owner ? t('workspace.outputs.everyoneScope') : '',
+        })}
+        confirmLabel={t('workspace.dialogs.remove.confirm')}
+        confirmingLabel={t('workspace.dialogs.remove.confirming')}
         isDeleting={mutationBusy}
         onOpenChange={(open) => { if (!open) setRemoveOutput(null) }}
         onConfirm={() => { void confirmRemove() }}
