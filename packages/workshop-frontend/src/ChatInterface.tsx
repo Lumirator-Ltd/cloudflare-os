@@ -53,6 +53,7 @@ import {
   Blueprint,
 } from "@phosphor-icons/react";
 import { RpcStub, RpcTarget } from "capnweb";
+import type { TFunction } from "i18next";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import * as Y from "yjs";
@@ -80,6 +81,7 @@ import {
   ChatAttachmentRef,
   WorkpieceId,
   BlueprintOutput,
+  ChatActivityLanguage,
   MessageFormatRef,
   OutputIcon,
   OutputFormatOffer,
@@ -123,6 +125,7 @@ import OutOfCreditsModal from "./components/billing/OutOfCreditsModal";
 import { useSlashCommandPicker } from "./components/chat/SlashCommandPicker";
 import { formatFullTimestamp } from "./utils/formatTimestamp";
 import { copyToClipboard } from "./clipboard";
+import i18n from "./i18n/config";
 import {
   composerDraftStorageKey,
   decorateComposerDraft,
@@ -652,78 +655,75 @@ export function resolveToolCallOutput(
   return typeof gadgetId === "number" ? outputOfWorkpiece(gadgetId) : undefined;
 }
 
-function getToolCallSummary(
-  tc: AiToolCall,
-  outputOf?: ToolOutputResolver,
-): { verb: string; target?: string } {
+function getToolTarget(tc: AiToolCall): string | undefined {
   switch (tc.toolName) {
     case "readFile":
-      return { verb: "Read", target: tc.input.filename };
     case "writeFile":
-      return { verb: "Wrote", target: tc.input.filename };
     case "editFile":
-      return { verb: "Edited", target: tc.input.filename };
+      return tc.input.filename;
     case "describeBinding":
-      return { verb: "Inspected", target: `${String(tc.input.name)} binding` };
+      return String(tc.input.name);
     case "setBindingHook":
-      return {
-        verb: "Connected",
-        target: tc.input.entrypoint
-          ? `${tc.input.bindingName} → ${tc.input.entrypoint}`
-          : tc.input.bindingName,
-      };
+      return tc.input.entrypoint
+        ? `${tc.input.bindingName} → ${tc.input.entrypoint}`
+        : tc.input.bindingName;
     case "setGadgetBinding":
-      return {
-        verb: "Wired up",
-        target: formatGadgetBindingTarget(tc.input.gadget, tc.input.name ?? tc.input.source),
-      };
-    // Obsolete predecessor of `setGadgetBinding`; appears only in old chat logs.
+      return formatGadgetBindingTarget(tc.input.gadget, tc.input.name ?? tc.input.source);
     case "saveCapsuleAsBinding":
-      return { verb: "Saved resource", target: tc.input.bindingName };
-    case "createGadget": {
-
-      const output = outputOf?.(tc);
-      return { verb: `Created ${output?.noun ?? "gadget"}`, target: tc.input.title };
-    }
+      return tc.input.bindingName;
+    case "createGadget":
+      return tc.input.title;
     case "executeCode": {
-      // Prefer the first non-empty line as a preview. `code` may be absent while the tool call's
-      // input is still streaming in, so guard against undefined.
       const firstLine = tc.input.code
         ?.split("\n")
         .map((line) => line.trim())
         .find((line) => line.length > 0);
-      return {
-        verb: "Ran code",
-        target: firstLine
-          ? firstLine.length > 60
-            ? `${firstLine.slice(0, 57)}…`
-            : firstLine
-          : undefined,
-      };
+      return firstLine && firstLine.length > 60 ? `${firstLine.slice(0, 57)}…` : firstLine;
     }
-    case "giveUp":
-      return { verb: "Stopped" };
-    case "webFetch": {
-      let target = tc.input.url;
-      try {
-        target = new URL(tc.input.url).host;
-      } catch {
-        // Leave as the raw URL.
-      }
-      return { verb: "Fetched", target };
-    }
-    case "observeUserChanges":
-      return { verb: "Observed user changes" };
-    case "listBlueprints":
-      return { verb: "Listed blueprints" };
+    case "webFetch":
+      return tc.input.url;
     case "listConnectableResources":
-      return { verb: "Listed connectable resources", target: tc.input.vendorId };
     case "requestConnection":
-      return { verb: "Requested connection", target: tc.input.vendorId };
+      return tc.input.vendorId;
+    case "giveUp":
+    case "observeUserChanges":
+    case "listBlueprints":
+      return undefined;
   }
-  // Compile-time exhaustiveness check.
   const _exhaustive: never = tc;
-  return { verb: (_exhaustive as { toolName: string }).toolName };
+  return _exhaustive;
+}
+
+function translateToolActivity(
+  t: TFunction,
+  toolName: AiToolCall["toolName"],
+  form: "running" | "runningTarget" | "runningCount" | "completed" | "completedTarget" | "completedCount",
+  language: ChatActivityLanguage,
+  values: { target?: string; count?: number } = {},
+): string {
+  return t(`chat.activity.tool.${toolName}.${form}`, { lng: language, ...values });
+}
+
+function formatCompletedToolCall(
+  t: TFunction,
+  tc: AiToolCall,
+  language: ChatActivityLanguage,
+  outputOf?: ToolOutputResolver,
+): string {
+  const target = getToolTarget(tc);
+  if (tc.toolName === "createGadget") {
+    const output = outputOf?.(tc);
+    if (output) {
+      return t("chat.activity.tool.createGadget.completedOutput", {
+        lng: language,
+        noun: output.noun,
+        target,
+      });
+    }
+  }
+  return target
+    ? translateToolActivity(t, tc.toolName, "completedTarget", language, { target })
+    : translateToolActivity(t, tc.toolName, "completed", language);
 }
 
 type PhosphorIcon = typeof MagnifyingGlass;
@@ -745,63 +745,37 @@ type ToolCallGroup = {
   key: string;
   Icon: PhosphorIcon;
   label: string;
+  activityLanguage: ChatActivityLanguage;
   detailLines: string[];
   calls: AiToolCall[];
   observations: ObservationChatMessage[];
   hasError: boolean;
 };
 
-function lowerFirst(text: string): string {
-  return text ? text[0].toLowerCase() + text.slice(1) : text;
+function formatToolCallCount(
+  t: TFunction,
+  toolName: AiToolCall["toolName"],
+  count: number,
+  phase: "running" | "completed",
+  language: ChatActivityLanguage,
+): string {
+  return translateToolActivity(t, toolName, `${phase}Count`, language, { count });
 }
 
-function pluralize(count: number, singular: string, plural = `${singular}s`): string {
-  return `${count} ${count === 1 ? singular : plural}`;
+function formatObservationCount(
+  t: TFunction,
+  count: number,
+  language: ChatActivityLanguage,
+): string {
+  return t("chat.activity.observation.completedCount", { lng: language, count });
 }
 
-function formatTimes(count: number): string {
-  return pluralize(count, "time");
-}
-
-function describeObservationCount(count: number): string {
-  return count === 1 ? "Read 1 resource" : `${count} resource reads`;
-}
-
-function describeToolCallCount(toolName: AiToolCall["toolName"], count: number): string {
-  switch (toolName) {
-    case "readFile":
-      return `Read ${pluralize(count, "file")}`;
-    case "writeFile":
-      return `Wrote ${pluralize(count, "file")}`;
-    case "editFile":
-      return count === 1 ? "Made 1 edit" : `Made ${count} edits`;
-    case "webFetch":
-      return `Fetched ${pluralize(count, "page")}`;
-    case "executeCode":
-      return count === 1 ? "Ran code" : `Ran code ${formatTimes(count)}`;
-    case "describeBinding":
-      return `Inspected ${pluralize(count, "binding")}`;
-    case "setBindingHook":
-      return `Connected ${pluralize(count, "binding")}`;
-    case "setGadgetBinding":
-      return `Wired up ${pluralize(count, "binding")}`;
-    case "saveCapsuleAsBinding":
-      return `Saved ${pluralize(count, "resource")}`;
-    case "createGadget":
-      return `Created ${pluralize(count, "gadget")}`;
-    case "observeUserChanges":
-      return `Observed ${pluralize(count, "change set")}`;
-    case "giveUp":
-      return count === 1 ? "Stopped" : `Stopped ${count} times`;
-    case "listBlueprints":
-      return `Listed blueprints`;
-    case "listConnectableResources":
-      return `Listed connectable resources`;
-    case "requestConnection":
-      return count === 1 ? "Requested a connection" : `Requested ${count} connections`;
-  }
-  const _exhaustive: never = toolName;
-  return _exhaustive;
+function joinActivityLabels(
+  t: TFunction,
+  parts: string[],
+  language: ChatActivityLanguage,
+): string {
+  return parts.join(t("chat.activity.separator", { lng: language }));
 }
 
 // `output` names a format when the call is known to be producing one, so the row can use its icon.
@@ -839,192 +813,140 @@ function getToolIcon(
   }
 }
 
-function getProvisionalToolLabel(toolName: AiToolCall["toolName"] | null | undefined) {
-  switch (toolName) {
-    case "readFile":
-      return "Reading file";
-    case "writeFile":
-      return "Writing file";
-    case "editFile":
-      return "Editing file";
-    case "describeBinding":
-      return "Inspecting binding";
-    case "setBindingHook":
-      return "Connecting binding";
-    case "setGadgetBinding":
-      return "Wiring up binding";
-    case "saveCapsuleAsBinding":
-      return "Saving resource";
-    case "createGadget":
-      return "Creating gadget";
-    case "executeCode":
-      return "Running code";
-    case "webFetch":
-      return "Fetching web page";
-    case "observeUserChanges":
-      return "Observing user changes";
-    case "giveUp":
-      return "Stopping";
-    default:
-      return "Using tool";
-  }
+function formatProvisionalToolCall(
+  t: TFunction,
+  toolName: AiToolCall["toolName"],
+  target: string | undefined,
+  language: ChatActivityLanguage,
+): string {
+  return target
+    ? translateToolActivity(t, toolName, "runningTarget", language, { target })
+    : translateToolActivity(t, toolName, "running", language);
 }
 
-function getToolTarget(tc: AiToolCall): string | undefined {
-  return getToolCallSummary(tc).target;
-}
-
-// Present-tense verb for an in-progress tool call.
-function getProvisionalToolVerb(toolName: AiToolCall["toolName"]): string {
-  switch (toolName) {
-    case "readFile": return "Reading";
-    case "writeFile": return "Writing";
-    case "editFile": return "Editing";
-    case "describeBinding": return "Inspecting";
-    case "setBindingHook": return "Connecting";
-    case "setGadgetBinding": return "Wiring up";
-    case "saveCapsuleAsBinding": return "Saving";
-    case "createGadget": return "Creating gadget";
-    case "executeCode": return "Running code";
-    case "webFetch": return "Fetching";
-    case "observeUserChanges": return "Observing user changes";
-    case "giveUp": return "Stopping";
-    case "listBlueprints": return "Listing blueprints";
-    case "listConnectableResources": return "Listing connectable resources";
-    case "requestConnection": return "Requesting a connection";
-  }
-  const _exhaustive: never = toolName;
-  return _exhaustive;
-}
-
-// Present-tense, count-aware label mirroring describeToolCallCount (e.g. "Writing 5 files").
-function describeProvisionalToolCount(toolName: AiToolCall["toolName"], count: number): string {
-  if (count <= 1) return getProvisionalToolLabel(toolName);
-  switch (toolName) {
-    case "readFile": return `Reading ${pluralize(count, "file")}`;
-    case "writeFile": return `Writing ${pluralize(count, "file")}`;
-    case "editFile": return `Making ${count} edits`;
-    case "webFetch": return `Fetching ${pluralize(count, "page")}`;
-    case "executeCode": return count === 1 ? "Running code" : `Running code ${formatTimes(count)}`;
-    case "describeBinding": return `Inspecting ${pluralize(count, "binding")}`;
-    case "setBindingHook": return `Connecting ${pluralize(count, "binding")}`;
-    case "setGadgetBinding": return `Wiring up ${pluralize(count, "binding")}`;
-    case "saveCapsuleAsBinding": return `Saving ${pluralize(count, "resource")}`;
-    case "createGadget": return `Creating ${pluralize(count, "gadget")}`;
-    case "observeUserChanges": return `Observing ${pluralize(count, "change set")}`;
-    case "giveUp": return "Stopping";
-    case "listBlueprints": return "Listing blueprints";
-    case "listConnectableResources": return "Listing connectable resources";
-    case "requestConnection": return `Requesting ${pluralize(count, "connection")}`;
-  }
-  const _exhaustive: never = toolName;
-  return _exhaustive;
-}
-
-// Builds the label + detail lines for the in-progress tool-call row.
-function buildProvisionalToolSummary(
+export function buildProvisionalToolSummary(
+  t: TFunction,
   calls: ProvisionalToolCallState[],
+  language: ChatActivityLanguage,
 ): { label: string; detailLines: string[] } {
-
   if (calls.length === 1 && calls[0].outputFormat) {
-    return { label: `Creating ${calls[0].outputFormat.noun}`, detailLines: [] };
+    return {
+      label: t("chat.activity.tool.createGadget.runningOutput", {
+        lng: language,
+        noun: calls[0].outputFormat.noun,
+      }),
+      detailLines: [],
+    };
   }
   const toolNames = Array.from(
-    new Set(calls.map((c) => c.toolName).filter((n): n is AiToolCall["toolName"] => !!n)),
+    new Set(calls.map((call) => call.toolName).filter(
+      (toolName): toolName is AiToolCall["toolName"] => toolName !== null,
+    )),
   );
   const detailLines = Array.from(
-    new Set(calls.map((c) => c.target).filter((t): t is string => Boolean(t))),
+    new Set(calls.map((call) => call.target).filter((target): target is string => Boolean(target))),
   );
 
   if (toolNames.length === 0) {
-    return { label: "Using tool", detailLines: [] };
+    const key = calls.length > 1
+      ? "chat.activity.tool.generic.runningCount"
+      : "chat.activity.tool.generic.running";
+    return { label: t(key, { lng: language, count: calls.length }), detailLines: [] };
   }
 
   if (toolNames.length > 1) {
-    const parts = toolNames.map((toolName) =>
-      describeProvisionalToolCount(
-        toolName,
-        calls.filter((c) => c.toolName === toolName).length,
-      ),
-    );
-    return {
-      label: parts.map((part, i) => (i === 0 ? part : lowerFirst(part))).join(", "),
-      detailLines,
-    };
+    const parts = toolNames.map((toolName) => formatToolCallCount(
+      t,
+      toolName,
+      calls.filter((call) => call.toolName === toolName).length,
+      "running",
+      language,
+    ));
+    return { label: joinActivityLabels(t, parts, language), detailLines };
   }
 
   const toolName = toolNames[0];
   if (calls.length === 1) {
-    const target = detailLines[0];
     return {
-      label: target ? `${getProvisionalToolVerb(toolName)} ${target}` : getProvisionalToolLabel(toolName),
+      label: formatProvisionalToolCall(t, toolName, detailLines[0], language),
       detailLines: [],
     };
   }
 
-  const label =
-    detailLines.length === 1
-      ? `${getProvisionalToolVerb(toolName)} ${detailLines[0]}`
-      : describeProvisionalToolCount(toolName, calls.length);
+  const label = detailLines.length === 1
+    ? formatProvisionalToolCall(t, toolName, detailLines[0], language)
+    : formatToolCallCount(t, toolName, calls.length, "running", language);
   return { label, detailLines };
 }
 
 function buildToolCallGroups(
+  t: TFunction,
   toolCalls: AiToolCall[],
   observations: ObservationChatMessage[] = [],
   outputOf?: ToolOutputResolver,
+  language: ChatActivityLanguage = "en",
 ): ToolCallGroup[] {
   if (toolCalls.length === 0 && observations.length === 0) return [];
 
-  const distinctToolNames = Array.from(new Set(toolCalls.map((tc) => tc.toolName)));
+  const distinctToolNames = Array.from(new Set(toolCalls.map((toolCall) => toolCall.toolName)));
   const targets = toolCalls
-    .map((tc) => getToolTarget(tc))
+    .map((toolCall) => getToolTarget(toolCall))
     .filter((target): target is string => Boolean(target));
   const observationTargets = observations
-    .map((msg) => msg.actionLog.resourceTitle)
+    .map((message) => message.actionLog.resourceTitle)
     .filter((target): target is string => Boolean(target));
   const detailLines = Array.from(new Set([...targets, ...observationTargets]));
   const labelParts: string[] = [];
 
   if (toolCalls.length === 1) {
-    const summary = getToolCallSummary(toolCalls[0], outputOf);
-    labelParts.push(`${summary.verb}${summary.target ? ` ${summary.target}` : ""}`);
+    labelParts.push(formatCompletedToolCall(t, toolCalls[0], language, outputOf));
   } else if (toolCalls.length > 1 && distinctToolNames.length === 1) {
-    const summary = getToolCallSummary(toolCalls[0], outputOf);
-    labelParts.push(detailLines.length === 1 && summary.target && observations.length === 0
-      ? `${summary.verb} ${summary.target}`
-      : describeToolCallCount(toolCalls[0].toolName, toolCalls.length));
+    const target = getToolTarget(toolCalls[0]);
+    labelParts.push(detailLines.length === 1 && target && observations.length === 0
+      ? formatCompletedToolCall(t, toolCalls[0], language, outputOf)
+      : formatToolCallCount(t, toolCalls[0].toolName, toolCalls.length, "completed", language));
   } else if (toolCalls.length > 1 && distinctToolNames.length <= 3) {
-    labelParts.push(...distinctToolNames.map((toolName) => {
-      const count = toolCalls.filter((tc) => tc.toolName === toolName).length;
-      return describeToolCallCount(toolName, count);
-    }));
+    labelParts.push(...distinctToolNames.map((toolName) => formatToolCallCount(
+      t,
+      toolName,
+      toolCalls.filter((toolCall) => toolCall.toolName === toolName).length,
+      "completed",
+      language,
+    )));
   } else if (toolCalls.length > 0) {
-    labelParts.push(`${toolCalls.length} tool calls`);
+    labelParts.push(t("chat.activity.tool.generic.completedCount", {
+      lng: language,
+      count: toolCalls.length,
+    }));
   }
 
   if (observations.length > 0) {
-    labelParts.push(describeObservationCount(observations.length));
+    if (observations.length === 1 && toolCalls.length === 0) {
+      const target = observationTargets[0];
+      labelParts.push(target
+        ? t("chat.activity.observation.completed", { lng: language, target })
+        : t("chat.activity.observation.completedGeneric", { lng: language }));
+    } else {
+      labelParts.push(formatObservationCount(t, observations.length, language));
+    }
   }
 
   const firstToolCall = toolCalls[0];
   const firstObservation = observations[0];
 
   return [{
-    // Use the first work item id so expansion survives streaming → committed.
     key: firstToolCall
       ? `group-${firstToolCall.toolCallId}`
       : `group-observation-${firstObservation.chatId}-${firstObservation.sequence}`,
     Icon: firstToolCall
       ? getToolIcon(firstToolCall.toolName, outputOf?.(firstToolCall))
       : MagnifyingGlass,
-    label: labelParts
-      .map((part, index) => index === 0 ? part : lowerFirst(part))
-      .join(", "),
+    label: joinActivityLabels(t, labelParts, language),
+    activityLanguage: language,
     detailLines,
     calls: toolCalls,
     observations,
-    hasError: toolCalls.some((tc) => Boolean(tc.error)),
+    hasError: toolCalls.some((toolCall) => Boolean(toolCall.error)),
   }];
 }
 
@@ -1482,7 +1404,10 @@ const ChatAttachmentGrid = memo(function ChatAttachmentGrid(
 });
 
 const ToolCallDetails = memo(function ToolCallDetails(
-  { toolCall: tc }: { toolCall: AiToolCall },
+  { toolCall: tc, activityLanguage }: {
+    toolCall: AiToolCall;
+    activityLanguage: ChatActivityLanguage;
+  },
 ) {
   return (
     <div className="space-y-2">
@@ -1494,7 +1419,7 @@ const ToolCallDetails = memo(function ToolCallDetails(
       {tc.toolName === "executeCode" ? (
         <>
           <span className="font-mono text-[11px] leading-4 text-kumo-inactive uppercase tracking-[0.08em]">
-            Code
+            {i18n.t("chat.activity.status.code", { lng: activityLanguage })}
           </span>
           <pre className="max-h-56 overflow-auto rounded-xl border border-kumo-line/70 bg-kumo-base p-3 font-mono text-[12px] leading-[18px] text-kumo-subtle whitespace-pre-wrap">
             {tc.input.code}
@@ -1502,7 +1427,7 @@ const ToolCallDetails = memo(function ToolCallDetails(
           {tc.output && (
             <>
               <span className="font-mono text-[11px] leading-4 text-kumo-inactive uppercase tracking-[0.08em]">
-                Output
+                {i18n.t("chat.activity.status.output", { lng: activityLanguage })}
               </span>
               <pre className="max-h-56 overflow-auto rounded-xl border border-kumo-line/70 bg-kumo-base p-3 font-mono text-[12px] leading-[18px] text-kumo-subtle whitespace-pre-wrap">
                 {tc.output}
@@ -1564,15 +1489,16 @@ const NestedToolCallRow = memo(function NestedToolCallRow({
   open,
   onToggle,
   outputOf,
+  activityLanguage,
 }: {
   toolCall: AiToolCall;
   open: boolean;
   onToggle: (key: string) => void;
   outputOf?: ToolOutputResolver;
+  activityLanguage: ChatActivityLanguage;
 }) {
   const key = `call-${tc.toolCallId}`;
-  const summary = getToolCallSummary(tc, outputOf);
-  const label = `${summary.verb}${summary.target ? ` ${summary.target}` : ""}`;
+  const label = formatCompletedToolCall(i18n.t, tc, activityLanguage, outputOf);
   const Icon = getToolIcon(tc.toolName, outputOf?.(tc));
 
   return (
@@ -1590,7 +1516,7 @@ const NestedToolCallRow = memo(function NestedToolCallRow({
           <span className="min-w-0 truncate">{label}</span>
           {tc.error && (
             <span className="flex-shrink-0 rounded-full bg-kumo-danger-tint px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.04em] text-kumo-danger">
-              Error
+              {i18n.t("chat.activity.status.error", { lng: activityLanguage })}
             </span>
           )}
           <CaretRight
@@ -1602,7 +1528,7 @@ const NestedToolCallRow = memo(function NestedToolCallRow({
       </button>
       {open && (
         <div className="themed-surface-inset ml-8 mt-1 space-y-3 rounded-2xl border border-kumo-line/70 bg-kumo-elevated/45 p-3">
-          <ToolCallDetails toolCall={tc} />
+          <ToolCallDetails toolCall={tc} activityLanguage={activityLanguage} />
         </div>
       )}
     </div>
@@ -1613,14 +1539,19 @@ const NestedObservationRow = memo(function NestedObservationRow({
   observation,
   open,
   onToggle,
+  activityLanguage,
 }: {
   observation: ObservationChatMessage;
   open: boolean;
   onToggle: (key: string) => void;
+  activityLanguage: ChatActivityLanguage;
 }) {
   const key = `observation-${observation.chatId}-${observation.sequence}`;
   const log = observation.actionLog;
-  const label = `Read ${log.description.title || log.resourceTitle || "resource"}`;
+  const target = log.description.title || log.resourceTitle;
+  const label = target
+    ? i18n.t("chat.activity.observation.completed", { lng: activityLanguage, target })
+    : i18n.t("chat.activity.observation.completedGeneric", { lng: activityLanguage });
 
   return (
     <div className="group/nested">
@@ -1709,7 +1640,7 @@ const ToolGroupRow = memo(function ToolGroupRow({
             <span className="min-w-0 truncate">{group.label}</span>
             {group.hasError && (
               <span className="flex-shrink-0 rounded-full bg-kumo-danger-tint px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.04em] text-kumo-danger">
-                Error
+                {i18n.t("chat.activity.status.error", { lng: group.activityLanguage })}
               </span>
             )}
             <CaretRight
@@ -1728,7 +1659,10 @@ const ToolGroupRow = memo(function ToolGroupRow({
       {open && (
         group.calls.length === 1 && group.observations.length === 0 ? (
           <div className="themed-surface-inset ml-8 mt-1 space-y-3 rounded-2xl border border-kumo-line/70 bg-kumo-elevated/45 p-3">
-            <ToolCallDetails toolCall={group.calls[0]} />
+            <ToolCallDetails
+              toolCall={group.calls[0]}
+              activityLanguage={group.activityLanguage}
+            />
           </div>
         ) : group.calls.length === 0 && group.observations.length === 1 ? (
           <div className="themed-surface-inset ml-8 mt-1 space-y-3 rounded-2xl border border-kumo-line/70 bg-kumo-elevated/45 p-3">
@@ -1745,6 +1679,7 @@ const ToolGroupRow = memo(function ToolGroupRow({
                   open={expandedKeys.has(key)}
                   onToggle={onToggle}
                   outputOf={outputOf}
+                  activityLanguage={group.activityLanguage}
                 />
               );
             })}
@@ -1756,6 +1691,7 @@ const ToolGroupRow = memo(function ToolGroupRow({
                   observation={observation}
                   open={expandedKeys.has(key)}
                   onToggle={onToggle}
+                  activityLanguage={group.activityLanguage}
                 />
               );
             })}
@@ -3658,6 +3594,7 @@ type ChatDisplayEntry =
       type: "compactionBoundary";
       key: string;
       boundary: CompactionBoundary;
+      activityLanguage: ChatActivityLanguage;
       requestedBy?: AiChatAuthorInfo;
       // How much of the thread the cut spared, counted in rows between it and this announcement.
       keptRows?: number;
@@ -3668,6 +3605,7 @@ type ChatDisplayEntry =
       type: "compactionCut";
       key: string;
       boundary: CompactionBoundary;
+      activityLanguage: ChatActivityLanguage;
     }
   | {
       type: "modelChange";
@@ -3704,6 +3642,7 @@ function isObservationActionMessage(msg: AiChatMessage): msg is ObservationChatM
 }
 
 type WorkMessageParts = {
+  activityLanguage: ChatActivityLanguage;
   toolCalls: AiToolCall[];
   observations: ObservationChatMessage[];
   lastAgentMessageSequence: number | null;
@@ -3729,6 +3668,7 @@ function isEmptyAssistantMessage(msg: AiChatMessage): boolean {
 function getWorkOnlyMessageParts(msg: AiChatMessage): WorkMessageParts | null {
   if (isObservationActionMessage(msg)) {
     return {
+      activityLanguage: msg.activityLanguage ?? "en",
       toolCalls: [],
       observations: [msg],
       lastAgentMessageSequence: null,
@@ -3743,6 +3683,7 @@ function getWorkOnlyMessageParts(msg: AiChatMessage): WorkMessageParts | null {
     msg.toolCalls.length > 0
   ) {
     return {
+      activityLanguage: msg.activityLanguage ?? "en",
       toolCalls: msg.toolCalls,
       observations: [],
       lastAgentMessageSequence: msg.sequence,
@@ -3875,6 +3816,7 @@ export function buildChatDisplayEntries(
   // Loaded compaction boundaries, oldest first.
   boundaries: readonly CompactionBoundary[] = [],
   outputOf?: ToolOutputResolver,
+  t: TFunction = i18n.t,
 ): ChatDisplayEntry[] {
   const result: ChatDisplayEntry[] = [];
   let lastAgentAuthorId: string | null = null;
@@ -3885,11 +3827,18 @@ export function buildChatDisplayEntries(
   // this cut and the next, since a later request can only produce a later cut. Compaction that ran
   // on its own has no request to announce at, and is announced at the cut.
   const requestFor = new Map<number, number>();
+  const boundaryLanguages = new Map<number, ChatActivityLanguage>();
   boundaries.forEach((boundary, index) => {
     const until = boundaries[index + 1]?.to ?? Infinity;
     const request = messages.find(msg => msg.sequence >= boundary.to && msg.sequence < until &&
         msg.type === "slashCommand" && msg.request.id.builtin === true);
     if (request) requestFor.set(boundary.to, request.sequence);
+    boundaryLanguages.set(
+      boundary.to,
+      request?.activityLanguage ??
+        messages.find((message) => message.sequence >= boundary.to)?.activityLanguage ??
+        "en",
+    );
   });
 
   // Where each cut was drawn, so the announcement can say how much of the thread survived it. Rows
@@ -3903,9 +3852,15 @@ export function buildChatDisplayEntries(
       rowsAtCut.set(boundary.to, result.length);
       // Announced at a request further down, so all that belongs here is the line showing where the
       // messages the agent still holds verbatim begin -- revealed only while the summary is open.
+      const activityLanguage = boundaryLanguages.get(boundary.to) ?? "en";
       result.push(requestFor.has(boundary.to)
-        ? {type: "compactionCut", key: `cut-${boundary.to}`, boundary}
-        : {type: "compactionBoundary", key: `compacted-${boundary.to}`, boundary});
+        ? {type: "compactionCut", key: `cut-${boundary.to}`, boundary, activityLanguage}
+        : {
+            type: "compactionBoundary",
+            key: `compacted-${boundary.to}`,
+            boundary,
+            activityLanguage,
+          });
     }
   };
 
@@ -3949,6 +3904,7 @@ export function buildChatDisplayEntries(
             type: "compactionBoundary",
             key: `compacted-${announced.to}`,
             boundary: announced,
+            activityLanguage: msg.activityLanguage ?? "en",
             requestedBy: msg.author,
             keptRows: atCut === undefined ? 0 : result.length - atCut - 1,
           });
@@ -3997,6 +3953,7 @@ export function buildChatDisplayEntries(
     const initialWorkParts = getWorkOnlyMessageParts(msg);
     if (initialWorkParts) {
       const workParts: WorkMessageParts = {
+        activityLanguage: initialWorkParts.activityLanguage,
         toolCalls: [...initialWorkParts.toolCalls],
         observations: [...initialWorkParts.observations],
         lastAgentMessageSequence: initialWorkParts.lastAgentMessageSequence,
@@ -4012,7 +3969,7 @@ export function buildChatDisplayEntries(
           continue;
         }
         const nextWorkParts = getWorkOnlyMessageParts(nextMsg);
-        if (!nextWorkParts) break;
+        if (!nextWorkParts || nextWorkParts.activityLanguage !== workParts.activityLanguage) break;
         appendWorkParts(workParts, nextWorkParts);
         j++;
       }
@@ -4023,9 +3980,11 @@ export function buildChatDisplayEntries(
         toolCalls: workParts.toolCalls,
         observations: workParts.observations,
         toolCallGroups: buildToolCallGroups(
+          t,
           transcriptToolCalls(workParts.toolCalls),
           workParts.observations,
           outputOf,
+          workParts.activityLanguage,
         ),
         lastMessageSequence: workParts.lastAgentMessageSequence ?? workParts.lastWorkSequence,
         lastMessageTimestamp: workParts.lastWorkTimestamp,
@@ -4037,6 +3996,7 @@ export function buildChatDisplayEntries(
 
     if (msg.type === "message" && msg.author.type !== "user") {
       const workParts: WorkMessageParts = {
+        activityLanguage: msg.activityLanguage ?? "en",
         toolCalls: msg.toolCalls ? [...msg.toolCalls] : [],
         observations: [],
         lastAgentMessageSequence: msg.sequence,
@@ -4052,7 +4012,7 @@ export function buildChatDisplayEntries(
           continue;
         }
         const nextWorkParts = getWorkOnlyMessageParts(nextMsg);
-        if (!nextWorkParts) break;
+        if (!nextWorkParts || nextWorkParts.activityLanguage !== workParts.activityLanguage) break;
         appendWorkParts(workParts, nextWorkParts);
         j++;
       }
@@ -4064,9 +4024,11 @@ export function buildChatDisplayEntries(
           message: msg,
           toolCalls: workParts.toolCalls,
           toolCallGroups: buildToolCallGroups(
+            t,
             transcriptToolCalls(workParts.toolCalls),
             workParts.observations,
             outputOf,
+            workParts.activityLanguage,
           ),
           lastMessageSequence: workParts.lastAgentMessageSequence ?? msg.sequence,
         });
@@ -4829,7 +4791,12 @@ function ChatInterface({
       // checkpoints get their own compact row so the discard action is attached to the
       // edit that actually created it.
       buildChatDisplayEntries(
-          currentMessages, messageStates.changeStatus, currentCompactions, resolveToolOutput),
+        currentMessages,
+        messageStates.changeStatus,
+        currentCompactions,
+        resolveToolOutput,
+        i18n.t,
+      ),
     [currentMessages, messageStates, currentCompactions, resolveToolOutput],
   );
 
@@ -4874,6 +4841,7 @@ function ChatInterface({
   // Get metadata for selected chat
   const currentChatMetadata =
     selectedChatId !== null ? cacheRef.current.chats.get(selectedChatId) : null;
+  const provisionalActivityLanguage = currentChatMetadata?.activityLanguage ?? "en";
 
   // Download a committed chat attachment. Image bytes are already inlined on the message; other
   // attachments are fetched on demand over the authenticated RPC connection.
@@ -7045,7 +7013,9 @@ function ChatInterface({
                             <div className="flex items-center gap-3" role="separator">
                               <span className="h-px flex-1 bg-kumo-line/60" aria-hidden="true" />
                               <span className="flex-shrink-0 text-[11px] leading-4 font-medium tracking-[0.6px] text-kumo-inactive uppercase">
-                                Kept in full from here
+                                {i18n.t("chat.activity.compacting.cut", {
+                                  lng: entry.activityLanguage,
+                                })}
                               </span>
                               <span className="h-px flex-1 bg-kumo-line/60" aria-hidden="true" />
                             </div>
@@ -7062,10 +7032,17 @@ function ChatInterface({
                               // Says what the agent traded away and what it still has, since the
                               // marker sits at the request rather than at the cut it describes.
                               <p className="mb-3 text-[12px] leading-[17px] text-kumo-subtle">
-                                The agent reads this in place of everything earlier in the chat.{" "}
+                                {i18n.t("chat.activity.compacting.summaryReplacement", {
+                                  lng: entry.activityLanguage,
+                                })}{" "}
                                 {kept === 0
-                                  ? "Nothing after it was kept."
-                                  : `The ${kept === 1 ? "message" : `${kept} messages`} after the cut ${kept === 1 ? "was" : "were"} kept in full.`}
+                                  ? i18n.t("chat.activity.compacting.nothingKept", {
+                                      lng: entry.activityLanguage,
+                                    })
+                                  : i18n.t("chat.activity.compacting.keptCount", {
+                                      lng: entry.activityLanguage,
+                                      count: kept,
+                                    })}
                               </p>
                             )}
                             <div className={`min-w-0 text-[13px] leading-[19px] ${styles.markdownContent}`}>
@@ -7090,7 +7067,10 @@ function ChatInterface({
                                   <Brain size={16} />
                                 </span>
                                 <span className="font-medium">
-                                  {entry.requestedBy.name} compacted the context
+                                  {i18n.t("chat.activity.compacting.completedBy", {
+                                    lng: entry.activityLanguage,
+                                    actor: entry.requestedBy.name,
+                                  })}
                                 </span>
                                 <CaretRight
                                   size={11}
@@ -7105,7 +7085,13 @@ function ChatInterface({
 
                         return (
                           <div key={entry.key} className={`${entryTopClass} mb-4 max-w-[860px]`}>
-                            <div className="flex items-center gap-3" role="separator" aria-label="Context compacted">
+                            <div
+                              className="flex items-center gap-3"
+                              role="separator"
+                              aria-label={i18n.t("chat.activity.compacting.separator", {
+                                lng: entry.activityLanguage,
+                              })}
+                            >
                               <span className="h-px flex-1 bg-kumo-line" aria-hidden="true" />
                               <button
                                 type="button"
@@ -7114,7 +7100,9 @@ function ChatInterface({
                                 className="flex flex-shrink-0 cursor-pointer items-center gap-1.5 rounded-md px-1 py-0.5 text-[11px] leading-4 font-medium tracking-[0.6px] text-kumo-inactive uppercase transition-colors duration-150 ease-out hover:text-kumo-default focus-visible:text-kumo-default focus-visible:outline-none"
                               >
                                 <Brain size={13} aria-hidden="true" />
-                                Context compacted
+                                {i18n.t("chat.activity.compacting.separator", {
+                                  lng: entry.activityLanguage,
+                                })}
                                 <CaretRight
                                   size={11}
                                   weight="bold"
@@ -7711,13 +7699,17 @@ function ChatInterface({
                         <div className={`group/agent min-w-0 w-full max-w-[860px] space-y-2 ${provisionalTopClass}`}>
                           {isCompacting && (
                             <div className={`inline-flex px-1.5 py-1 text-[14px] leading-5 tracking-[-0.25px] ${styles.thinkingShimmer}`}>
-                              Compacting…
+                              {i18n.t("chat.activity.compacting.running", {
+                                lng: provisionalActivityLanguage,
+                              })}
                             </div>
                           )}
 
                           {showThinking && (
                             <div className={`inline-flex px-1.5 py-1 text-[14px] leading-5 tracking-[-0.25px] ${styles.thinkingShimmer}`}>
-                              Thinking
+                              {i18n.t("chat.activity.thinking.running", {
+                                lng: provisionalActivityLanguage,
+                              })}
                             </div>
                           )}
 
@@ -7733,8 +7725,11 @@ function ChatInterface({
 
                           {provisionalToolCalls.length > 0 && (() => {
                             const first = provisionalToolCalls[0];
-                            const { label, detailLines } =
-                              buildProvisionalToolSummary(provisionalToolCalls);
+                            const { label, detailLines } = buildProvisionalToolSummary(
+                              i18n.t,
+                              provisionalToolCalls,
+                              provisionalActivityLanguage,
+                            );
                             const expansionKey = `group-${first.toolCallId}`;
                             const isExpanded = expandedToolCalls.has(expansionKey);
                             const detailCalls = provisionalToolCalls.filter(
@@ -7777,7 +7772,11 @@ function ChatInterface({
                                         >
                                           {toolCall.code && (
                                             <>
-                                              <span className="font-mono text-[11px] leading-4 text-kumo-inactive uppercase tracking-[0.08em]">Code</span>
+                                              <span className="font-mono text-[11px] leading-4 text-kumo-inactive uppercase tracking-[0.08em]">
+                                                {i18n.t("chat.activity.status.code", {
+                                                  lng: provisionalActivityLanguage,
+                                                })}
+                                              </span>
                                               <pre className="max-h-56 overflow-auto rounded-xl border border-kumo-line/70 bg-kumo-base p-3 font-mono text-[12px] leading-[18px] text-kumo-subtle whitespace-pre-wrap">
                                                 {toolCall.code}
                                               </pre>
@@ -7785,7 +7784,11 @@ function ChatInterface({
                                           )}
                                           {toolCall.output && (
                                             <>
-                                              <span className="font-mono text-[11px] leading-4 text-kumo-inactive uppercase tracking-[0.08em]">Output</span>
+                                              <span className="font-mono text-[11px] leading-4 text-kumo-inactive uppercase tracking-[0.08em]">
+                                                {i18n.t("chat.activity.status.output", {
+                                                  lng: provisionalActivityLanguage,
+                                                })}
+                                              </span>
                                               <pre className="max-h-56 overflow-auto rounded-xl border border-kumo-line/70 bg-kumo-base p-3 font-mono text-[12px] leading-[18px] text-kumo-subtle whitespace-pre-wrap">
                                                 {toolCall.output}
                                               </pre>
