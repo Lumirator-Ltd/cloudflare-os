@@ -360,6 +360,12 @@ export interface AuthenticatedApi extends RpcTarget {
   /** Set the user's own display name, seen in chats, etc. */
   setOwnDisplayName(name: string): Promise<void>;
 
+  /** Get the user's persisted UI language preference. */
+  getLanguagePreference(): Promise<LanguagePreference>;
+
+  /** Set the user's persisted UI language preference. */
+  setLanguagePreference(preference: LanguagePreference): Promise<void>;
+
   /**
    * Change the user's password, if using password-based authentication.
    *
