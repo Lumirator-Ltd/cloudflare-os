@@ -1197,8 +1197,12 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     };
 
     let callback = this.ctx.exports.GatekeeperConnectCallbackImpl({props});
+    const preference = await this.getLanguagePreference();
+    const language = preference === "auto"
+      ? this.env.DEFAULT_LANGUAGE === "ja" ? "ja" : "en"
+      : preference;
 
-    let {url} = await vendor.connectAccount(callback, {resourceUrlPatterns});
+    let {url} = await vendor.connectAccount(callback, {resourceUrlPatterns, language});
     logger.info("account connect started", {
       event: "account.connect.started", vendorId, accountId,
     });

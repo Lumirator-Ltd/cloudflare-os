@@ -77,6 +77,7 @@ export function connectFormHtml(path: string, error?: string, language?: string)
   <p class="sub">${copy.introduction}</p>
   ${error ? `<p class="err">${escapeHtml(error)}</p>` : ""}
   <form method="POST" action="${escapeHtml(path)}">
+    <input type="hidden" name="language" value="${resolvedLanguage}">
     <label for="url">${copy.serverUrl}</label>
     <input id="url" type="url" name="url" placeholder="${copy.placeholder}" required autofocus>
     <p class="hint">${copy.trustNotice}</p>

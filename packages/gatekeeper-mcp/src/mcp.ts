@@ -99,44 +99,68 @@ export default {
       accountForId: id => ctx.exports.McpAccount.get(
         ctx.exports.McpAccount.idFromString(id)),
       log: logger,
-      connect: async (request, account, initiationNonce, path) => {
-        if (request.method !== "GET" && request.method !== "POST") {
-          return new Response("Method Not Allowed", { status: 405 });
-        }
-
-        // A reconnect already knows its endpoint. Ignore a stale or malicious replacement URL.
-        if (await account.hasEndpoint()) {
-          return continueConnect(account, initiationNonce, null, env, path);
-        }
-        if (request.method === "GET") {
-          if (!(await account.isAwaitingSelection(initiationNonce))) {
-            return htmlResponse(INVALID_LINK_HTML, 400);
-          }
-          return htmlResponse(connectFormHtml(path));
-        }
-        const form = await request.formData();
-        return continueConnect(
-          account, initiationNonce, String(form.get("url") ?? ""), env, path);
-      },
+      connect: (request, account, initiationNonce, path) =>
+        handleConnectRequest(request, account, initiationNonce, env, path),
     });
   },
 };
 
+type ConnectAccount = Pick<
+  McpAccount,
+  "hasEndpoint" | "isAwaitingSelection" | "beginConnect"
+>;
+
+/** Handles an MCP endpoint connection request while preserving its requested form language. */
+export async function handleConnectRequest(
+  request: Request,
+  account: ConnectAccount,
+  initiationNonce: string,
+  env: Env,
+  path: string,
+): Promise<Response> {
+  if (request.method !== "GET" && request.method !== "POST") {
+    return new Response("Method Not Allowed", { status: 405 });
+  }
+
+  const queryLanguage = new URL(request.url).searchParams.get("language") ?? undefined;
+
+  // A reconnect already knows its endpoint. Ignore a stale or malicious replacement URL.
+  if (await account.hasEndpoint()) {
+    return continueConnect(account, initiationNonce, null, env, path, queryLanguage);
+  }
+  if (request.method === "GET") {
+    if (!(await account.isAwaitingSelection(initiationNonce))) {
+      return htmlResponse(INVALID_LINK_HTML, 400);
+    }
+    return htmlResponse(connectFormHtml(path, undefined, queryLanguage));
+  }
+  const form = await request.formData();
+  return continueConnect(
+    account,
+    initiationNonce,
+    String(form.get("url") ?? ""),
+    env,
+    path,
+    String(form.get("language") ?? queryLanguage ?? ""),
+  );
+}
+
 // Validates the endpoint the user typed, then hands off to the account DO, which owns every
 // credential. `endpointUrl` is null on a reconnect.
 async function continueConnect(
-  account: DurableObjectStub<McpAccount>,
+  account: ConnectAccount,
   initiationNonce: string,
   endpointUrl: string | null,
   env: Env,
   formPath: string,
+  language?: string,
 ): Promise<Response> {
   let target: ConnectedServer | null = null;
 
   if (endpointUrl !== null) {
     const validated = validateCustomEndpoint(env, endpointUrl);
     if (!validated.ok) {
-      return htmlResponse(connectFormHtml(formPath, validated.reason), 400);
+      return htmlResponse(connectFormHtml(formPath, validated.reason, language), 400);
     }
     // `serverName` is a placeholder until the handshake reports the server's own name, and `auth` is
     // a guess that `beginConnect` corrects to `"none"` if the endpoint turns out to be public.
@@ -155,7 +179,7 @@ async function continueConnect(
   } catch (err) {
     logger.warn("connect failed", { event: "connect.failed", error: err });
     return htmlResponse(connectFormHtml(
-      formPath, err instanceof Error ? err.message : String(err)), 502);
+      formPath, err instanceof Error ? err.message : String(err), language), 502);
   }
 
   if (outcome.kind === "invalid") return htmlResponse(INVALID_LINK_HTML, 400);
@@ -183,12 +207,14 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
 
   async connectAccount(
     callback: Fetcher<GatekeeperConnectCallback>,
-    _options?: GatekeeperConnectOptions,
+    options?: GatekeeperConnectOptions,
   ): Promise<{ url: string }> {
     const accountId = this.ctx.exports.McpAccount.newUniqueId();
     const initiationNonce = generateNonce();
     await this.ctx.exports.McpAccount.get(accountId).setCallback(callback, initiationNonce);
-    return { url: `${getBaseUrl(this.env)}/${accountId.toString()}/${initiationNonce}` };
+    const url = new URL(`${getBaseUrl(this.env)}/${accountId.toString()}/${initiationNonce}`);
+    url.searchParams.set("language", options?.language ?? "en");
+    return { url: url.href };
   }
 
   async getSupportedResources(): Promise<SupportedResource[]> {

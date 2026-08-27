@@ -496,10 +496,14 @@ export type ResourceConfiguratorFrame = GatekeeperUiFrame;
  * is requested. An **empty array is meaningful and distinct from omitting it**: it requests no
  * resource authorization at all, which is how a caller connects an account for a non-resource
  * purpose (e.g. billing) without asking the user to grant data access it will never use.
+ * `language` selects the supported language for user-facing connection UI; vendors that do not
+ * render connection UI may ignore it.
  */
 export type GatekeeperConnectOptions = {
   scopes?: "auth" | "full";
   resourceUrlPatterns?: string[];
+  /** The resolved language for user-facing connection UI. */
+  language?: SupportedLanguage;
 };
 
 export interface GatekeeperVendor extends WorkerEntrypoint {
@@ -535,6 +539,9 @@ export interface GatekeeperVendor extends WorkerEntrypoint {
    * types is requested. An empty array is not the same as omitting it: it requests no resource
    * authorization, so a vendor must treat `[]` as "none" rather than falling back to "all" -- doing
    * otherwise would silently over-request access the user was never shown a reason for.
+   *
+   * `options.language`, when present, is the caller's resolved supported language for any
+   * user-facing connection UI. Vendors without connection UI may ignore it.
    */
   connectAccount(callback: Fetcher<GatekeeperConnectCallback>,
                  options?: GatekeeperConnectOptions): Promise<{url: string}>;

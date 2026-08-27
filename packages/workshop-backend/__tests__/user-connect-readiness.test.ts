@@ -96,6 +96,49 @@ function configuratorUser() {
 }
 
 describe("UserDurableObject connector readiness", () => {
+  it.each([
+    ["ja", undefined, "ja"],
+    ["auto", "ja", "ja"],
+    ["en", "ja", "en"],
+    ["auto", undefined, "en"],
+    ["auto", "invalid", "en"],
+  ] as const)(
+    "passes resolved language preference %s with DEFAULT_LANGUAGE=%s to the connector",
+    async (preference, defaultLanguage, expectedLanguage) => {
+      let receivedOptions: unknown;
+      const resourceUrlPatterns = ["https://example.com/:resource"];
+      const vendor = {
+        async describe() {
+          return { displayName: "Example", url: "https://example.com" };
+        },
+        async connectAccount(_callback: unknown, options: unknown) {
+          receivedOptions = options;
+          return { url: "https://example.com/connect" };
+        },
+      } as Service<GatekeeperVendor>;
+      const user = Object.create(UserDurableObject.prototype) as UserDurableObject;
+      Object.assign(user, {
+        vendors: new Map([["example", vendor]]),
+        env: {
+          BLUEPRINTS: { get: async () => null },
+          ...(defaultLanguage === undefined ? {} : { DEFAULT_LANGUAGE: defaultLanguage }),
+        },
+        storage: {
+          languagePreference: { get: () => preference },
+          nextAccountId: { get: () => 0, put: () => {} },
+        },
+        ctx: {
+          id: { toString: () => "user-id" },
+          exports: { GatekeeperConnectCallbackImpl: () => ({}) },
+        },
+      });
+
+      await user.connectAccount("example", resourceUrlPatterns);
+
+      expect(receivedOptions).toEqual({ resourceUrlPatterns, language: expectedLanguage });
+    },
+  );
+
   it("rejects an unconfigured connector before allocating account state or connecting", async () => {
     let nextAccountId = 12;
     let callbackAllocations = 0;
