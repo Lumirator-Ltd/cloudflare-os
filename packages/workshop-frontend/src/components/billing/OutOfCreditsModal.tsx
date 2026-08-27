@@ -148,24 +148,19 @@ export default function OutOfCreditsModal({ open, onClose }: OutOfCreditsModalPr
             {!connected ? (
               <p className="text-sm text-kumo-subtle">
                 {userFundingRequired ? (
-                  'Connect your Cloudflare account and add AI Gateway credits to use AI models. All inference is billed directly to your account.'
+                  t('billing.outOfCredits.fundingDescription')
                 ) : (
                   <>
-                    You've used all {usage.dailyLimit} of your free {usage.dailyLimit === 1 ? 'request' : 'requests'} for
-                    today. Connect your Cloudflare account to keep building now — usage beyond the free
-                    tier is billed to your own Cloudflare AI Gateway credits
-                    {usage.resetAt ? (
-                      <>
-                        {' '}— or wait: your free {usage.dailyLimit === 1 ? 'request resets' : 'requests reset'} at
-                        00:00 UTC, in <ResetCountdown resetAt={usage.resetAt} onElapsed={refresh} />.
-                      </>
-                    ) : '.'}
+                    {t('billing.outOfCredits.freeLimit', { limit: usage.dailyLimit })}
+                    {usage.resetAt && (
+                      <> {t('billing.outOfCredits.waitForReset')} <ResetCountdown resetAt={usage.resetAt} onElapsed={refresh} /></>
+                    )}
                   </>
                 )}
               </p>
             ) : needsReconnect ? (
               <p className="text-sm text-kumo-subtle">
-                Re-authenticate the connected Cloudflare account before AI inference can continue.
+                {t('billing.usage.reauthDescription')}
               </p>
             ) : needsSelection ? (
               <p className="text-sm text-kumo-subtle">
@@ -173,22 +168,20 @@ export default function OutOfCreditsModal({ open, onClose }: OutOfCreditsModalPr
                   ? t('billing.common.discoveryFailed')
                   : accounts?.length === 0
                     ? t('billing.common.noEligible')
-                    : `Choose which Cloudflare account's AI Gateway credits should be billed${userFundingRequired ? '.' : ' beyond the free tier.'}`}
+                    : t(userFundingRequired
+                      ? 'billing.outOfCredits.chooseAccountAll'
+                      : 'billing.outOfCredits.chooseAccountBeyond')}
               </p>
             ) : (
               <p className="text-sm text-kumo-subtle">
-                Your Cloudflare account is connected
-                {usage.balance !== null && (
-                  <>{t('billing.outOfCredits.balance', { amount: formatNumber(usage.balance, effectiveLanguage, { style: 'currency', currency: 'USD' }) })}</>
+                {t('billing.outOfCredits.connectedBalance', {
+                  amount: usage.balance === null
+                    ? t('billing.common.unknown')
+                    : formatNumber(usage.balance, effectiveLanguage, { style: 'currency', currency: 'USD' }),
+                })}
+                {usage.resetAt && (
+                  <> {t('billing.outOfCredits.waitForReset')} <ResetCountdown resetAt={usage.resetAt} onElapsed={refresh} /></>
                 )}
-                , but it's below the minimum needed to continue. Add credits to your AI Gateway to
-                keep building now
-                {usage.resetAt ? (
-                  <>
-                    {' '}or wait — your free {usage.dailyLimit === 1 ? 'request resets' : 'requests reset'} at
-                    00:00 UTC, in <ResetCountdown resetAt={usage.resetAt} onElapsed={refresh} />.
-                  </>
-                ) : '.'}
               </p>
             )}
 
@@ -218,16 +211,14 @@ export default function OutOfCreditsModal({ open, onClose }: OutOfCreditsModalPr
             )}
 
             <p className="text-sm text-kumo-subtle">
-              Learn more about{' '}
               <a
                 href="https://developers.cloudflare.com/ai-gateway/features/unified-billing/"
                 target="_blank"
                 rel="noreferrer"
                 className="underline"
               >
-                AI Gateway unified billing
+                {t('billing.usage.learnMore')}
               </a>
-              .
             </p>
 
             <div className="flex items-center justify-end gap-2 pt-2">
@@ -236,35 +227,35 @@ export default function OutOfCreditsModal({ open, onClose }: OutOfCreditsModalPr
                   <Button variant="secondary" onClick={onClose}>{t('billing.outOfCredits.maybeLater')}</Button>
                   <Button variant="primary" onClick={connect} loading={connecting}>
                     <Lightning size={16} weight="bold" />
-                    Connect Cloudflare
+                    {t('billing.usage.connect')}
                   </Button>
                 </>
               ) : needsReconnect ? (
                 <>
-                  <Button variant="secondary" onClick={onClose}>Close</Button>
+                  <Button variant="secondary" onClick={onClose}>{t('billing.common.close')}</Button>
                   <Button variant="primary" onClick={reconnect} loading={connecting}>
                     <Lightning size={16} weight="bold" />
-                    Re-authenticate Cloudflare
+                    {t('billing.usage.reauthenticate')}
                   </Button>
                 </>
               ) : needsSelection ? (
                 <>
-                  <Button variant="secondary" onClick={onClose}>Close</Button>
+                  <Button variant="secondary" onClick={onClose}>{t('billing.common.close')}</Button>
                   {!accountDiscoveryFailed && accounts?.length === 0 && (
                     <Button variant="primary" onClick={reconnect} loading={connecting}>
                       <Lightning size={16} weight="bold" />
-                      Re-authenticate Cloudflare
+                      {t('billing.usage.reauthenticate')}
                     </Button>
                   )}
                 </>
               ) : (
                 <>
-                  <Button variant="secondary" onClick={onClose}>Close</Button>
+                  <Button variant="secondary" onClick={onClose}>{t('billing.common.close')}</Button>
                   <Button
                     variant="primary"
                     onClick={() => window.open(buildAddCreditsUrl(usage.accountId), '_blank')}
                   >
-                    Add credits in Cloudflare
+                    {t('billing.outOfCredits.addCreditsCloudflare')}
                   </Button>
                 </>
               )}

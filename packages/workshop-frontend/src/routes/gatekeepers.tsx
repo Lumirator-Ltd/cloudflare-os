@@ -426,10 +426,10 @@ function ConnectorsHeroDiagram({
             </div>
             <div className="min-w-0">
               <p className="m-0 text-[12px] leading-4 font-semibold tracking-[-0.2px] text-kumo-default">
-                Gatekeeper
+                {t('gatekeepers.page.heroTitle')}
               </p>
               <p className="mt-1 text-[11px] leading-4 font-normal tracking-[-0.1px] text-kumo-subtle">
-                Keeps each workspace limited to the resources you connect and ensures every user has the required permissions before accessing them.
+                {t('gatekeepers.page.heroDescription')}
               </p>
             </div>
           </div>
@@ -788,7 +788,7 @@ function ConnectorsPage() {
                 const displayName =
                   account.accountDescription.displayName ??
                   account.accountDescription.uniqueName ??
-                  'Connected'
+                  t('gatekeepers.page.connected')
                 const tagline = account.vendorDescription.tagline
                 return (
                   <ConnectorCard
@@ -805,7 +805,7 @@ function ConnectorsPage() {
                       >
                         {account.credentialsValid
                           ? displayName
-                          : 'Credentials expired'}
+                          : t('gatekeepers.page.expired')}
                       </span>
                     }
                     tagline={tagline}

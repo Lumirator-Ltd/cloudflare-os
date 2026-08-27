@@ -319,7 +319,7 @@ export default function BlueprintList() {
               <div>
                 <p className="text-sm font-medium text-kumo-default">{t('blueprints.page.noneYet')}</p>
                 <p className="mt-1 text-[13px] leading-[18px] text-kumo-subtle">
-                  Publish a workspace as a blueprint, or add one from Explore.
+                  {t('blueprints.page.emptyLibrary')}
                 </p>
               </div>
               <div className="grid grid-cols-2 gap-2">

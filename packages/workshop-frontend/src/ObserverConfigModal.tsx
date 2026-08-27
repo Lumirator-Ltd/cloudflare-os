@@ -330,10 +330,8 @@ export default function ObserverConfigModal({
         </Dialog.Title>
         <Text variant="secondary" size="sm" as="p">
           {isRetry
-            ? 'We couldn’t confirm your access to everything this workspace has read. Re-authenticate ' +
-              'the account below, or choose a different one, then try again.'
-            : 'Before opening this workspace, confirm that your own accounts can access the connected ' +
-              'data it uses.'}
+            ? t('gatekeepers.observer.retryDescription')
+            : t('gatekeepers.observer.description')}
         </Text>
 
         {!ready || !vendorsReady ? (
@@ -380,8 +378,8 @@ export default function ObserverConfigModal({
                         {!configured
                           ? connectorSetupGuidance()
                           : connecting === need.vendorId
-                            ? 'Waiting for connection…'
-                            : 'Connect'}
+                            ? t('gatekeepers.observer.waitingConnection')
+                            : t('gatekeepers.observer.connect')}
                       </WorkshopButton>
                     )}
                   </div>
@@ -413,7 +411,7 @@ export default function ObserverConfigModal({
                           </div>
                           {accountSatisfies(need, matching[0]) && (
                             <span className="flex shrink-0 items-center gap-1 text-xs font-medium text-kumo-success">
-                              <CheckCircle size={15} weight="fill" /> Ready
+                              <CheckCircle size={15} weight="fill" /> {t('gatekeepers.observer.ready')}
                             </span>
                           )}
                         </div>
@@ -434,7 +432,7 @@ export default function ObserverConfigModal({
                           {matching.map(acct => (
                             <Select.Option key={acct.id} value={String(acct.id)}>
                               {accountLabel(acct, acct.id)}
-                              {!acct.credentialsValid ? ' (expired)' : ''}
+                              {!acct.credentialsValid ? ` (${t('gatekeepers.observer.expired')})` : ''}
                             </Select.Option>
                           ))}
                         </Select>
@@ -455,8 +453,8 @@ export default function ObserverConfigModal({
                             <Warning size={12} />
                           )}
                           {granting === chosen.id
-                            ? 'Waiting for access…'
-                            : 'Grant the access needed to verify this resource'}
+                            ? t('gatekeepers.observer.waitingAccess')
+                            : t('gatekeepers.observer.grantVerify')}
                         </button>
                       )}
 
@@ -479,10 +477,10 @@ export default function ObserverConfigModal({
                             <Warning size={12} />
                           )}
                           {reconnecting === chosen.id
-                            ? 'Re-authenticating…'
+                            ? t('gatekeepers.observer.reauthenticating')
                             : chosen.credentialsValid
-                              ? 'Click to re-authenticate this account'
-                              : 'This account has expired — click to re-authenticate'}
+                              ? t('gatekeepers.observer.reauthenticate')
+                              : t('gatekeepers.observer.expiredReauthenticate')}
                         </button>
                       )}
 
@@ -497,8 +495,8 @@ export default function ObserverConfigModal({
                           {!configured
                             ? connectorSetupGuidance()
                             : connecting === need.vendorId
-                              ? 'Waiting for connection…'
-                              : 'Connect a different account'}
+                              ? t('gatekeepers.observer.waitingConnection')
+                              : t('gatekeepers.observer.differentAccount')}
                         </button>
                       )}
                     </div>
@@ -511,7 +509,7 @@ export default function ObserverConfigModal({
 
         <div className="flex justify-end gap-2 mt-6">
           <WorkshopButton tone="secondary" onClick={onCancel}>
-            Cancel
+            {t('common.cancel')}
           </WorkshopButton>
           <WorkshopButton
             tone="primary"

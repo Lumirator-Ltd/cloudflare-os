@@ -72,14 +72,17 @@ export function AccountChooser({
         <p className="text-[12px] leading-4 font-medium tracking-[-0.2px] text-kumo-default">{t('gatekeepers.accountChooser.account')}</p>
         <p className="mt-0.5 text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
           {isEmailMailbox
-            ? 'Enable the Email receiver account, then choose the mailbox name below.'
-            : `Pick which ${vendorName} identity this ${resourceTitle ?? 'connection'} should use.`}
+            ? t('gatekeepers.accountChooser.emailHint')
+            : t('gatekeepers.accountChooser.pickIdentity', {
+                vendor: vendorName,
+                resource: resourceTitle ?? t('gatekeepers.accountChooser.connection'),
+              })}
         </p>
       </div>
       <div className="divide-y divide-kumo-line">
         {accounts.map(account => {
           const selected = selectedAccountId === account.id
-          const name = account.description.uniqueName || account.description.displayName || 'Connected account'
+          const name = account.description.uniqueName || account.description.displayName || t('gatekeepers.common.connectedAccount')
           const expired = !account.credentialsValid
           const reconnecting = reconnectingAccountId === account.id
           const granted = account.description.grantedResourceUrlPatterns
@@ -116,7 +119,9 @@ export function AccountChooser({
                       ? t('gatekeepers.accountChooser.expired')
                       : needsAccess
                       ? t('gatekeepers.accountChooser.permission')
-                      : resourceTitle ? `Connected ${vendorName} account` : 'Connected'}
+                      : resourceTitle
+                        ? t('gatekeepers.accountChooser.connectedVendor', { vendor: vendorName })
+                        : t('gatekeepers.common.connected')}
                   </p>
                 </div>
               </button>
@@ -157,8 +162,10 @@ export function AccountChooser({
               <Plus size={14} />
             )}
             {connectDisabledMessage ?? (isEmailMailbox
-              ? 'Enable Email mailboxes'
-              : accounts.length === 0 ? `Connect ${vendorName}` : `Use another ${vendorName} account`)}
+              ? t('gatekeepers.accountChooser.enableMailboxes')
+              : accounts.length === 0
+                ? t('gatekeepers.accountChooser.connectVendor', { vendor: vendorName })
+                : t('gatekeepers.accountChooser.anotherVendor', { vendor: vendorName }))}
           </button>
         )}
       </div>

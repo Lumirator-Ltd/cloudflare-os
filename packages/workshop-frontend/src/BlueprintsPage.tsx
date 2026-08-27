@@ -83,8 +83,7 @@ export default function BlueprintsPage() {
         <div className="min-w-0">
           <h1 className="text-2xl font-semibold tracking-tight text-kumo-default">{t('blueprints.explore.title')}</h1>
           <p className="mt-1 text-[13px] leading-[18px] tracking-[-0.25px] text-kumo-subtle">
-            Discover featured blueprints to use as starting points. Open one to create a workspace
-            from it, or save it to reuse later.
+            {t('blueprints.explore.featuredDescription')}
           </p>
         </div>
         <ViewToggle view={view} onChange={setView} />
@@ -93,7 +92,7 @@ export default function BlueprintsPage() {
       {/* Toolbar */}
       <div className="flex items-center justify-between gap-3 px-3 pb-3">
         <span className="text-[12px] font-medium uppercase tracking-[0.08em] text-kumo-inactive">
-          Featured
+          {t('blueprints.explore.featured')}
         </span>
         <div className="relative sm:w-64">
           <MagnifyingGlass

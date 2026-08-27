@@ -128,15 +128,18 @@ type ConfiguratorFrameState = {
   resourceUrlPattern: string
 }
 
-function platformConnectionTypes(siteName: string): ConnectionType[] {
+function platformConnectionTypes(
+  siteName: string,
+  labels: { aiModel: string; aiModelDescription: string; agent: string; agentDescription: string },
+): ConnectionType[] {
   return [
   {
     id: 'ai-model',
     groupKey: 'platform:ai-model',
-    groupLabel: 'AI Model',
-    title: 'AI Model',
+    groupLabel: labels.aiModel,
+    title: labels.aiModel,
     vendor: siteName,
-    description: 'Expose a selected model through this connection.',
+    description: labels.aiModelDescription,
     icon: Sparkle,
     accent: '#f6edff',
     iconColor: '#7c3aed',
@@ -144,10 +147,10 @@ function platformConnectionTypes(siteName: string): ConnectionType[] {
   {
     id: 'agent-spawner',
     groupKey: 'platform:agent-spawner',
-    groupLabel: 'Agent',
-    title: 'Agent',
+    groupLabel: labels.agent,
+    title: labels.agent,
     vendor: siteName,
-    description: 'Allow this connection to start new AI agent conversations with selected tools.',
+    description: labels.agentDescription,
     icon: Robot,
     accent: '#f2f0ff',
     iconColor: '#7c3aed',
@@ -271,11 +274,16 @@ export default function GatekeeperModal({
 
   const siteName = useSiteName()
   const allConnections = useMemo(() => [
-    ...platformConnectionTypes(siteName),
+    ...platformConnectionTypes(siteName, {
+      aiModel: t('gatekeepers.modal.aiModel'),
+      aiModelDescription: t('gatekeepers.modal.aiModelDescription'),
+      agent: t('gatekeepers.modal.agent'),
+      agentDescription: t('gatekeepers.modal.agentDescription'),
+    }),
     ...vendors.flatMap(vendor => vendor.supportedResources
       .filter(resourceAllowsNewConnections)
       .map(resource => connectionForResource(vendor, resource))),
-  ], [siteName, vendors])
+  ], [siteName, t, vendors])
 
   const selectedConnection = useMemo(
     () => allConnections.find(connection => connection.id === selectedConnectionId) ?? null,
@@ -586,7 +594,7 @@ export default function GatekeeperModal({
           reportIssue('gatekeeper.configurator-start', error, {
             gatekeeperVendorId: selectedConnection?.vendorId,
           })
-          setConfiguratorError(error?.message || 'Could not start configurator.')
+          setConfiguratorError(error?.message || t('gatekeepers.modal.configuratorFailed'))
         }
       })
       .finally(() => {
@@ -743,10 +751,10 @@ export default function GatekeeperModal({
     let transferred = false
     try {
       if (!configuratorFrameState?.frame || configuratorFrameState.accountId !== selectedAccountId || configuratorFrameState.resourceUrlPattern !== resourceUrlPattern) {
-        throw new Error('Configurator is not ready.')
+        throw new Error(t('gatekeepers.modal.configuratorNotReady'))
       }
       const resourceUrl = await configuratorCollectResourceUrlRef.current?.()
-      if (!resourceUrl) throw new Error('Configurator did not provide a resource URL.')
+      if (!resourceUrl) throw new Error(t('gatekeepers.modal.configuratorNoUrl'))
       const overseer = await getOverseer()
       gatekeeper = await overseer.newGatekeeper(selectedAccountId, resourceUrl)
       if (gatekeeper) {
@@ -758,7 +766,7 @@ export default function GatekeeperModal({
       }
     } catch (err) {
       console.error('Failed to create resource gatekeeper:', err)
-      toasts.add({ title: err instanceof Error && err.message ? err.message : 'Failed to create connection', variant: 'error' })
+      toasts.add({ title: err instanceof Error && err.message ? err.message : t('gatekeepers.modal.createFailed'), variant: 'error' })
     } finally {
       if (gatekeeper && !transferred) gatekeeper[Symbol.dispose]()
       setCreating(false)
@@ -798,8 +806,8 @@ export default function GatekeeperModal({
   }
 
   const createLabel = selectedConnection?.resourceUrlPattern
-    ? 'Add connection'
-    : 'Create connection'
+    ? t('gatekeepers.modal.addTitle')
+    : t('gatekeepers.modal.createTitle')
 
   return (
     <Dialog.Root open={open} onOpenChange={(o) => { if (!o) onClose() }}>
@@ -811,12 +819,12 @@ export default function GatekeeperModal({
         <div ref={headerRef} className="shrink-0 flex items-start justify-between gap-4 border-b border-kumo-line px-5 py-4">
           <div className="min-w-0">
             <Dialog.Title className="text-[17px] leading-6 font-medium tracking-[-0.35px] text-kumo-default">
-              {selectedConnection ? selectedConnection.title : 'Create New Connection'}
+              {selectedConnection ? selectedConnection.title : t('gatekeepers.modal.createNew')}
             </Dialog.Title>
             <Dialog.Description className="mt-1 text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-subtle">
               {selectedConnection
                 ? selectedConnection.description
-                : 'Choose what this gadget should be able to use.'}
+                : t('gatekeepers.modal.chooseDescription')}
             </Dialog.Description>
           </div>
           <Dialog.Close
@@ -837,7 +845,7 @@ export default function GatekeeperModal({
                 className="mb-4 inline-flex cursor-pointer items-center gap-1.5 text-[12px] leading-4 font-medium tracking-[-0.2px] text-kumo-subtle transition-colors hover:text-kumo-default"
               >
                 <CaretLeft size={13} />
-                All connection types
+                {t('gatekeepers.modal.allTypes')}
               </button>
 
               <div className="space-y-4">
@@ -928,7 +936,7 @@ export default function GatekeeperModal({
                 {isSearching ? (
                   filteredConnections.length === 0 ? (
                     <div className="px-4 py-8 text-center text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-subtle">
-                      No matching connection types.
+                      {t('gatekeepers.modal.noMatch')}
                     </div>
                   ) : filteredConnections.map((connection, index) => (
                     <ConnectionTypeRow
@@ -941,7 +949,7 @@ export default function GatekeeperModal({
                 ) : (
                   groupedConnections.length === 0 ? (
                     <div className="px-4 py-8 text-center text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-subtle">
-                      No connection types available.
+                      {t('gatekeepers.modal.none')}
                     </div>
                   ) : groupedConnections.map((group, index) => (
                     <ConnectionGroupRow
@@ -966,7 +974,7 @@ export default function GatekeeperModal({
             <div />
             <div className="flex shrink-0 items-center gap-2">
               <WorkshopButton onClick={() => setSelectedConnectionId(null)} disabled={creating} className="!h-9">
-                Back
+                {t('gatekeepers.modal.back')}
               </WorkshopButton>
               <WorkshopButton
                 tone="primary"

@@ -8,7 +8,7 @@ import { useCloudflareLimitsEnabled } from '../../ServerConfigContext'
 import { buildAddCreditsUrl } from './creditsUrl'
 import ResetCountdown from './ResetCountdown'
 import { connectionErrorMessage } from '../../connectorReadiness'
-import { useTranslation } from 'react-i18next'
+import { Trans, useTranslation } from 'react-i18next'
 import { useLanguage } from '../../i18n/LanguageProvider'
 import { formatNumber } from '../../i18n/format'
 
@@ -153,8 +153,10 @@ export default function UsageSettings() {
               </p>
               {usage.resetAt && (
                 <p className="text-xs text-kumo-subtle mt-1">
-                  Resets at 00:00 UTC, in{' '}
-                  <ResetCountdown resetAt={usage.resetAt} onElapsed={refresh} />.
+                  <Trans
+                    i18nKey="billing.usage.resetAtLive"
+                    components={{ countdown: <ResetCountdown resetAt={usage.resetAt} onElapsed={refresh} /> }}
+                  />
                 </p>
               )}
             </div>
@@ -253,12 +255,11 @@ export default function UsageSettings() {
                   </span>
                 </div>
                 <p className="text-sm text-kumo-default">
-                  Account balance:{' '}
-                  {usage.balance !== null ? (
-                    <strong>{formatNumber(usage.balance, effectiveLanguage, { style: 'currency', currency: 'USD' })}</strong>
-                  ) : (
-                    <span className="text-kumo-subtle">{t('billing.common.unknown')}</span>
-                  )}
+                  {t('billing.usage.accountBalance', {
+                    amount: usage.balance !== null
+                      ? formatNumber(usage.balance, effectiveLanguage, { style: 'currency', currency: 'USD' })
+                      : t('billing.common.unknown'),
+                  })}
                 </p>
 
                 <div className="flex items-center gap-2 pt-1">
@@ -276,16 +277,14 @@ export default function UsageSettings() {
           </div>
 
           <p className="text-xs text-kumo-subtle border-t border-kumo-line pt-3">
-            Learn more about{' '}
             <a
               href="https://developers.cloudflare.com/ai-gateway/features/unified-billing/"
               target="_blank"
               rel="noreferrer"
               className="underline"
             >
-              AI Gateway unified billing
+              {t('billing.usage.learnMore')}
             </a>
-            .
           </p>
         </div>
       )}

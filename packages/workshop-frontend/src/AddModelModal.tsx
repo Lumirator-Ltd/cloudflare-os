@@ -30,8 +30,8 @@ const API_TOKEN_PLACEHOLDERS: Record<AiModelProvider, string> = {
   anthropic: 'sk-ant-...',
   openai: 'sk-...',
   google: 'AIza...',
-  cloudflare: 'Cloudflare API token',
-  ollama: '(optional)',
+  cloudflare: '',
+  ollama: '',
 }
 
 // Example used in the custom-model placeholders for providers that have no suggested models
@@ -300,7 +300,7 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
           {showCredentials && isCloudflare && (
             <Input
               label={t('models.accountId')}
-              placeholder="e.g., 0123456789abcdef0123456789abcdef"
+              placeholder={t('models.modelIdExample', { model: '0123456789abcdef0123456789abcdef' })}
               description={t('models.accountIdDescription')}
               value={accountId}
               onChange={(e) => { setAccountId(e.target.value); setErrors(prev => ({ ...prev, accountId: '' })) }}
@@ -313,14 +313,16 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
           {showCredentials && selection && (
             <SensitiveInput
               label={t('models.apiToken')}
-              placeholder={API_TOKEN_PLACEHOLDERS[selection.provider]}
-              description={
-                isOllama
-                  ? t('models.ollamaTokenDescription')
-                  : isCloudflare
-                  ? 'An API token with Workers AI Read + Edit permissions (in the dashboard: Workers AI > Use REST API > Create a Workers AI API Token)'
-                  : t('models.providerTokenDescription', { provider: PROVIDER_LABELS[selection.provider] })
-              }
+              placeholder={isCloudflare
+                ? t('models.cloudflareTokenPlaceholder')
+                : isOllama
+                  ? t('models.optional')
+                  : API_TOKEN_PLACEHOLDERS[selection.provider]}
+              description={isOllama
+                ? t('models.ollamaTokenDescription')
+                : isCloudflare
+                  ? t('models.cloudflareTokenDescription')
+                  : t('models.providerTokenDescription', { provider: PROVIDER_LABELS[selection.provider] })}
               value={apiToken}
               onValueChange={(v) => { setApiToken(v); setErrors(prev => ({ ...prev, apiToken: '' })) }}
               error={errors.apiToken}

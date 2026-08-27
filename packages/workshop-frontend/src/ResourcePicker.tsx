@@ -650,7 +650,7 @@ export default function ResourcePicker({
                       {!configured
                         ? connectorSetupGuidance()
                         : connectingVendor === vendor.id
-                          ? 'Opening…'
+                          ? t('gatekeepers.common.opening')
                           : t('gatekeepers.picker.connectNew')}
                     </span>
                     {isActive && <TabHint />}

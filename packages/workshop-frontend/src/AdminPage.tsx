@@ -14,14 +14,14 @@ import { adminTabFromSearch, type AdminTab } from './adminNavigation'
 import { useTranslation } from 'react-i18next'
 
 // Preset accent colors offered in the Theme section ('' = default brand).
-const ACCENT_PRESETS: { label: string; value: string }[] = [
-  { label: 'Default', value: '' },
-  { label: 'Blue', value: '#3b82f6' },
-  { label: 'Green', value: '#16a34a' },
-  { label: 'Purple', value: '#7c3aed' },
-  { label: 'Pink', value: '#db2777' },
-  { label: 'Teal', value: '#0d9488' },
-]
+const ACCENT_PRESETS = [
+  { labelKey: 'admin.general.accentDefault', value: '' },
+  { labelKey: 'admin.general.accentBlue', value: '#3b82f6' },
+  { labelKey: 'admin.general.accentGreen', value: '#16a34a' },
+  { labelKey: 'admin.general.accentPurple', value: '#7c3aed' },
+  { labelKey: 'admin.general.accentPink', value: '#db2777' },
+  { labelKey: 'admin.general.accentTeal', value: '#0d9488' },
+] as const
 
 // Swatch background per banner color, matching AnnouncementBanner's accent styles.
 const BANNER_SWATCH: Record<BannerColor, string> = {
@@ -540,7 +540,7 @@ export default function AdminPage({ activeTab = 'general' }: { activeTab?: Admin
               const swatch = preset.value || DEFAULT_ACCENT_COLOR
               return (
                 <button
-                  key={preset.label}
+                  key={preset.labelKey}
                   type="button"
                   onClick={() => setAccentDraft(preset.value)}
                   className={`flex items-center gap-2 pl-1.5 pr-3 py-1.5 rounded-full border text-xs font-medium transition-colors ${
@@ -553,7 +553,7 @@ export default function AdminPage({ activeTab = 'general' }: { activeTab?: Admin
                     className="w-4 h-4 rounded-full border border-kumo-line"
                     style={{ background: swatch }}
                   />
-                  {preset.label}
+                  {t(preset.labelKey)}
                 </button>
               )
             })}
@@ -570,7 +570,7 @@ export default function AdminPage({ activeTab = 'general' }: { activeTab?: Admin
               {t('admin.general.accentCustom')}
             </label>
             <span className="text-xs font-mono text-kumo-subtle">
-              {accentDraft || `${DEFAULT_ACCENT_COLOR} (default)`}
+              {accentDraft || t('admin.general.accentDefaultPlaceholder')}
             </span>
             <div className="flex-1" />
             {accentDirty && (
@@ -694,7 +694,10 @@ export default function AdminPage({ activeTab = 'general' }: { activeTab?: Admin
 
           <div className="flex items-center justify-between mt-3">
             <span className="text-xs text-kumo-subtle">
-              {announcementDraft.length.toLocaleString()} / {MAX_ANNOUNCEMENT_LENGTH.toLocaleString()} characters
+              {t('admin.general.characters', {
+                count: announcementDraft.length.toLocaleString(),
+                max: MAX_ANNOUNCEMENT_LENGTH.toLocaleString(),
+              })}
             </span>
             <div className="flex items-center gap-2">
               {announcementDraft !== savedAnnouncement && (
@@ -746,7 +749,10 @@ export default function AdminPage({ activeTab = 'general' }: { activeTab?: Admin
 
         <div className="flex items-center justify-between mt-3">
           <span className="text-xs text-kumo-subtle">
-            {instructionsDraft.length.toLocaleString()} / {MAX_INSTANCE_INSTRUCTIONS_LENGTH.toLocaleString()} characters
+            {t('admin.general.characters', {
+              count: instructionsDraft.length.toLocaleString(),
+              max: MAX_INSTANCE_INSTRUCTIONS_LENGTH.toLocaleString(),
+            })}
           </span>
           <div className="flex items-center gap-2">
             {instructionsDraft !== savedInstructions && (
@@ -781,10 +787,7 @@ export default function AdminPage({ activeTab = 'general' }: { activeTab?: Admin
         <div className="bg-kumo-elevated border border-kumo-line rounded-xl p-6">
           <h2 className="text-lg font-semibold text-kumo-strong mb-1">{t('admin.gatekeepers.title')}</h2>
           <p className="text-sm text-kumo-subtle mb-3">
-            Turn connectors and resource types on or off for each service. Auto-provisioned
-            gatekeepers (like the Context Library) have three modes &mdash; disabled, optional, or
-            enabled for everyone. Changes are soft: they don&rsquo;t revoke access a gadget already
-            holds.
+            {t('admin.gatekeepers.configurationDescription')}
           </p>
           <a
             href="/admin/connectors"
@@ -795,7 +798,7 @@ export default function AdminPage({ activeTab = 'general' }: { activeTab?: Admin
 
           {resourceVendors.length === 0 && (
             <p className="text-sm text-kumo-subtle">
-              No configurable gatekeepers are installed on this deployment.
+              {t('admin.gatekeepers.empty')}
             </p>
           )}
 
@@ -825,7 +828,7 @@ export default function AdminPage({ activeTab = 'general' }: { activeTab?: Admin
                         {vendor.displayName}
                       </h3>
                       <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-md bg-kumo-tint text-kumo-subtle border border-kumo-line">
-                        auto-provisioned
+                        {t('admin.gatekeepers.autoProvisioned')}
                       </span>
                     </div>
                     <div className="flex gap-2 px-3 py-1">
@@ -878,7 +881,7 @@ export default function AdminPage({ activeTab = 'general' }: { activeTab?: Admin
                     {vendor.displayName}
                     {!vendor.enabled && (
                       <span className="ml-2 text-[10px] font-medium px-1.5 py-0.5 rounded-md bg-kumo-tint text-kumo-subtle border border-kumo-line">
-                        disabled
+                        {t('admin.gatekeepers.disabled')}
                       </span>
                     )}
                   </h3>
@@ -935,7 +938,9 @@ export default function AdminPage({ activeTab = 'general' }: { activeTab?: Admin
                   </div>
                 ) : (
                   <p className="text-xs text-kumo-subtle px-3 py-1">
-                    {vendor.resources.length} resource{vendor.resources.length === 1 ? '' : 's'} hidden while disabled.
+                    {t(vendor.resources.length === 1
+                      ? 'admin.gatekeepers.hiddenResource'
+                      : 'admin.gatekeepers.hiddenResources', { count: vendor.resources.length })}
                   </p>
                 )}
               </div>
