@@ -26,6 +26,7 @@ export const enShell = {
       password: "Password",
       confirmPassword: "Confirm password",
       signIn: "Sign in",
+      continueWith: "Continue with {{vendor}}",
       createAccount: "Create account",
       noAccount: "Don't have an account?",
       hasAccount: "Already have an account?",

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act } from "react";
+import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { suggestValueLabel } from "./components/BlueprintBindingCard";
@@ -42,7 +42,7 @@ describe("Japanese workspace localization", () => {
     } as const;
 
     for (const [key, value] of Object.entries(expected)) {
-      expect(i18n.t(key, { lng: "ja" }), key).toBe(value);
+      expect(i18n.t(key, { lng: "ja" })).toBe(value);
     }
   });
 

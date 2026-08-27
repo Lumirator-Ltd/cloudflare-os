@@ -9,6 +9,9 @@ export const jaCommon = {
     loading: "読み込み中…",
     retry: "再試行",
     save: "保存",
+    listView: "一覧表示",
+    gridView: "グリッド表示",
+    pendingCount: "{{count}}件が保留中",
   },
   language: {
     title: "言語",

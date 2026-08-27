@@ -74,8 +74,8 @@ describe("AppLanguageProvider", () => {
       ),
     );
 
-    const english = catalogLeaves((resources.en as { translation: unknown }).translation).sort();
-    const japanese = catalogLeaves((resources.ja as { translation: unknown }).translation).sort();
+    const english = catalogLeaves((resources.en as { translation: unknown }).translation).toSorted();
+    const japanese = catalogLeaves((resources.ja as { translation: unknown }).translation).toSorted();
     expect(japanese).toEqual(english);
     expect(english).toHaveLength(85);
     expect(fallback).toBe(false);

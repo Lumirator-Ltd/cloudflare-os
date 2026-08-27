@@ -164,7 +164,7 @@ function auditProductionEnglish(): string[] {
     visit(source);
   }
 
-  return [...findings].sort();
+  return [...findings].toSorted();
 }
 
 describe("Workshop admin and catalog localization", () => {

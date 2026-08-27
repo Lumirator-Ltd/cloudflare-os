@@ -29,6 +29,7 @@ export const jaShell = {
       password: "パスワード",
       confirmPassword: "パスワード（確認）",
       signIn: "サインイン",
+      continueWith: "{{vendor}}で続行",
       createAccount: "アカウントを作成",
       noAccount: "アカウントをお持ちでないですか？",
       hasAccount: "すでにアカウントをお持ちですか？",

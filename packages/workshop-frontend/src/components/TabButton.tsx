@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react'
+import { useTranslation } from 'react-i18next'
 
 type TabButtonProps = {
   active: boolean
@@ -9,6 +10,7 @@ type TabButtonProps = {
 }
 
 export function TabButton({ active, onClick, children, badgeCount = 0, className = '' }: TabButtonProps) {
+  const { t } = useTranslation()
   const heightClassName = className.includes('h-') ? '' : 'h-full'
 
   return (
@@ -26,7 +28,7 @@ export function TabButton({ active, onClick, children, badgeCount = 0, className
         <span
           className="inline-flex h-[14px] min-w-[14px] items-center justify-center rounded-full bg-kumo-contrast px-1 text-[10px] leading-none font-semibold text-kumo-inverse"
           style={{ fontVariantNumeric: 'tabular-nums' }}
-          aria-label={`${badgeCount} pending`}
+          aria-label={t('common.pendingCount', { count: badgeCount })}
         >
           {badgeCount}
         </span>

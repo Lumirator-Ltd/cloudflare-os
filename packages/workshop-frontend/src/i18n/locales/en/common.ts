@@ -6,6 +6,9 @@ export const enCommon = {
     loading: "Loading…",
     retry: "Try again",
     save: "Save",
+    listView: "List view",
+    gridView: "Grid view",
+    pendingCount: "{{count}} pending",
   },
   language: {
     title: "Language",

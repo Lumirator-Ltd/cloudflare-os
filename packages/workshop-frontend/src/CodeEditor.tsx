@@ -3,6 +3,7 @@ import { Editor } from '@monaco-editor/react'
 import type { editor } from 'monaco-editor'
 import * as Y from 'yjs'
 import { MonacoBinding } from 'y-monaco'
+import { useTranslation } from 'react-i18next'
 import { defineGadgetsCodeTheme, getGadgetsCodeTheme, monoFont } from './components/monacoTheme'
 import { getLanguage } from './getLanguage'
 import { useTheme } from './ThemeContext'
@@ -15,6 +16,7 @@ interface CodeEditorProps {
 }
 
 export default function CodeEditor({ filename, ytext, isReady, height = '100%' }: CodeEditorProps) {
+  const { t } = useTranslation()
   const { resolvedThemeMode } = useTheme()
   const codeTheme = getGadgetsCodeTheme(resolvedThemeMode)
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null)
@@ -68,7 +70,7 @@ export default function CodeEditor({ filename, ytext, isReady, height = '100%' }
         className="flex justify-center items-center bg-kumo-base text-kumo-subtle"
         style={{ height }}
       >
-        Select a file to start editing
+        {t('workspace.editor.selectFileToEdit')}
       </div>
     )
   }

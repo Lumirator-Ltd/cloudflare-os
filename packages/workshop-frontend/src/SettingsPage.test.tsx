@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act } from "react";
+import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RpcStub } from "capnweb";
@@ -47,7 +47,7 @@ describe("SettingsPage language selector", () => {
   let setLanguagePreference: ReturnType<typeof vi.fn<(preference: LanguagePreference) => Promise<void>>>;
 
   beforeEach(() => {
-    setLanguagePreference = vi.fn(async () => {});
+    setLanguagePreference = vi.fn<(preference: LanguagePreference) => Promise<void>>(async () => {});
     authenticatedApi = {
       whoami: async () => user,
       hasPasswordLogin: async () => true,
