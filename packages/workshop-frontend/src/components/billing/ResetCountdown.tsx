@@ -1,17 +1,17 @@
 import { useEffect, useRef, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 
-// Format the milliseconds remaining until `resetAt` as a compact "Hh Mm Ss" string.
-function formatRemaining(ms: number): string {
-  if (ms <= 0) return '0s'
+function formatRemaining(ms: number, t: (key: string, values?: Record<string, number>) => string): string {
+  if (ms <= 0) return t('billing.reset.zero')
   const totalSeconds = Math.floor(ms / 1000)
-  const hours = Math.floor(totalSeconds / 3600)
+  const days = Math.floor(totalSeconds / 86400)
+  const hours = Math.floor((totalSeconds % 86400) / 3600)
   const minutes = Math.floor((totalSeconds % 3600) / 60)
   const seconds = totalSeconds % 60
-  const parts: string[] = []
-  if (hours > 0) parts.push(`${hours}h`)
-  if (hours > 0 || minutes > 0) parts.push(`${minutes}m`)
-  parts.push(`${seconds}s`)
-  return parts.join(' ')
+  if (days > 0) return t('billing.reset.daysHours', { days, hours })
+  if (hours > 0) return t('billing.reset.hoursMinutesSeconds', { hours, minutes, seconds })
+  if (minutes > 0) return t('billing.reset.minutesSeconds', { minutes, seconds })
+  return t('billing.reset.seconds', { seconds })
 }
 
 /**
@@ -26,6 +26,7 @@ export default function ResetCountdown({
   resetAt?: string
   onElapsed?: () => void
 }) {
+  const { t } = useTranslation()
   const [now, setNow] = useState(() => Date.now())
 
   // Keep the latest onElapsed in a ref so the "elapsed" effect can fire it without depending on a
@@ -51,5 +52,5 @@ export default function ResetCountdown({
 
   if (!valid) return null
 
-  return <span className="tabular-nums font-medium">{formatRemaining(remaining)}</span>
+  return <span className="tabular-nums font-medium">{formatRemaining(remaining, t)}</span>
 }

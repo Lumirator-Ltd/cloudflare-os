@@ -50,7 +50,7 @@ describe("SettingsPage language selector", () => {
     setLanguagePreference = vi.fn(async () => {});
     authenticatedApi = {
       whoami: async () => user,
-      hasPasswordLogin: async () => false,
+      hasPasswordLogin: async () => true,
       getLanguagePreference: async () => "auto",
       setLanguagePreference,
     } as unknown as RpcStub<AuthenticatedApi>;
@@ -116,7 +116,12 @@ describe("SettingsPage language selector", () => {
     await change(select, "ja");
 
     expect(setLanguagePreference).toHaveBeenCalledWith("ja");
+    expect(rendered.textContent).toContain("プロフィール");
+    expect(rendered.textContent).toContain("アカウント");
     expect(rendered.textContent).toContain("言語");
+    expect(rendered.textContent).toContain("セキュリティ");
+    expect(rendered.textContent).toContain("現在のパスワード");
+    expect(rendered.textContent).toContain("パスワードを変更");
     expect([...select.options].map((option) => option.textContent)).toEqual([
       "自動（English）",
       "English",

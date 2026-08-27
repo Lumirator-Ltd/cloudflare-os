@@ -21,11 +21,13 @@ import { WorkshopButton, WorkshopIconButton } from './components/WorkshopControl
 import { MENU_CONTENT, MENU_ITEM, MENU_ITEM_DANGER } from './components/menuStyles'
 import { useDocumentTitle } from './useDocumentTitle'
 import {
-  CONNECTOR_SETUP_GUIDANCE,
+  connectorSetupGuidance,
   connectionErrorMessage,
   connectorIsConfigured,
 } from './connectorReadiness'
 import { AccountsSubscriberAdapter } from './accountsSubscriber'
+import { useTranslation } from 'react-i18next'
+import i18n from './i18n/config'
 
 interface Props {
   rpcStub: RpcStub<PublicApi>
@@ -42,6 +44,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
   const router = useRouter()
   const { isAuthenticated, authenticatedApi, isLoading: authLoading, login } = useAuth(rpcStub)
   const toasts = useKumoToastManager()
+  const { t } = useTranslation()
 
   const [blueprint, setBlueprint] = useState<BlueprintPublicInfo | null>(null)
   useDocumentTitle(blueprint?.metadata.title)
@@ -199,11 +202,11 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
     try {
       const result = await authenticatedApi.connectAccount(vendorId)
       window.open(result.url, '_blank', 'noopener,noreferrer')
-      toasts.add({ title: 'Complete the account connection in the new tab.', variant: 'success' })
+      toasts.add({ title: t('blueprints.landing.connectionComplete'), variant: 'success' })
     } catch (err) {
       console.error('Failed to initiate connection:', err)
       toasts.add({
-        title: connectionErrorMessage(err, 'Failed to start connection flow'),
+        title: connectionErrorMessage(err, t('blueprints.landing.connectionFailed')),
         variant: 'error',
       })
     } finally {
@@ -217,10 +220,10 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
     try {
       const result = await authenticatedApi.reconnectAccount(accountId)
       window.open(result.url, '_blank', 'noopener,noreferrer')
-      toasts.add({ title: 'Complete the account reconnect in the new tab.', variant: 'success' })
+      toasts.add({ title: t('blueprints.landing.reconnectComplete'), variant: 'success' })
     } catch (err) {
       console.error('Failed to initiate reconnect:', err)
-      toasts.add({ title: 'Failed to start reconnect flow', variant: 'error' })
+      toasts.add({ title: t('blueprints.landing.reconnectFailed'), variant: 'error' })
       setReconnectingAccountId(null)
     }
   }, [authenticatedApi, toasts])
@@ -618,7 +621,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
     } catch (err: any) {
       console.error('Failed to update featured status:', err)
       toasts.add({
-        title: nextFeatured ? 'Failed to feature blueprint' : 'Failed to unfeature blueprint',
+        title: nextFeatured ? t('blueprints.landing.featureFailed') : t('blueprints.landing.unfeatureFailed'),
         variant: 'error',
       })
     } finally {
@@ -643,10 +646,10 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
         setIsInLibrary(true)
         setIsUploadedBlueprint(false)
       }
-      toasts.add({ title: nextPinned ? 'Blueprint favorited' : 'Blueprint unfavorited', variant: 'success' })
+      toasts.add({ title: nextPinned ? t('blueprints.landing.favorited') : t('blueprints.landing.unfavorited'), variant: 'success' })
     } catch (err) {
       console.error('Failed to update blueprint pin:', err)
-      toasts.add({ title: 'Failed to update favorite status', variant: 'error' })
+      toasts.add({ title: t('blueprints.landing.favoriteFailed'), variant: 'error' })
     } finally {
       setUpdatingPinned(false)
     }
@@ -668,10 +671,10 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
     try {
       await authenticatedApi.addBlueprintToLibrary(id)
       setIsInLibrary(true)
-      toasts.add({ title: 'Blueprint added to library', variant: 'success' })
+      toasts.add({ title: t('blueprints.landing.added'), variant: 'success' })
     } catch (err) {
       console.error('Failed to add blueprint to library:', err)
-      toasts.add({ title: 'Failed to add blueprint to library', variant: 'error' })
+      toasts.add({ title: t('blueprints.landing.addFailed'), variant: 'error' })
     } finally {
       setAddingToLibrary(false)
     }
@@ -690,7 +693,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
       } else {
         setIsInLibrary(false)
         setIsPinned(false)
-        toasts.add({ title: 'Blueprint removed from library', variant: 'success' })
+        toasts.add({ title: t('blueprints.landing.removed'), variant: 'success' })
       }
     } catch (err) {
       console.error('Failed to remove blueprint from library:', err)
@@ -722,7 +725,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
       navigate({ to: '/' })
     } catch (err) {
       console.error('Failed to delete blueprint:', err)
-      toasts.add({ title: 'Failed to delete blueprint', variant: 'error' })
+      toasts.add({ title: t('blueprints.landing.deleteFailed'), variant: 'error' })
     } finally {
       overseer?.then(stub => stub[Symbol.dispose]()).catch(() => {})
       setRemovingFromLibrary(false)
@@ -734,15 +737,15 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
   }
 
   if (loading || authLoading) {
-    return <BlueprintStatePage title="Loading blueprint..." loading />
+    return <BlueprintStatePage title={t('blueprints.landing.loading')} loading />
   }
 
   if (notFound) {
     return (
       <BlueprintStatePage
-        title="Blueprint not found"
-        message="This blueprint may have been removed or the link may be incorrect."
-        actionLabel="Back to Explore"
+        title={t('blueprints.landing.notFound')}
+        message={t('blueprints.landing.notFoundMessage')}
+        actionLabel={i18n.t('blueprints.landing.backExplore')}
         onAction={() => navigate({ to: '/explore' })}
       />
     )
@@ -751,9 +754,9 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
   if (!blueprint) {
     return (
       <BlueprintStatePage
-        title="Couldn’t load blueprint"
-        message={error || 'Failed to load blueprint.'}
-        actionLabel="Back to Explore"
+        title={t('blueprints.landing.loadError')}
+        message={error || t('blueprints.landing.loadFailed')}
+        actionLabel={i18n.t('blueprints.landing.backExplore')}
         onAction={() => navigate({ to: '/explore' })}
       />
     )
@@ -767,13 +770,13 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
   let remainingCount = bindingEntries.length - readyCount
   let primaryActionLabel: string
   if (!isAuthenticated) {
-    primaryActionLabel = 'Log in to create a gadget'
+    primaryActionLabel = t('blueprints.landing.loginCreate')
   } else if (unresolvedBindingName !== null) {
     primaryActionLabel = remainingCount > 0
-      ? `Configure ${remainingCount} remaining ${remainingCount === 1 ? 'connection' : 'connections'}`
-      : 'Configure connections'
+      ? t('blueprints.landing.configureRemaining', { count: remainingCount })
+      : t('blueprints.landing.configure')
   } else {
-    primaryActionLabel = 'Create Gadget'
+    primaryActionLabel = t('blueprints.landing.createGadget')
   }
   let createDisabled = creating
   let canDeleteOwnedBlueprint = isOwnBlueprint && !loadingOwnBlueprintState
@@ -861,7 +864,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
               <DropdownMenu.Trigger
                 render={(
                   <WorkshopIconButton
-                    aria-label="More blueprint actions"
+                    aria-label={i18n.t('blueprints.landing.moreActions')}
                     className="!h-10 !w-10 shrink-0 rounded-lg border border-kumo-line bg-kumo-base text-kumo-subtle hover:border-kumo-fill hover:bg-kumo-tint hover:text-kumo-default data-[popup-open]:border-kumo-fill data-[popup-open]:bg-kumo-tint data-[popup-open]:text-kumo-default"
                   >
                     <DotsThree size={18} weight="bold" />
@@ -1030,7 +1033,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
                 </div>
                 <Dialog.Close
                   render={(props) => (
-                    <WorkshopIconButton {...props} aria-label="Close">
+                    <WorkshopIconButton {...props} aria-label={i18n.t('common.close')}>
                       <X size={16} />
                     </WorkshopIconButton>
                   )}
@@ -1151,7 +1154,7 @@ function BlueprintScreenshotHero({
           render={(props) => (
             <WorkshopIconButton
               {...props}
-              aria-label="Close screenshot"
+              aria-label={i18n.t('blueprints.landing.closeScreenshot')}
               className="!absolute !right-3 !top-3 !z-10 !h-8 !w-8 rounded-full border border-kumo-line bg-kumo-base/90 text-kumo-subtle shadow-[0_1px_2px_rgba(0,0,0,0.05)] backdrop-blur-sm hover:bg-kumo-base hover:text-kumo-default"
             >
               <X size={18} />
@@ -1321,7 +1324,7 @@ function BlueprintBindingSummaryCard({
         </div>
         <p className="mt-0.5 truncate text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
           {usingLabel
-            ? <>Using: <span>{usingLabel}</span></>
+            ? <>{i18n.t('blueprints.landing.using', { value: usingLabel })}</>
             : suggestion
               ? `Suggested: ${suggestion}`
               : detail}
@@ -1404,9 +1407,9 @@ function BindingField({
           <p className="text-xs text-kumo-subtle mb-1">{binding.description}</p>
         )}
         <Select
-          aria-label="Choose an AI model"
+          aria-label={i18n.t('models.chooseModel')}
           className="w-full text-sm"
-          placeholder="Choose an AI model"
+          placeholder={i18n.t('models.chooseModel')}
           value={(value as any).modelId || undefined}
           onValueChange={(modelId) => onChange({ modelId } as any)}
           renderValue={(id) => models.find(m => m.id === id)?.name ?? String(id)}
@@ -1442,9 +1445,9 @@ function BindingField({
           <p className="text-xs text-kumo-subtle mb-1">{binding.description}</p>
         )}
         <Select
-          aria-label="Choose a model for the agent spawner"
+          aria-label={i18n.t('blueprints.landing.chooseSpawnerModel')}
           className="w-full text-sm"
-          placeholder="Choose a model for the agent spawner"
+          placeholder={i18n.t('blueprints.landing.chooseSpawnerModel')}
           value={selectedModelId}
           onValueChange={(modelId) => onChange({ modelId: modelId === NO_AGENT_MODEL_ID ? null : modelId } as any)}
           renderValue={(id) => {
@@ -1664,7 +1667,7 @@ function BlueprintGatekeeperBindingField({
         connectDisabledMessage={
           connectorIsConfigured(vendor.description)
             ? undefined
-            : CONNECTOR_SETUP_GUIDANCE
+            : connectorSetupGuidance()
         }
       />
 

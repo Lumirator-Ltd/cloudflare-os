@@ -1,5 +1,6 @@
 import { Hexagon } from '@phosphor-icons/react'
 import { getGradient } from './BlueprintCard'
+import { useTranslation } from 'react-i18next'
 
 export function BlueprintPreviewImage({
   blueprintId,
@@ -12,12 +13,13 @@ export function BlueprintPreviewImage({
   screenshotUrl?: string
   className?: string
 }) {
+  const { t } = useTranslation()
   return (
     <div className={`overflow-hidden rounded-xl border border-kumo-line bg-kumo-tint ${className ?? ''}`}>
       {screenshotUrl ? (
         <img
           src={screenshotUrl}
-          alt={`Screenshot of ${title}`}
+          alt={t('blueprints.common.screenshotAlt', { title })}
           className="aspect-[16/9] w-full object-cover"
           loading="lazy"
         />

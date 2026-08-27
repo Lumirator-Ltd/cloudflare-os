@@ -10,6 +10,7 @@ import {
   BlueprintMetadata,
 } from "@gadgets/workshop-shared/api";
 import { VendorDescription } from "@gadgets/workshop-shared/gatekeeper";
+import { useTranslation } from "react-i18next";
 
 const gradients = [
   "from-[#4A154B] to-[#7C3085]",
@@ -51,10 +52,10 @@ export function uniqueBindingBadges(
         b.gatekeeperName.charAt(0).toUpperCase() + b.gatekeeperName.slice(1);
     } else if (b.type === "aiModel") {
       key = "aiModel";
-      label = "AI Model";
+      label = "aiModel";
     } else {
       key = "agentSpawner";
-      label = "Agent";
+      label = "agent";
     }
     if (!seen.has(key)) {
       seen.add(key);
@@ -71,6 +72,7 @@ export function BindingBadge({
   badge: BindingBadgeInfo;
   vendorDescriptions?: Map<string, VendorDescription>;
 }) {
+  const { t } = useTranslation();
   const vendorDescription = badge.vendorKey
     ? vendorDescriptions?.get(badge.vendorKey)
     : undefined;
@@ -99,7 +101,7 @@ export function BindingBadge({
   return (
     <span className="inline-flex items-center gap-1 rounded-full bg-kumo-fill px-2 py-[3px] text-[11px] font-medium leading-none tracking-[-0.1px] text-kumo-subtle">
       <span className="flex items-center text-kumo-inactive">{icon}</span>
-      {vendorDescription?.displayName ?? badge.label}
+      {vendorDescription?.displayName ?? (badge.label === "aiModel" ? t('blueprints.common.aiModel') : badge.label === "agent" ? t('blueprints.common.agent') : badge.label)}
     </span>
   );
 }
@@ -115,6 +117,7 @@ export function BlueprintCard({
   featured?: boolean;
   vendorDescriptions?: Map<string, VendorDescription>;
 }) {
+  const { t } = useTranslation();
   const badges = uniqueBindingBadges(metadata.bindings);
 
   return (
@@ -129,7 +132,7 @@ export function BlueprintCard({
       <Link
         to="/blueprint/$id"
         params={{ id }}
-        aria-label={`Open blueprint ${metadata.title}`}
+        aria-label={t('blueprints.common.open', { title: metadata.title })}
         className="absolute inset-0 z-10 rounded-2xl focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-kumo-brand"
       />
       <div className="pointer-events-none relative z-20 flex flex-1 flex-col p-4">
@@ -144,7 +147,7 @@ export function BlueprintCard({
               {metadata.title}
             </p>
             <p className={`mt-1.5 line-clamp-2 min-h-8 text-[12px] leading-4 font-normal tracking-[-0.2px] ${metadata.description ? "text-kumo-subtle" : "text-kumo-inactive italic"}`}>
-              {metadata.description || "No description"}
+              {metadata.description || t('blueprints.common.noDescription')}
             </p>
           </div>
         </div>

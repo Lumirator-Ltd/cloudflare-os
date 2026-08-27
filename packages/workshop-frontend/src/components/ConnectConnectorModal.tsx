@@ -7,6 +7,7 @@ import {
   VendorDescription,
 } from '@gadgets/workshop-shared/gatekeeper'
 import { WorkshopButton, WorkshopIconButton } from './WorkshopControls'
+import { useTranslation } from 'react-i18next'
 
 interface ConnectConnectorModalProps {
   open: boolean
@@ -54,6 +55,7 @@ export default function ConnectConnectorModal({
   onEnsureResources,
   ensuringResourceUrlPatterns = [],
 }: ConnectConnectorModalProps) {
+  const { t } = useTranslation()
   const isManage = mode === 'manage'
 
   // Resource types the user can individually enable/disable at connect time. Resources without
@@ -150,7 +152,7 @@ export default function ConnectConnectorModal({
 
   const headerTitle = isManage
     ? vendorDescription.displayName
-    : `Connect ${vendorDescription.displayName}`
+    : t('gatekeepers.accountChooser.connectVendor', { vendor: vendorDescription.displayName })
 
   const headerSubline = isManage ? (
     <div className="mt-0.5 flex items-center gap-1.5 text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-subtle">
@@ -165,7 +167,7 @@ export default function ConnectConnectorModal({
           ? accountDescription?.uniqueName
             ? `${accountDisplayName} / ${accountDescription.uniqueName}`
             : accountDisplayName
-          : 'Credentials expired; reconnect from the Gatekeepers page'}
+          : t('gatekeepers.connectorModal.expiredHint')}
       </span>
     </div>
   ) : (
@@ -230,7 +232,7 @@ export default function ConnectConnectorModal({
           </div>
           <Dialog.Close
             render={(props) => (
-              <WorkshopIconButton {...props} disabled={busy} aria-label="Close">
+              <WorkshopIconButton {...props} disabled={busy} aria-label={t('common.close')}>
                 <X size={16} />
               </WorkshopIconButton>
             )}
@@ -371,7 +373,7 @@ export default function ConnectConnectorModal({
                       disabled={disconnecting}
                       className="!h-9 min-w-[140px]"
                     >
-                      {disconnecting ? 'Disconnecting...' : 'Yes, disconnect'}
+                      {disconnecting ? t('gatekeepers.connectorModal.disconnecting') : t('gatekeepers.connectorModal.confirmDisconnect')}
                     </WorkshopButton>
                   </>
                 ) : hasPending ? (

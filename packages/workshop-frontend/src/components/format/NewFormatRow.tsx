@@ -3,8 +3,10 @@
 
 import { FormatGlyph } from './FormatVisuals'
 import { useOutputFormats } from './useOutputFormats'
+import { useTranslation } from 'react-i18next'
 
-export default function NewFormatRow({ label = 'Start with' }: { label?: string }) {
+export default function NewFormatRow({ label }: { label?: string }) {
+  const { t } = useTranslation()
   const { formats, creating, create } = useOutputFormats()
 
   if (formats.length === 0) return null
@@ -12,7 +14,7 @@ export default function NewFormatRow({ label = 'Start with' }: { label?: string 
   return (
     <div className="flex flex-col items-center gap-2.5">
       <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-kumo-inactive">
-        {label}
+        {label ?? t('formats.startWith')}
       </span>
       <div className="flex flex-wrap items-center justify-center gap-2">
         {formats.map((format) => (
@@ -29,7 +31,7 @@ export default function NewFormatRow({ label = 'Start with' }: { label?: string 
               size="md"
               className={creating === format.blueprintId ? 'animate-pulse' : 'text-kumo-subtle'}
             />
-            {creating === format.blueprintId ? `Creating…` : `New ${format.output.noun}`}
+            {creating === format.blueprintId ? t('formats.creating') : t('formats.newOutput', { noun: format.output.id === 'app' ? t('formats.app.noun') : format.output.noun })}
           </button>
         ))}
       </div>

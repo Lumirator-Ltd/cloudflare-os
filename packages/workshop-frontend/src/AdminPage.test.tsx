@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { RpcStub } from 'capnweb'
 import type { AdminApi, AuthenticatedApi } from '@gadgets/workshop-shared/api'
 import { useAuthenticatedApi } from './AuthContext'
+import i18n from './i18n/config'
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -82,12 +83,13 @@ describe('AdminPage tabs', () => {
   let root: Root | undefined
   let container: HTMLDivElement | undefined
 
-  afterEach(() => {
+  afterEach(async () => {
     act(() => root?.unmount())
     container?.remove()
     root = undefined
     container = undefined
     navigate.mockReset()
+    await i18n.changeLanguage('en')
     vi.clearAllMocks()
   })
 
@@ -129,5 +131,26 @@ describe('AdminPage tabs', () => {
       search: {},
       replace: true,
     })
+  })
+
+  it('renders the complete admin navigation and general settings in Japanese', async () => {
+    await i18n.changeLanguage('ja')
+    let rendered = await render('access')
+
+    expect(rendered.textContent).toContain('管理')
+    expect(rendered.textContent).toContain('一般')
+    expect(rendered.textContent).toContain('ゲートキーパー')
+    expect(rendered.textContent).toContain('フォーマット')
+    expect(rendered.textContent).toContain('アクセス')
+    expect(rendered.textContent).toContain('新規登録を許可')
+
+    act(() => root?.unmount())
+    container?.remove()
+    root = undefined
+    container = undefined
+    rendered = await render('general')
+    expect(rendered.textContent).toContain('サイト名')
+    expect(rendered.textContent).toContain('テーマ')
+    expect(rendered.textContent).toContain('エージェントへの指示')
   })
 })

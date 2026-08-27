@@ -3,6 +3,7 @@ import type { GatekeeperUiFrame } from '@gadgets/workshop-shared/gatekeeper'
 import { useAuthenticatedApi } from './AuthContext'
 import SandboxedGatekeeperApp from './SandboxedGatekeeperApp'
 import { reportIssue } from './errorReporting'
+import { useTranslation } from 'react-i18next'
 
 // The frame's `ui` is an RPC stub at runtime; dispose it to release the server-side capability.
 function disposeFrame(frame: GatekeeperUiFrame | null) {
@@ -15,6 +16,7 @@ function disposeFrame(frame: GatekeeperUiFrame | null) {
  */
 export default function GatekeeperAppPage({ appId }: { appId: string }) {
   const { authenticatedApi } = useAuthenticatedApi()
+  const { t } = useTranslation()
   // Wrap the frame in an object: it holds a `ui` RPC stub, and we never want useState's setter to
   // treat a stored value as an updater function.
   const [state, setState] = useState<{ frame: GatekeeperUiFrame } | null>(null)
@@ -27,7 +29,7 @@ export default function GatekeeperAppPage({ appId }: { appId: string }) {
       .getGatekeeperApp(appId)
       .then((frame) => {
         if (!frame) {
-          if (!cancelled) setError('This app is not available on this deployment.')
+          if (!cancelled) setError(t('sandbox.appUnavailable'))
           return
         }
         if (cancelled) {
@@ -56,7 +58,7 @@ export default function GatekeeperAppPage({ appId }: { appId: string }) {
     )
   }
   if (!state) {
-    return <div className="px-4 py-16 text-center text-sm text-kumo-subtle">Loading…</div>
+    return <div className="px-4 py-16 text-center text-sm text-kumo-subtle">{t('sandbox.loading')}</div>
   }
 
   // Fill the viewport below the header so the embedded app can manage its own internal layout.
