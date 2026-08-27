@@ -1,13 +1,15 @@
 // @vitest-environment jsdom
 /* eslint-disable react/react-in-jsx-scope */
 
-import { act, useRef } from "react";
+import { act, useRef, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import { I18nextProvider } from "react-i18next";
 import type { RpcStub } from "capnweb";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   Overseer, SlashCommandChoice,
 } from "@gadgets/workshop-shared/api";
+import i18n from "../../i18n/config";
 import { useSlashCommandPicker } from "./SlashCommandPicker";
 
 (globalThis as {IS_REACT_ACT_ENVIRONMENT?: boolean}).IS_REACT_ACT_ENVIRONMENT = true;
@@ -39,7 +41,7 @@ function pickerOverseer(result: SlashCommandChoice[]) {
   } as unknown as RpcStub<Overseer>;
 }
 
-function Harness({
+function PickerHarness({
   inputValue,
   cursorPosition = inputValue.length,
   getOverseer,
@@ -91,6 +93,14 @@ function Harness({
   </>;
 }
 
+function Harness(props: ComponentProps<typeof PickerHarness>) {
+  return (
+    <I18nextProvider i18n={i18n}>
+      <PickerHarness {...props} />
+    </I18nextProvider>
+  );
+}
+
 async function waitFor(check: () => boolean) {
   for (let i = 0; i < 20; i++) {
     if (check()) return;
@@ -106,9 +116,12 @@ describe("SlashCommandPicker", () => {
   afterEach(async () => {
     if (root) await act(async () => root.unmount());
     container?.remove();
+    vi.restoreAllMocks();
+    await i18n.changeLanguage("en");
   });
 
   it("loads once, filters locally, positions above, and dismisses outside", async () => {
+    const consoleWarn = vi.spyOn(console, "warn");
     Object.defineProperty(window, "innerHeight", {value: 600, configurable: true});
     container = document.createElement("div");
     document.body.append(container);
@@ -147,6 +160,10 @@ describe("SlashCommandPicker", () => {
     ));
     await waitFor(() => document.querySelectorAll('[role="option"]').length === 2);
     expect(overseer.listSlashCommands).toHaveBeenCalledTimes(1);
+    expect(consoleWarn).not.toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({code: "NO_I18NEXT_INSTANCE"}),
+    );
   });
 
   it("reopens for another token after dismissing without changing the message", async () => {
@@ -242,6 +259,21 @@ describe("SlashCommandPicker", () => {
       <Harness inputValue="/" getOverseer={getOverseer} onSelect={() => {}} chatExists={true} />,
     ));
     await waitFor(() => document.querySelectorAll('[role="option"]').length === 3);
+  });
+
+  it("renders picker labels in Japanese", async () => {
+    await i18n.changeLanguage("ja");
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+
+    await act(async () => root.render(
+      <Harness inputValue="/" getOverseer={() => pickerOverseer(choices)} onSelect={() => {}} />,
+    ));
+    await waitFor(() => document.querySelectorAll('[role="option"]').length === 2);
+
+    expect(document.querySelector('[role="listbox"]')?.getAttribute("aria-label"))
+      .toBe("スラッシュコマンド");
   });
 
   // An exact `/compact` must not resolve either, or the filtered command would still be sent.
