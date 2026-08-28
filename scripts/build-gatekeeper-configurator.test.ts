@@ -65,7 +65,8 @@ function readRuntimeFunctions(
   ...names: string[]
 ): Record<string, (...args: any[]) => any> {
   const constants = [...runtime.matchAll(/^const [A-Z_]+ = .*;$/gm)].map(match => match[0]);
-  const definitions = names.map(name => {
+  const dependencies = [...new Set(["localize", ...names])];
+  const definitions = dependencies.map(name => {
     const match = runtime.match(new RegExp(`function ${name}\\([^)]*\\) \\{[\\s\\S]*?\\n\\}`));
     assert.ok(match, `generated runtime should define ${name}`);
     return match[0];
@@ -73,7 +74,8 @@ function readRuntimeFunctions(
   // The generated runtime is trusted build output and production executes the same function.
   // oxlint-disable-next-line no-new-func
   return new Function(
-    `${constants.join("\n")}\n${definitions.join("\n")}\nreturn { ${names.join(", ")} };`)();
+    `${constants.join("\n")}\nlet language = "en";\n${definitions.join("\n")}\n` +
+      `return { ${names.join(", ")} };`)();
 }
 
 /** The source map the builder writes beside each configurator artifact. */
@@ -236,6 +238,179 @@ describe("generated configurator error reporting", () => {
     assert.doesNotMatch(runtime, /sourceURL=.*serialize-exception/);
     await assert.rejects(access(join(generatedDir, "test-ui.js")), { code: "ENOENT" });
     await assert.rejects(access(join(generatedDir, "test-ui.js.map")), { code: "ENOENT" });
+  });
+});
+
+describe("generated configurator language propagation", () => {
+  it("applies initial and live host language to the document and configurator contexts", async () => {
+    const runtime = await readRuntime(fixtureDir);
+
+    assert.match(runtime, /await host\.getLanguage\(\)/);
+    assert.match(runtime, /document\.documentElement\.lang = language/);
+    assert.match(runtime, /setLanguage\(nextLanguage\)/);
+    assert.match(runtime, /if \(changed && rerender\) render\(\)/);
+    assert.match(runtime, /spec\.render\(\{ ui, values, language, setValues, clearFields, components \}\)/);
+    assert.match(runtime, /spec\?\.resourceUrl\?\.\(\{ values, ui, language \}\)/);
+  });
+
+  it("selects exact English and Japanese choices without falling back", async () => {
+    const { localize } = readRuntimeFunctions(await readRuntime(fixtureDir), "localize");
+    const choices = { en: "Loading...", ja: "読み込み中..." };
+
+    assert.equal(localize("en", choices), choices.en);
+    assert.equal(localize("ja", choices), choices.ja);
+    assert.equal(localize("fr", choices), undefined);
+  });
+
+  it("localizes generic loading, empty, optional, selection, and error copy", async () => {
+    const runtime = await readRuntime(fixtureDir);
+    const japaneseCopy = [
+      "任意",
+      "読み込み中...",
+      "このサーバーはツールを公開していません。",
+      "ツールを絞り込む...",
+      "すべて選択",
+      "選択を解除",
+      "一致する項目はありません。",
+      "オプションを読み込めませんでした。",
+      "コンフィギュレーターのオプションを読み込めませんでした。",
+      "コンフィギュレーターからリソース URL が返されませんでした。",
+      "コンフィギュレーター UI モジュールにコンフィギュレーター UI が定義されていません。",
+    ];
+
+    for (const text of japaneseCopy) assert.ok(runtime.includes(text), `missing: ${text}`);
+  });
+});
+
+const UNLOCALIZED_CONFIGURATOR_LITERAL_ALLOWLIST = new Set([
+  "", "/", ",", ".slack.com", "archives", "string", "yes",
+  "all", "search", "label", "search/", "label/", "choose", "tool", "tools",
+  "server", "portal", "unknown", "unavailable", "issue", "team",
+  "thisCalendar", "allVisible",
+  "accountId", "workerName", "pageUrl", "siteUrl", "spaceUrl", "emailName",
+  "repoFullName", "issueNumber", "pullNumber", "projectId", "datasetId", "tableId",
+  "calendarId", "query", "docId", "spreadsheetId", "areaId", "deviceId", "entityId",
+  "labelId", "issueIdentifier", "teamKey", "workspaceUrlKey", "itemUrl",
+  "conversationId", "permalink", "playlistId", "slug", "ref",
+  "https://github.com", "https://www.notion.so/", "https://mail.google.com/mail/u/0/",
+]);
+
+function isInsideImport(node: ts.Node): boolean {
+  for (let current: ts.Node | undefined = node; current; current = current.parent) {
+    if (ts.isImportDeclaration(current)) return true;
+  }
+  return false;
+}
+
+function enclosingLocalizeCall(node: ts.Node): ts.CallExpression | null {
+  for (let current: ts.Node | undefined = node; current; current = current.parent) {
+    if (ts.isCallExpression(current)
+        && ts.isIdentifier(current.expression)
+        && current.expression.text === "localize") return current;
+  }
+  return null;
+}
+
+function localizedChoiceKeys(call: ts.CallExpression): string[] {
+  const choices = call.arguments[1];
+  assert.ok(choices && ts.isObjectLiteralExpression(choices),
+    "localize must receive an inline whole-language choice");
+  return choices.properties.map(property => {
+    assert.ok(ts.isPropertyAssignment(property) && !property.name.getText().startsWith("["),
+      "localize choices must use explicit properties");
+    return property.name.getText().replaceAll(/["']/g, "");
+  }).toSorted();
+}
+
+async function configuratorSourcePaths(): Promise<string[]> {
+  const paths: string[] = [];
+  for (const packageName of await configuratorPackages()) {
+    const directory = join("packages", packageName, "src", "configurator");
+    for (const name of await readdir(directory)) {
+      if (name.endsWith("-ui.tsx")) paths.push(join(directory, name));
+    }
+  }
+  return paths.toSorted();
+}
+
+describe("configurator localization source audit", () => {
+  it("keeps every visible static configurator string in an exact en/ja choice", async () => {
+    const failures: string[] = [];
+    const paths = await configuratorSourcePaths();
+
+    for (const path of paths) {
+      const source = await readFile(path, "utf8");
+      const sourceFile = ts.createSourceFile(
+        path, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+      let localizeCalls = 0;
+
+      const visit = (node: ts.Node): void => {
+        if (ts.isCallExpression(node)
+            && ts.isIdentifier(node.expression)
+            && node.expression.text === "localize") {
+          localizeCalls++;
+          try {
+            assert.deepEqual(localizedChoiceKeys(node), ["en", "ja"]);
+          } catch (error) {
+            failures.push(`${path}:${sourceFile.getLineAndCharacterOfPosition(node.getStart()).line + 1} ${String(error)}`);
+          }
+        }
+
+        if ((ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node))
+            && /[A-Za-z]{2,}/.test(node.text)
+            && !isInsideImport(node)
+            && !enclosingLocalizeCall(node)
+            && !UNLOCALIZED_CONFIGURATOR_LITERAL_ALLOWLIST.has(node.text)) {
+          const line = sourceFile.getLineAndCharacterOfPosition(node.getStart()).line + 1;
+          failures.push(`${path}:${line} unlocalized ${JSON.stringify(node.text)}`);
+        }
+        ts.forEachChild(node, visit);
+      };
+      visit(sourceFile);
+      if (localizeCalls === 0) failures.push(`${path}: no localized visible copy`);
+    }
+
+    assert.equal(paths.length, 36, "audit module count changed; review the localization scope");
+    assert.deepEqual(failures, []);
+  });
+
+  it("keeps MCP connection-form copy in a complete bilingual catalog", async () => {
+    const path = "packages/gatekeeper-mcp/src/connect-form.ts";
+    const source = await readFile(path, "utf8");
+    assert.match(source, /satisfies Record<ConnectFormLanguage, ConnectFormCopy>/);
+
+    const sourceFile = ts.createSourceFile(
+      path, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+    let functionNode: ts.FunctionDeclaration | undefined;
+    const visit = (node: ts.Node): void => {
+      if (ts.isFunctionDeclaration(node) && node.name?.text === "connectFormHtml") {
+        functionNode = node;
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sourceFile);
+    assert.ok(functionNode, "connectFormHtml should remain statically auditable");
+
+    let returnedTemplate: ts.TemplateExpression | undefined;
+    const inspectFunction = (node: ts.Node): void => {
+      if (ts.isReturnStatement(node) && node.expression && ts.isTemplateExpression(node.expression)) {
+        returnedTemplate = node.expression;
+      }
+      ts.forEachChild(node, inspectFunction);
+    };
+    inspectFunction(functionNode);
+    assert.ok(returnedTemplate, "connectFormHtml should return one auditable HTML template");
+    const staticHtml = [
+      returnedTemplate.head.text,
+      ...returnedTemplate.templateSpans.map(span => span.literal.text),
+    ].join("__DYNAMIC__");
+    const visibleRawText = staticHtml
+      .replaceAll(/<[^>]*>/g, " ")
+      .replaceAll("__DYNAMIC__", " ")
+      .replaceAll(/\s+/g, " ")
+      .trim();
+    assert.doesNotMatch(visibleRawText, /[A-Za-z]{2,}/,
+      "connectFormHtml must interpolate localized copy instead of embedding visible English");
   });
 });
 

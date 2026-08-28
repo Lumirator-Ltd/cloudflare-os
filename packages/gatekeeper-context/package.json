@@ -19,7 +19,9 @@
     "@gadgets/workshop-shared": "workspace:*",
     "capnweb": "catalog:",
     "capnweb-validate": "catalog:",
+    "i18next": "26.4.0",
     "isomorphic-git": "^1.40.5",
+    "react-i18next": "17.0.12",
     "yaml": "^2.9.0",
     "zod": "^4.4.3"
   },

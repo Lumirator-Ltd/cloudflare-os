@@ -1,4 +1,4 @@
-import { Autocomplete, Field, h, Section, type ConfiguratorUISpec } from "@gadgets/configurator-ui";
+import { localize, Autocomplete, Field, h, Section, type ConfiguratorUISpec } from "@gadgets/configurator-ui";
 import type { BigQueryConfiguratorRpc, BigQueryConfiguratorValues } from "./bigquery-configurator-types";
 
 export default {
@@ -25,13 +25,13 @@ export default {
     return `https://bigquery.googleapis.com/${path}${values.datasetId ? "" : "/"}`;
   },
 
-  render({ values, setValues, clearFields, ui }) {
+  render({ values, setValues, clearFields, ui, language }) {
     return <Section>
-      <Field label="Project" description="Start with the Google Cloud project this connection can query.">
+      <Field label={localize(language, { en: "Project", ja: "プロジェクト" })} description={localize(language, { en: "Start with the Google Cloud project this connection can query.", ja: "まず、この接続が照会できる Google Cloud プロジェクトを選択します。" })}>
         <Autocomplete
           name="projectId"
           value={values.projectId}
-          placeholder="Search projects..."
+          placeholder={localize(language, { en: "Search projects...", ja: "プロジェクトを検索..." })}
           loadOptions={query => ui.listProjects(query)}
           onChange={projectId => {
             clearFields("datasetId", "tableId");
@@ -40,11 +40,11 @@ export default {
         />
       </Field>
 
-      <Field label="Dataset" description="Leave blank to allow all datasets in the project." optional>
+      <Field label={localize(language, { en: "Dataset", ja: "データセット" })} description={localize(language, { en: "Leave blank to allow all datasets in the project.", ja: "空欄にすると、プロジェクト内のすべてのデータセットを許可します。" })} optional>
         <Autocomplete
           name="datasetId"
           value={values.datasetId}
-          placeholder={values.projectId ? "Search datasets..." : "Choose a project first"}
+          placeholder={values.projectId ? localize(language, { en: "Search datasets...", ja: "データセットを検索..." }) : localize(language, { en: "Choose a project first", ja: "先にプロジェクトを選択" })}
           disabled={!values.projectId}
           loadOptions={query => values.projectId ? ui.listDatasets(values.projectId, query) : Promise.resolve([])}
           onChange={datasetId => {
@@ -59,11 +59,11 @@ export default {
         />
       </Field>
 
-      <Field label="Table" description="Leave blank to allow all tables in dataset." optional>
+      <Field label={localize(language, { en: "Table", ja: "テーブル" })} description={localize(language, { en: "Leave blank to allow all tables in dataset.", ja: "空欄にすると、データセット内のすべてのテーブルを許可します。" })} optional>
         <Autocomplete
           name="tableId"
           value={values.tableId}
-          placeholder={values.datasetId ? "Search tables..." : "Choose a dataset first"}
+          placeholder={values.datasetId ? localize(language, { en: "Search tables...", ja: "テーブルを検索..." }) : localize(language, { en: "Choose a dataset first", ja: "先にデータセットを選択" })}
           disabled={!values.projectId || !values.datasetId}
           loadOptions={query => values.projectId && values.datasetId
             ? ui.listTables(values.projectId, values.datasetId, query)

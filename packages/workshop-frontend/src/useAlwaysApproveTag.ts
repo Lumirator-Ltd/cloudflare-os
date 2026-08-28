@@ -1,8 +1,10 @@
 import { useCallback, useState, type Dispatch, type SetStateAction } from 'react'
+import { useTranslation } from 'react-i18next'
 import { useKumoToastManager } from '@cloudflare/kumo'
 import { RpcStub } from 'capnweb'
 import { Overseer } from '@gadgets/workshop-shared/api'
 import { ActionKind } from '@gadgets/workshop-shared/gatekeeper'
+import './i18n/config'
 
 /**
  * Enables an auto-approval rule for the action's (gatekeeperId, actionKind.tag), and tracks
@@ -15,6 +17,7 @@ export function useAlwaysApproveTag(
     // Invoked after a rule is successfully enabled, so other views (e.g. the Connections rule list)
     // can refresh without waiting to be re-opened.
     onEnabled?: () => void) {
+  const { t } = useTranslation()
   const toasts = useKumoToastManager()
   const [enabledTags, setEnabledTags] = useState<Set<string>>(new Set())
 
@@ -31,7 +34,7 @@ export function useAlwaysApproveTag(
       return true
     } catch (err) {
       console.error('Failed to enable auto-approval:', err)
-      toasts.add({ title: 'Failed to enable auto-approval', variant: 'error' })
+      toasts.add({ title: t('workspace.activity.autoApproval.enableFailed'), variant: 'error' })
       return false
     } finally {
       setProcessingActions(prev => {
@@ -40,7 +43,7 @@ export function useAlwaysApproveTag(
         return next
       })
     }
-  }, [overseer, setProcessingActions, toasts, onEnabled])
+  }, [overseer, setProcessingActions, toasts, onEnabled, t])
 
   const isTagAutoApproved = useCallback(
       (gatekeeperId: number, tag: string) => enabledTags.has(`${gatekeeperId}:${tag}`),

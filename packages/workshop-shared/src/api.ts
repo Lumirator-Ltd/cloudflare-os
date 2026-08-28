@@ -26,6 +26,7 @@
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { AccountDescription, ActionKind, ActionDescription, AvatarImage, ConnectorConfigurationInput, GatekeeperUiFrame, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription } from "./gatekeeper.js";
 import type { UiFeatureFlags } from "./feature-flags.js";
+import type { SupportedLanguage } from "./theme.js";
 
 export const SERVICE_SALT = new Uint8Array([
   0xd9, 0x4e, 0x54, 0x1d, 0x29, 0xc1, 0x03, 0x74, 0x73, 0x7e, 0xb3, 0xe3, 0x34, 0x6d, 0x8f, 0x21
@@ -359,6 +360,12 @@ export interface AuthenticatedApi extends RpcTarget {
 
   /** Set the user's own display name, seen in chats, etc. */
   setOwnDisplayName(name: string): Promise<void>;
+
+  /** Get the user's persisted UI language preference. */
+  getLanguagePreference(): Promise<LanguagePreference>;
+
+  /** Set the user's persisted UI language preference. */
+  setLanguagePreference(preference: LanguagePreference): Promise<void>;
 
   /**
    * Change the user's password, if using password-based authentication.
@@ -1056,6 +1063,15 @@ export type AdminFormatPatch = {
   overrides?: {[K in keyof BlueprintOutput]?: BlueprintOutput[K] | null};
 };
 
+/** Languages supported by first-party Workshop localization. */
+export type { SupportedLanguage } from "./theme.js";
+
+/** A user's persisted UI language choice. */
+export type LanguagePreference = "auto" | SupportedLanguage;
+
+/** Language used to render semantic activity for one chat turn. */
+export type ChatActivityLanguage = SupportedLanguage;
+
 /**
  * A gatekeeper vendor offered as a sign-in method. The login/signup pages render a "Continue with
  * ..." button per entry, alongside (never replacing) username/password. Built from auth-capable
@@ -1077,6 +1093,9 @@ export type AuthVendorInfo = {
  * Returned by `PublicApi.getServerConfig()`. Contains no secrets.
  */
 export type ServerConfig = {
+  /** Default language for signed-out users and users whose language preference is `"auto"`. */
+  defaultLanguage: SupportedLanguage;
+
   /**
    * Auth-capable, allowlisted gatekeeper vendors shown as sign-in methods, including unconfigured
    * vendors with disabled buttons. Empty when no allowlisted bound vendor provides authentication.
@@ -2122,6 +2141,11 @@ export type AiChatMetadata = {
   lastActive: Date,
 
   /**
+   * Language governing semantic activity for the current chat turn. Absent on legacy metadata.
+   */
+  activityLanguage?: ChatActivityLanguage;
+
+  /**
    * If present, an LLM (described by the author info) is currently actively responding to the
    * chat.
    */
@@ -2206,6 +2230,8 @@ export type AiChatMessage = {
   sequence: number;
   timestamp: Date;
   author: AiChatAuthorInfo;
+  /** Language used to render this turn's semantic activity. Absent on legacy messages. */
+  activityLanguage?: ChatActivityLanguage;
 } & AiChatMessageBody;
 
 export type AiChatMessageBody = {

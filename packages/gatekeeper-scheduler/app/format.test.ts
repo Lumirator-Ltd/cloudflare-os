@@ -123,6 +123,90 @@ describe("formatOccurrences", () => {
   });
 });
 
+describe("Japanese formatting", () => {
+  const now = Date.UTC(2026, 6, 30, 12);
+  const hourly: ManagementSchedule = {
+    ...common,
+    cadence: { kind: "interval", everyMs: 3_600_000, anchorMs: 0 },
+    status: "active",
+    nextFire: now + 2 * 3_600_000,
+  };
+
+  it("localizes cadence and interval templates while using Japanese Intl output", () => {
+    expect(formatCadence(hourly.cadence, "ja")).toBe("1時間ごと");
+    expect(formatCadence({ kind: "interval", everyMs: 1_209_600_000, anchorMs: 0 }, "ja"))
+      .toBe("2週間ごと");
+    expect(
+      formatCadence({
+        kind: "calendar",
+        timeZone: "Asia/Tokyo",
+        rule: {
+          freq: "weekly",
+          interval: 1,
+          byDay: ["MO", "TU", "WE", "TH", "FR"],
+          hour: 8,
+          minute: 0,
+          anchorMs: 0,
+        },
+      }, "ja"),
+    ).toBe("平日の8:00");
+    expect(
+      formatCadence({
+        kind: "once",
+        fireAt: Date.UTC(2026, 6, 30, 0),
+        timeZone: "Asia/Tokyo",
+      }, "ja"),
+    ).toBe("2026年7月30日 9:00に1回");
+  });
+
+  it("localizes occurrence bounds, timing, retries, and diagnostics", () => {
+    expect(formatOccurrences({ ...hourly, occurrences: { count: 3 }, occurrenceCount: 1 }, "ja"))
+      .toBe("3回中1回実行済み");
+    expect(formatTiming(hourly, now, "ja").relative).toBe("次回実行は2 時間後");
+    expect(formatTiming({ ...hourly, retrying: true }, now, "ja").relative)
+      .toBe("再試行は2 時間後");
+
+    const dead: ManagementSchedule = {
+      ...common,
+      cadence: hourly.cadence,
+      status: "dead",
+      failedAt: now - 60_000,
+      failureCode: "authorization_failed",
+    };
+    expect(formatTiming(dead, now, "ja")).toMatchObject({
+      relative: "1 分前に失敗",
+      diagnostic: "再試行後も認証に失敗しました。",
+    });
+    expect(formatTiming({ ...dead, failureCode: "callback_failed" }, now, "ja").diagnostic)
+      .toBe("再試行後もタスクのコールバックに失敗しました。");
+  });
+
+  it("localizes pending and terminal timing templates", () => {
+    expect(formatTiming({ ...hourly, nextFire: undefined }, now, "ja")).toEqual({
+      relative: "次回実行を待機中",
+    });
+    const completed = {
+      ...hourly,
+      status: "completed",
+      completedAt: now,
+      occurrences: { count: 2 },
+    } as ManagementSchedule;
+    expect(formatTiming(completed, now, "ja")).toMatchObject({
+      relative: "0 秒後に完了",
+      diagnostic: "この定期タスクは最後の予定回を実行しました。",
+    });
+    const expired = {
+      ...hourly,
+      status: "expired",
+      expiredAt: now,
+    } as ManagementSchedule;
+    expect(formatTiming(expired, now, "ja")).toMatchObject({
+      relative: "0 秒後に期限切れ",
+      diagnostic: "この定期タスクは初回実行前に期限を過ぎました。",
+    });
+  });
+});
+
 describe("formatTiming terminal copy", () => {
   const base = {
     ...common,

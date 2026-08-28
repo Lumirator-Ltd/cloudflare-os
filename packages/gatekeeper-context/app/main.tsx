@@ -13,6 +13,7 @@ import type {
 import ContextLibraryPage from './ContextLibraryPage'
 import { ContextApiProvider, PresentationProvider, type PresentAck } from './bridge'
 import { applyAppTheme } from './theme'
+import { AppLanguageProvider } from './i18n'
 import './styles.css'
 import ErrorBoundary from './ErrorBoundary'
 import { installErrorReporting, reportIssue } from './error-reporting'
@@ -52,15 +53,17 @@ function main() {
       handled: false, severity: 'fatal', captureMechanism: 'react',
     }),
   }).render(
-    <ErrorBoundary><ContextApiProvider value={host.ui}>
-      <PresentationProvider setPresenting={(active) => host.setPresenting(active)}>
-        <TooltipProvider>
-          <Toasty>
-            <ContextLibraryPage />
-          </Toasty>
-        </TooltipProvider>
-      </PresentationProvider>
-    </ContextApiProvider></ErrorBoundary>,
+    <AppLanguageProvider>
+      <ErrorBoundary><ContextApiProvider value={host.ui}>
+        <PresentationProvider setPresenting={(active) => host.setPresenting(active)}>
+          <TooltipProvider>
+            <Toasty>
+              <ContextLibraryPage />
+            </Toasty>
+          </TooltipProvider>
+        </PresentationProvider>
+      </ContextApiProvider></ErrorBoundary>
+    </AppLanguageProvider>,
   )
 }
 

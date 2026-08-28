@@ -1,4 +1,4 @@
-import {
+import { localize,
   CheckboxList, Field, h, RadioCards, Section, type ConfiguratorUISpec,
 } from "@gadgets/configurator-ui";
 import type {
@@ -36,38 +36,40 @@ export default {
     return `${endpoint}#${params}`;
   },
 
-  render({ values, setValues, ui }) {
+  render({ values, setValues, ui, language }) {
     const mode = values.mode === "choose" ? "choose" : "all";
     const selectedCount = (values.tools ?? "").split(",").filter(Boolean).length;
 
     return <Section>
-      <Field label="Tools" description="Choose how much of this server this connection may call.">
+      <Field label={localize(language, { en: "Tools", ja: "ツール" })} description={localize(language, { en: "Choose how much of this server this connection may call.", ja: "この接続が呼び出せるサーバーのツール範囲を選択します。" })}>
         <RadioCards
           value={mode}
           options={[
             {
               value: "all",
-              title: "All tools",
-              description: "Every tool this server offers, including ones it adds later.",
+              title: localize(language, { en: "All tools", ja: "すべてのツール" }),
+              description: localize(language, { en: "Every tool this server offers, including ones it adds later.", ja: "このサーバーが提供するすべてのツール（今後追加されるものを含む）。" }),
             },
             {
               value: "choose",
-              title: "Choose tools",
+              title: localize(language, { en: "Choose tools", ja: "ツールを選択" }),
               description:
-                "Only the tools you tick. Anything else is refused, including tools added later.",
+                localize(language, { en: "Only the tools you tick. Anything else is refused, including tools added later.", ja: "チェックしたツールのみ。今後追加されるツールを含め、それ以外は拒否されます。" }),
             },
           ]}
           onChange={next => setValues({ mode: next })}
         />
       </Field>
       <Field
-        label="Allowed tools"
+        label={localize(language, { en: "Allowed tools", ja: "許可するツール" })}
         description={mode === "all"
-          ? "Read-only tools return data straight away; the rest queue for your approval."
+          ? localize(language, { en: "Read-only tools return data straight away; the rest queue for your approval.", ja: "読み取り専用ツールはすぐにデータを返し、それ以外は承認待ちになります。" })
           : selectedCount > 0
-            ? `${selectedCount} selected. Read-only tools return data straight away; the rest `
-              + "queue for your approval."
-            : "Tick at least one tool to grant anything."}>
+            ? localize(language, {
+                en: `${selectedCount} selected. Read-only tools return data straight away; the rest queue for your approval.`,
+                ja: `${selectedCount} 件を選択。読み取り専用ツールはすぐにデータを返し、それ以外は承認待ちになります。`,
+              })
+            : localize(language, { en: "Tick at least one tool to grant anything.", ja: "許可するツールを 1 つ以上チェックしてください。" })}>
         <CheckboxList
           name="tools"
           value={values.tools}

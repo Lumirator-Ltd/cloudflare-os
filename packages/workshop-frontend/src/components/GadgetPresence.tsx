@@ -1,14 +1,16 @@
 import { useState, useEffect, useLayoutEffect, useMemo, useRef } from 'react'
+import { useTranslation } from 'react-i18next'
 import { Popover, Tooltip } from '@cloudflare/kumo'
 import { RpcStub, RpcTarget } from 'capnweb'
 import { Overseer, AuthenticatedApi, PresenceParticipant, PresenceSubscriber } from '@gadgets/workshop-shared/api'
 import { PersonAvatar } from './PersonAvatar'
+import '../i18n/config'
 
 const MAX_VISIBLE = 3
 
-const ROLE_LABELS: Record<PresenceParticipant['role'], string> = {
-  build: 'Workspace',
-  use: 'Gadget only',
+const ROLE_LABEL_KEYS: Record<PresenceParticipant['role'], string> = {
+  build: 'workspace.presence.roles.build',
+  use: 'workspace.presence.roles.use',
 }
 
 export function GadgetPresence({
@@ -20,6 +22,7 @@ export function GadgetPresence({
   authenticatedApi: RpcStub<AuthenticatedApi>
   currentUserId: string | null
 }) {
+  const { t } = useTranslation()
   const [participants, setParticipants] = useState<PresenceParticipant[]>([])
 
   useEffect(() => {
@@ -182,8 +185,8 @@ export function GadgetPresence({
   const visible = display.slice(0, MAX_VISIBLE)
   const overflow = display.length - visible.length
   const count = display.length
-  const label = `${count} ${count === 1 ? 'person' : 'people'} here now`
-  const ariaLabel = `${count} ${count === 1 ? 'person' : 'people'} viewing this workspace`
+  const label = t('workspace.presence.hereNow', { count })
+  const ariaLabel = t('workspace.presence.viewing', { count })
 
   return (
     <Popover>
@@ -197,7 +200,10 @@ export function GadgetPresence({
             <span ref={stackRef} className="relative inline-flex">
               <span className="flex -space-x-2">
                 {visible.map((p) => (
-                  <Tooltip key={p.user.id} content={`${p.user.name} · ${ROLE_LABELS[p.role]}`} asChild>
+                  <Tooltip key={p.user.id} content={t('workspace.presence.participant', {
+                    name: p.user.name,
+                    role: t(ROLE_LABEL_KEYS[p.role]),
+                  })} asChild>
                     {/* Outer span = FLIP target (translateX slide). Inner span = scale/opacity pop.
                         Kept on separate elements so the two transforms don't overwrite each other. */}
                     <span data-flip-id={p.user.id} className="inline-flex cursor-pointer">
@@ -254,7 +260,7 @@ export function GadgetPresence({
                   {p.user.name}
                 </span>
                 <span className="mt-0.5 block text-[11px] leading-4 font-normal text-kumo-subtle">
-                  {ROLE_LABELS[p.role]}
+                  {t(ROLE_LABEL_KEYS[p.role])}
                 </span>
               </span>
             </div>

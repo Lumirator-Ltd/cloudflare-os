@@ -7,61 +7,25 @@ import {
   Presentation,
   type Icon,
 } from '@phosphor-icons/react'
+import { useTranslation } from 'react-i18next'
 
 // A few example work tasks shown under the Home composer, so a new user immediately sees the kind
 // of thing they can ask for. Picking one drops a starter prompt into the composer (it does not
 // auto-send) so the user can tweak it before running.
 type TaskSuggestion = {
   id: string
-  label: string
-  description: string
-  prompt: string
+  translationKey: string
   icon: Icon
 }
 
 // Formats are advertised by example rather than by a row of "Start with Docs" buttons, so the
 // first move isn't "pick a file type". The formats themselves are in the composer's `+` menu.
 const SUGGESTIONS: TaskSuggestion[] = [
-  {
-    id: 'one-on-one',
-    label: 'Write a 1:1 pre-read',
-    description: 'A doc with a snapshot, things to inspect, and one ask',
-    icon: FileText,
-    prompt:
-      'Create a document to prepare for my next 1:1 with a direct report: a current snapshot, a coaching frame, things to inspect, carryover items from last time, and one clear ask.',
-  },
-  {
-    id: 'team-meeting',
-    label: 'Build a team meeting deck',
-    description: 'Slides with progress, risks, and what needs a decision',
-    icon: Presentation,
-    prompt:
-      'Create a slide deck for my next team meeting: where things stand, what shipped, risks and blockers, and the decisions I need from the room. Ask me what the team is working on first.',
-  },
-  {
-    id: 'insights',
-    label: 'Find insights in my data',
-    description: 'Turn a spreadsheet or CSV into trends and recommendations',
-    icon: ChartLineUp,
-    prompt:
-      'Turn a dataset I will share (a spreadsheet, CSV, or pasted table) into a narrative analysis: key trends, anomalies, the "so what", and concrete recommendations.',
-  },
-  {
-    id: 'workflow',
-    label: 'Automate a workflow',
-    description: 'Trigger an agent when a new email arrives',
-    icon: Lightning,
-    prompt:
-      'Create an agent workflow that runs automatically when a new email arrives: read the message, decide what to do, and take action or draft a reply. Ask me which inbox to watch and what it should handle.',
-  },
-  {
-    id: 'app',
-    label: 'Build a quick tool',
-    description: 'A small interactive app, calculator, or dashboard',
-    icon: AppWindow,
-    prompt:
-      'Build a small interactive tool I can use right here — a calculator, dashboard, or explorer. Ask me what it should do, then create it.',
-  },
+  { id: 'one-on-one', translationKey: 'oneOnOne', icon: FileText },
+  { id: 'team-meeting', translationKey: 'teamMeeting', icon: Presentation },
+  { id: 'insights', translationKey: 'insights', icon: ChartLineUp },
+  { id: 'workflow', translationKey: 'workflow', icon: Lightning },
+  { id: 'app', translationKey: 'app', icon: AppWindow },
 ]
 
 // One row, shared by every suggestion so the list reads as one kind of offer.
@@ -118,22 +82,23 @@ export default function HomeTaskSuggestions({
 }: {
   onPick: (prompt: string) => void
 }) {
+  const { t } = useTranslation()
   // Chosen once per mount: re-rolling on every render would shuffle the list under the pointer.
   const visible = useMemo(pickSuggestions, [])
 
   return (
-    <section aria-label="Example tasks" className="flex flex-col gap-1">
+    <section aria-label={t('shell.home.suggestionsLabel')} className="flex flex-col gap-1">
       <h3 className="px-1 pb-1 text-[12px] font-medium uppercase tracking-[0.06em] text-kumo-inactive">
-        Get started
+        {t('shell.home.suggestionsHeading')}
       </h3>
       <ul className="flex flex-col gap-0.5">
         {visible.map((suggestion) => (
           <SuggestionRow
             key={suggestion.id}
             icon={<suggestion.icon size={16} />}
-            label={suggestion.label}
-            description={suggestion.description}
-            onClick={() => onPick(suggestion.prompt)}
+            label={t(`shell.home.suggestions.${suggestion.translationKey}.label`)}
+            description={t(`shell.home.suggestions.${suggestion.translationKey}.description`)}
+            onClick={() => onPick(t(`shell.home.suggestions.${suggestion.translationKey}.prompt`))}
           />
         ))}
       </ul>

@@ -1,4 +1,4 @@
-import { Autocomplete, Field, h, Section, type ConfiguratorUISpec } from "@gadgets/configurator-ui";
+import { localize, Autocomplete, Field, h, Section, type ConfiguratorUISpec } from "@gadgets/configurator-ui";
 import type {
   HomeAssistantEntityConfiguratorRpc,
   HomeAssistantEntityConfiguratorValues,
@@ -15,13 +15,13 @@ export default {
     return ui.resourceUrl(values.entityId);
   },
 
-  render({ values, setValues, ui }) {
+  render({ values, setValues, ui, language }) {
     return <Section>
-      <Field label="Entity" description="Choose a single Home Assistant entity (light, sensor, switch, etc).">
+      <Field label={localize(language, { en: "Entity", ja: "エンティティ" })} description={localize(language, { en: "Choose a single Home Assistant entity (light, sensor, switch, etc).", ja: "Home Assistant のエンティティ（照明、センサー、スイッチなど）を 1 つ選択します。" })}>
         <Autocomplete
           name="entityId"
           value={values.entityId}
-          placeholder="Search entities..."
+          placeholder={localize(language, { en: "Search entities...", ja: "エンティティを検索..." })}
           loadOptions={query => ui.listEntities(query)}
           onChange={entityId => setValues({ entityId })}
         />

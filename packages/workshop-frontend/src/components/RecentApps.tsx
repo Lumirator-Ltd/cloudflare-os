@@ -2,7 +2,10 @@ import { Link } from '@tanstack/react-router'
 import { Clock, ArrowRight } from '@phosphor-icons/react'
 import { useAuthenticatedApi } from '../AuthContext'
 import { useState, useEffect } from 'react'
-import { GadgetMetadataWithTimestamps } from '@gadgets/workshop-shared/api'
+import { GadgetMetadataWithTimestamps, type SupportedLanguage } from '@gadgets/workshop-shared/api'
+import { useTranslation } from 'react-i18next'
+import { useLanguage } from '../i18n/LanguageProvider'
+import { formatRelativeTime as formatLocalizedRelativeTime } from '../i18n/format'
 
 // A simple deterministic gradient based on the gadget ID
 function getGradient(id: string): string {
@@ -20,20 +23,26 @@ function getGradient(id: string): string {
   return gradients[idx]
 }
 
-function formatRelativeTime(date: Date): string {
-  const now = Date.now()
-  const diff = now - date.getTime()
-  const minutes = Math.floor(diff / 60000)
-  if (minutes < 1) return 'just now'
-  if (minutes < 60) return `${minutes}m ago`
+function formatRelativeTime(date: Date, language: SupportedLanguage): string {
+  const minutes = Math.floor((Date.now() - date.getTime()) / 60000)
+  if (minutes < 1) {
+    return formatLocalizedRelativeTime(0, 'minute', language, { numeric: 'auto' })
+  }
+  if (minutes < 60) {
+    return formatLocalizedRelativeTime(-minutes, 'minute', language, { numeric: 'auto' })
+  }
   const hours = Math.floor(minutes / 60)
-  if (hours < 24) return `${hours}h ago`
+  if (hours < 24) {
+    return formatLocalizedRelativeTime(-hours, 'hour', language, { numeric: 'auto' })
+  }
   const days = Math.floor(hours / 24)
-  return `${days}d ago`
+  return formatLocalizedRelativeTime(-days, 'day', language, { numeric: 'auto' })
 }
 
 function AppRow({ gadget }: { gadget: GadgetMetadataWithTimestamps }) {
   const gradient = getGradient(gadget.id)
+  const { effectiveLanguage } = useLanguage()
+  const { t } = useTranslation()
 
   return (
     <Link
@@ -49,11 +58,11 @@ function AppRow({ gadget }: { gadget: GadgetMetadataWithTimestamps }) {
       {/* Info */}
       <div className="flex-1 min-w-0">
         <h3 className="text-sm font-medium text-kumo-default truncate">
-          {gadget.title || 'Untitled Workspace'}
+          {gadget.title || t('shell.workspaces.untitled')}
         </h3>
         {gadget.owner && (
           <p className="text-xs text-kumo-subtle truncate mt-0.5">
-            Shared by {gadget.owner.name}
+            {t('shell.workspaces.sharedBy', { name: gadget.owner.name })}
           </p>
         )}
       </div>
@@ -63,7 +72,7 @@ function AppRow({ gadget }: { gadget: GadgetMetadataWithTimestamps }) {
 
         <span className="hidden md:flex items-center gap-1 text-xs text-kumo-inactive">
           <Clock size={10} />
-          {formatRelativeTime(gadget.lastActive)}
+          {formatRelativeTime(gadget.lastActive, effectiveLanguage)}
         </span>
       </div>
     </Link>
@@ -75,6 +84,7 @@ export default function RecentApps() {
   const [gadgets, setGadgets] = useState<GadgetMetadataWithTimestamps[]>([])
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState(false)
+  const { t } = useTranslation()
 
   useEffect(() => {
     let cancelled = false
@@ -94,7 +104,7 @@ export default function RecentApps() {
     return (
       <section className="w-full max-w-2xl mx-auto">
         <div className="flex items-center justify-between mb-3">
-          <h2 className="text-sm font-medium text-kumo-default">Recent workspaces</h2>
+          <h2 className="text-sm font-medium text-kumo-default">{t('shell.workspaces.recent')}</h2>
         </div>
         <div className="flex flex-col gap-2">
           {[1, 2].map((i) => (
@@ -109,7 +119,7 @@ export default function RecentApps() {
     return (
       <section className="w-full max-w-2xl mx-auto">
         <div className="text-center py-8 text-sm text-kumo-danger">
-          Unable to load your workspaces. Check your connection and try refreshing.
+          {t('shell.workspaces.loadError')}
         </div>
       </section>
     )
@@ -119,7 +129,7 @@ export default function RecentApps() {
     return (
       <section className="w-full max-w-2xl mx-auto">
         <div className="text-center py-8 text-kumo-inactive text-sm">
-          No workspaces yet. Create your first one above!
+          {t('shell.workspaces.empty')}
         </div>
       </section>
     )
@@ -129,13 +139,13 @@ export default function RecentApps() {
     <section className="w-full max-w-2xl mx-auto">
       <div className="flex items-center justify-between mb-3">
         <h2 className="text-sm font-medium text-kumo-default">
-          Recent workspaces
+          {t('shell.workspaces.recent')}
         </h2>
         <Link
           to="/"
           className="flex items-center gap-1 text-xs text-kumo-subtle hover:text-kumo-brand transition-colors"
         >
-          View all
+          {t('shell.workspaces.viewAll')}
           <ArrowRight size={12} />
         </Link>
       </div>

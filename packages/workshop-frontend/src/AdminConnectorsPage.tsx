@@ -9,11 +9,13 @@ import type {
 } from '@gadgets/workshop-shared/api'
 import { useAuthenticatedApi } from './AuthContext'
 import { useDocumentTitle } from './useDocumentTitle'
+import { useTranslation } from 'react-i18next'
 
 export default function AdminConnectorsPage() {
   const { authenticatedApi, isAdmin } = useAuthenticatedApi()
+  const { t } = useTranslation()
   const toasts = useKumoToastManager()
-  useDocumentTitle('Connector configuration')
+  useDocumentTitle(t('adminConnectors.title'))
 
   const [admin, setAdmin] = useState<{ api: RpcStub<AdminApi> } | null>(null)
   const [connectors, setConnectors] = useState<AdminConnectorConfiguration[]>([])
@@ -90,12 +92,12 @@ export default function AdminConnectorsPage() {
       }
       toasts.add({
         title: refreshFailed
-          ? `${connector.displayName} configuration saved, but status could not be refreshed. Reload this page to check availability.`
-          : `${connector.displayName} configuration saved. It may take a moment to become available.`,
+          ? t('adminConnectors.savedRefreshFailed', { name: connector.displayName })
+          : t('adminConnectors.saved', { name: connector.displayName }),
         variant: 'success',
       })
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to save connector configuration'
+      const message = error instanceof Error ? error.message : t('adminConnectors.saveFailed')
       toasts.add({ title: message, variant: 'error' })
     } finally {
       setSaving(null)
@@ -106,7 +108,7 @@ export default function AdminConnectorsPage() {
     return (
       <div className="max-w-2xl mx-auto px-4 sm:px-6 py-16 text-center">
         <ShieldWarning size={32} className="mx-auto text-kumo-subtle mb-3" />
-        <p className="text-sm text-kumo-default">You don't have access to this page.</p>
+        <p className="text-sm text-kumo-default">{t('adminConnectors.unauthorized')}</p>
       </div>
     )
   }
@@ -115,7 +117,7 @@ export default function AdminConnectorsPage() {
     return (
       <div className="flex min-h-[60vh] items-center justify-center gap-2 text-kumo-subtle">
         <Loader />
-        <span>Loading connector configurations...</span>
+        <span>{t('adminConnectors.loading')}</span>
       </div>
     )
   }
@@ -124,7 +126,7 @@ export default function AdminConnectorsPage() {
     return (
       <div className="mx-auto w-full max-w-[1040px] px-4 py-16 text-center sm:px-8">
         <p className="text-sm text-kumo-danger">
-          Something went wrong loading connector configurations.
+          {t('adminConnectors.loadError')}
         </p>
       </div>
     )
@@ -136,17 +138,17 @@ export default function AdminConnectorsPage() {
     <div className="mx-auto w-full max-w-[1040px] space-y-6 px-4 py-8 sm:px-8">
       <div>
         <a href="/admin" className="text-sm font-medium text-kumo-brand hover:underline">
-          Back to Admin
+          {t('adminConnectors.back')}
         </a>
-        <h1 className="mt-3 text-2xl font-semibold text-kumo-default">Connector configuration</h1>
+        <h1 className="mt-3 text-2xl font-semibold text-kumo-default">{t('adminConnectors.title')}</h1>
         <p className="mt-1 text-sm text-kumo-subtle">
-          Configure deployment settings used when users connect their accounts.
+          {t('adminConnectors.subtitle')}
         </p>
       </div>
 
       {readOnly && (
         <div className="rounded-xl border border-kumo-line bg-kumo-elevated px-4 py-3 text-sm text-kumo-subtle">
-          Connector configuration management is not enabled for this deployment. Configuration is read-only.
+          {t('adminConnectors.readOnly')}
         </div>
       )}
 
@@ -154,7 +156,7 @@ export default function AdminConnectorsPage() {
         <div className="rounded-xl border border-kumo-line bg-kumo-elevated p-8 text-center">
           <Plugs size={28} className="mx-auto mb-3 text-kumo-subtle" />
           <p className="text-sm text-kumo-subtle">
-            No credentialed connectors are installed on this deployment.
+            {t('adminConnectors.empty')}
           </p>
         </div>
       ) : (
@@ -190,7 +192,7 @@ export default function AdminConnectorsPage() {
                         connector.configured ? 'text-kumo-success' : 'text-kumo-warning'
                       }`}
                     >
-                      {connector.configured ? 'Configured' : 'Needs setup'}
+                      {connector.configured ? t('adminConnectors.configured') : t('adminConnectors.needsSetup')}
                     </span>
                   </div>
                 </div>
@@ -198,7 +200,7 @@ export default function AdminConnectorsPage() {
                 <div className="mt-5">
                   {connector.callbackUrl && (
                     <>
-                      <p className="text-xs font-medium text-kumo-subtle">Callback URL</p>
+                      <p className="text-xs font-medium text-kumo-subtle">{t('adminConnectors.callbackUrl')}</p>
                       <code className="mt-1 block overflow-x-auto rounded-lg border border-kumo-line bg-kumo-base px-3 py-2 text-xs text-kumo-default">
                         {connector.callbackUrl}
                       </code>
@@ -206,15 +208,15 @@ export default function AdminConnectorsPage() {
                   )}
                   <p className="mt-2 text-xs text-kumo-subtle">
                     {connector.callbackUrl
-                      ? 'Follow the provider setup guide, register the callback URL above, then enter the credentials. '
-                      : 'Follow the setup guide, then enter the connector settings. '}
+                      ? `${t('adminConnectors.oauthGuide')} `
+                      : `${t('adminConnectors.setupGuide')} `}
                     <a
                       href={connector.setupGuideUrl}
                       target="_blank"
                       rel="noreferrer"
                       className="font-medium text-kumo-brand hover:underline"
                     >
-                      View setup guide
+                      {t('adminConnectors.viewGuide')}
                     </a>
                   </p>
                 </div>
@@ -260,7 +262,7 @@ export default function AdminConnectorsPage() {
                       disabled={!complete || saving !== null}
                       onClick={() => handleSave(connector)}
                     >
-                      {connector.configured ? 'Update configuration' : 'Save configuration'}
+                      {connector.configured ? t('adminConnectors.update') : t('adminConnectors.save')}
                     </Button>
                   </div>
                 )}

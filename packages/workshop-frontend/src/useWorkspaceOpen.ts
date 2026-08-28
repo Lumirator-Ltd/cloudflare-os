@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { RpcStub, RpcTarget } from 'capnweb'
 import type {
   AuthenticatedApi,
@@ -9,6 +10,7 @@ import type {
   Overseer,
 } from '@gadgets/workshop-shared/api'
 import { reportIssue } from './errorReporting'
+import './i18n/config'
 import { useDocumentTitle } from './useDocumentTitle'
 import {
   classifyWorkspaceOpenFailure,
@@ -42,6 +44,7 @@ export function useWorkspaceOpen({
   onShareKeyConsumed,
   onInvalidShareKey,
 }: Options) {
+  const { t } = useTranslation()
   const [overseer, setOverseer] = useState<{ stub: RpcStub<Overseer> } | null>(null)
   const [metadata, setMetadata] = useState<GadgetMetadata | null>(null)
   const [error, setError] = useState<WorkspaceLoadError | null>(null)
@@ -145,7 +148,7 @@ export function useWorkspaceOpen({
         if (message.includes(OBSERVER_CANCELLED)) {
           showTerminalError({
             kind: 'message',
-            message: 'To open this workspace, you must choose connected accounts for the services it uses.',
+            message: t('workspace.open.observerRequired'),
           })
         } else if (message.includes('permitted to observe') ||
                    message.includes('no longer connected') ||
@@ -175,7 +178,7 @@ export function useWorkspaceOpen({
       setObserverConfig(null)
       disposeAttempt()
     }
-  }, [id, authenticatedApi, reloadNonce])
+  }, [id, authenticatedApi, reloadNonce, t])
 
   return {
     overseer,

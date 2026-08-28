@@ -1,4 +1,4 @@
-import { Autocomplete, Field, h, Section, type ConfiguratorUISpec } from "@gadgets/configurator-ui";
+import { localize, Autocomplete, Field, h, Section, type ConfiguratorUISpec } from "@gadgets/configurator-ui";
 import type {
   CloudflareWorkerConfiguratorRpc,
   CloudflareWorkerConfiguratorValues,
@@ -16,13 +16,13 @@ export default {
       `${encodeURIComponent(values.workerName!)}/production/observability`;
   },
 
-  render({ values, setValues, clearFields, ui }) {
+  render({ values, setValues, clearFields, ui, language }) {
     return <Section>
-      <Field label="Cloudflare account">
+      <Field label={localize(language, { en: "Cloudflare account", ja: "Cloudflare アカウント" })}>
         <Autocomplete
           name="accountId"
           value={values.accountId}
-          placeholder="Choose an account"
+          placeholder={localize(language, { en: "Choose an account", ja: "アカウントを選択" })}
           loadOptions={query => ui.listAccounts(query)}
           onChange={accountId => {
             // Both halves are required: `clearFields` only drops the Worker autocomplete's typed
@@ -33,11 +33,11 @@ export default {
           }}
         />
       </Field>
-      <Field label="Worker" description="Queries telemetry only for this Worker.">
+      <Field label={localize(language, { en: "Worker", ja: "Worker" })} description={localize(language, { en: "Queries telemetry only for this Worker.", ja: "この Worker のテレメトリのみを照会します。" })}>
         <Autocomplete
           name="workerName"
           value={values.workerName}
-          placeholder={values.accountId ? "Choose a Worker" : "Choose an account first"}
+          placeholder={values.accountId ? localize(language, { en: "Choose a Worker", ja: "Worker を選択" }) : localize(language, { en: "Choose an account first", ja: "先にアカウントを選択" })}
           loadOptions={query => values.accountId ? ui.listWorkers(values.accountId, query) : Promise.resolve([])}
           onChange={workerName => setValues({ workerName })}
           disabled={!values.accountId}

@@ -3,8 +3,9 @@ import { Dialog, Text, Loader, useKumoToastManager } from '@cloudflare/kumo'
 import { RpcStub } from 'capnweb'
 import { AuthenticatedApi, GatekeeperVendorFilter, GatekeeperVendorInfo } from '@gadgets/workshop-shared/api'
 import VendorCard from './VendorCard'
+import { useTranslation } from 'react-i18next'
 import {
-  CONNECTOR_SETUP_GUIDANCE,
+  connectorSetupGuidance,
   connectionErrorMessage,
   connectorIsConfigured,
 } from './connectorReadiness'
@@ -26,6 +27,7 @@ export default function ConnectAccountModal({
   filter,
 }: ConnectAccountModalProps) {
   const toasts = useKumoToastManager()
+  const { t } = useTranslation()
   const [connecting, setConnecting] = useState<string | null>(null)
   const [vendors, setVendors] = useState<GatekeeperVendorInfo[]>([])
   const [vendorsLoading, setVendorsLoading] = useState(true)
@@ -44,14 +46,14 @@ export default function ConnectAccountModal({
         const unavailable = vendorList.filter(v => v.unavailable)
         if (unavailable.length > 0) {
           toasts.add({
-            title: `Some services are temporarily unavailable: ${unavailable.map(v => v.id).join(', ')}`,
+            title: t('gatekeepers.common.unavailable', { services: unavailable.map(v => v.id).join(', ') }),
             variant: 'warning',
           })
         }
         setVendors(vendorList.filter(v => !v.unavailable))
       } catch (error) {
         console.error('Failed to fetch vendors:', error)
-        toasts.add({ title: 'Failed to load available services', variant: 'error' })
+        toasts.add({ title: t('gatekeepers.common.loadServicesFailed'), variant: 'error' })
       } finally {
         setVendorsLoading(false)
       }
@@ -69,7 +71,7 @@ export default function ConnectAccountModal({
     } catch (error) {
       console.error('Failed to initiate connection:', error)
       toasts.add({
-        title: connectionErrorMessage(error, 'Failed to start connection flow'),
+        title: connectionErrorMessage(error, t('gatekeepers.common.connectionFailed')),
         variant: 'error',
       })
       setConnecting(null)
@@ -79,14 +81,14 @@ export default function ConnectAccountModal({
   return (
     <Dialog.Root open={visible} onOpenChange={(open) => { if (!open) onCancel() }}>
       <Dialog className="p-6" size="base">
-        <Dialog.Title className="text-lg font-semibold mb-4">Connect Account</Dialog.Title>
+        <Dialog.Title className="text-lg font-semibold mb-4">{t('gatekeepers.connectAccount.title')}</Dialog.Title>
         {vendorsLoading ? (
           <div className="text-center py-8">
             <Loader />
           </div>
         ) : vendors.length === 0 ? (
           <div className="text-center py-8">
-            <Text variant="secondary">No services available to connect.</Text>
+            <Text variant="secondary">{t('gatekeepers.connectAccount.empty')}</Text>
           </div>
         ) : (
           <div className="flex flex-col gap-3 mt-2">
@@ -100,7 +102,7 @@ export default function ConnectAccountModal({
                   onClick={() => handleConnect(vendor.id)}
                   loading={connecting === vendor.id}
                   disabled={!configured || (connecting !== null && connecting !== vendor.id)}
-                  disabledMessage={configured ? undefined : CONNECTOR_SETUP_GUIDANCE}
+                  disabledMessage={configured ? undefined : connectorSetupGuidance()}
                 />
               )
             })}

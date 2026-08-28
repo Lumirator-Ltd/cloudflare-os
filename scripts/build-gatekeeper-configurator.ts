@@ -111,6 +111,7 @@ let host;
 let ui;
 let spec;
 let values = {};
+let language = "en";
 let queryByName = {};
 let validationErrorByName = {};
 let touchedInputs = {};
@@ -211,6 +212,14 @@ function setValues(patch) {
   render(active);
 }
 
+function applyLanguage(nextLanguage, rerender = true) {
+  if (nextLanguage !== "en" && nextLanguage !== "ja") return;
+  const changed = language !== nextLanguage;
+  language = nextLanguage;
+  document.documentElement.lang = language;
+  if (changed && rerender) render();
+}
+
 function clearFields(...names) {
   for (const name of names.flat()) delete queryByName[name];
 }
@@ -235,6 +244,10 @@ function el(tag, props = {}, children = []) {
   return node;
 }
 
+function localize(language, choices) {
+  return choices[language];
+}
+
 function optionText(value) {
   return typeof value === "string" ? value.slice(0, 240) : undefined;
 }
@@ -246,7 +259,10 @@ function sanitizeOptions(options, overflow) {
   if (!Array.isArray(options)) return [];
   if (options.length > MAX_OPTIONS) {
     if (overflow === "refuse") {
-      throw new Error("Configurator controls support at most " + MAX_OPTIONS + " options.");
+      throw new Error(localize(language, {
+        en: "Configurator controls support at most " + MAX_OPTIONS + " options.",
+        ja: "コンフィギュレーターのコントロールで扱えるオプションは最大 " + MAX_OPTIONS + " 件です。",
+      }));
     }
     options = options.slice(0, MAX_OPTIONS);
   }
@@ -273,7 +289,10 @@ function withUnavailableOptions(options, value) {
   const available = new Set(options.map(option => option.value));
   return [...options, ...splitList(value)
     .filter(selected => !available.has(selected))
-    .map(selected => ({ value: selected, title: selected + " (unavailable)" }))];
+    .map(selected => ({
+      value: selected,
+      title: selected + localize(language, { en: " (unavailable)", ja: "（利用不可）" }),
+    }))];
 }
 
 const components = {
@@ -288,7 +307,10 @@ const components = {
     return el("section", { className: "field" }, [
       el("div", { className: "field-header" }, [
         el("label", { className: "field-label", text: label }),
-        optional ? el("span", { className: "field-optional", text: "Optional" }) : null,
+        optional ? el("span", {
+          className: "field-optional",
+          text: localize(language, { en: "Optional", ja: "任意" }),
+        }) : null,
       ]),
       description ? el("p", { className: "field-description", text: description }) : null,
       childrenArray(children)[0],
@@ -363,10 +385,15 @@ const components = {
     const notice = text => el("div", { className: "checkbox-list", "data-name": name }, [
       el("p", { className: "checkbox-empty", text }),
     ]);
-    if (status === "loading") return notice("Loading...");
+    if (status === "loading") {
+      return notice(localize(language, { en: "Loading...", ja: "読み込み中..." }));
+    }
     if (status === "failed") return notice(message);
     const shownOptions = withUnavailableOptions(options, value);
-    if (shownOptions.length === 0) return notice("This server published no tools.");
+    if (shownOptions.length === 0) return notice(localize(language, {
+      en: "This server published no tools.",
+      ja: "このサーバーはツールを公開していません。",
+    }));
 
     // The filter only earns its space once the list is long enough to scroll.
     const filterName = \`\${name}__filter\`;
@@ -399,11 +426,11 @@ const components = {
           className: "input",
           "data-configurator-input": filterName,
           value: filter,
-          placeholder: "Filter tools...",
+          placeholder: localize(language, { en: "Filter tools...", ja: "ツールを絞り込む..." }),
           disabled,
           autocomplete: "off",
           type: "search",
-          "aria-label": "Filter tools...",
+          "aria-label": localize(language, { en: "Filter tools...", ja: "ツールを絞り込む..." }),
           oninput: event => {
             checkboxFilterByName[name] = event.currentTarget.value;
             render(getFocusState());
@@ -422,7 +449,12 @@ const components = {
         type: "button",
         className: "checkbox-action",
         disabled,
-        text: needle ? \`Select \${matches.length} shown\` : "Select all",
+        text: needle
+          ? localize(language, {
+              en: \`Select \${matches.length} shown\`,
+              ja: \`表示中の \${matches.length} 件を選択\`,
+            })
+          : localize(language, { en: "Select all", ja: "すべて選択" }),
         onclick: () => {
           const next = new Set(selected);
           for (const option of matches) next.add(option.value);
@@ -437,7 +469,12 @@ const components = {
         type: "button",
         className: "checkbox-action",
         disabled,
-        text: needle ? \`Clear \${clearable.length} shown\` : "Clear",
+        text: needle
+          ? localize(language, {
+              en: \`Clear \${clearable.length} shown\`,
+              ja: \`表示中の \${clearable.length} 件の選択を解除\`,
+            })
+          : localize(language, { en: "Clear", ja: "選択を解除" }),
         onclick: () => {
           const next = new Set(selected);
           for (const option of clearable) next.delete(option.value);
@@ -450,14 +487,26 @@ const components = {
       el("span", {
         className: selected.size > 0 ? "checkbox-count selected" : "checkbox-count",
         text: selected.size > 0
-          ? \`\${selected.size} of \${shownOptions.length} selected\`
-          : \`None of \${shownOptions.length} selected\`,
+          ? localize(language, {
+              en: \`\${selected.size} of \${shownOptions.length} selected\`,
+              ja: \`\${shownOptions.length} 件中 \${selected.size} 件を選択\`,
+            })
+          : localize(language, {
+              en: \`None of \${shownOptions.length} selected\`,
+              ja: \`\${shownOptions.length} 件中 0 件を選択\`,
+            }),
       }),
       bulk.length > 0 ? el("span", { className: "checkbox-actions" }, bulk) : null,
     ]));
 
     if (matches.length === 0) {
-      children.push(el("p", { className: "checkbox-empty", text: \`Nothing matches "\${filter.trim()}".\` }));
+      children.push(el("p", {
+        className: "checkbox-empty",
+        text: localize(language, {
+          en: \`Nothing matches "\${filter.trim()}".\`,
+          ja: \`「\${filter.trim()}」に一致する項目はありません。\`,
+        }),
+      }));
       return el("div", { className: "checkbox-list", "data-name": name }, children);
     }
 
@@ -555,11 +604,17 @@ const components = {
       input.setAttribute("aria-expanded", "true");
       applyPopupMaxHeight();
       if (loading) {
-        popup.append(el("div", { className: "autocomplete-empty", text: "Loading..." }));
+        popup.append(el("div", {
+          className: "autocomplete-empty",
+          text: localize(language, { en: "Loading...", ja: "読み込み中..." }),
+        }));
       } else if (error) {
         popup.append(el("div", { className: "autocomplete-empty", text: error }));
       } else if (options.length === 0) {
-        popup.append(el("div", { className: "autocomplete-empty", text: "No matches." }));
+        popup.append(el("div", {
+          className: "autocomplete-empty",
+          text: localize(language, { en: "No matches.", ja: "一致する項目はありません。" }),
+        }));
       } else {
         for (const option of options) {
           popup.append(el("button", {
@@ -597,7 +652,10 @@ const components = {
       } catch (error) {
         if (currentRequest !== requestId) return;
         reportFrontendIssue("configurator.autocomplete-load", error);
-        renderPopup({ error: error?.message || "Could not load options." });
+        renderPopup({ error: error?.message || localize(language, {
+          en: "Could not load options.",
+          ja: "オプションを読み込めませんでした。",
+        }) });
       }
     }
 
@@ -625,7 +683,7 @@ const components = {
       inputWrapper.append(el("button", {
         type: "button",
         className: "clear-button",
-        "aria-label": "Clear",
+        "aria-label": localize(language, { en: "Clear", ja: "選択を解除" }),
         onclick: () => {
           queryByName[queryName] = "";
           input.value = "";
@@ -655,7 +713,7 @@ function render(focusState = undefined) {
   renderedCheckboxNames = new Set();
   isRendering = true;
   root.replaceChildren(el("div", { id: "layout-root" }, [
-    spec.render({ ui, values, setValues, clearFields, components }),
+    spec.render({ ui, values, language, setValues, clearFields, components }),
   ]));
   isRendering = false;
   pruneCheckboxEntries(checkboxOptionsByName, renderedCheckboxNames);
@@ -675,11 +733,17 @@ function render(focusState = undefined) {
 class ResourceConfiguratorIframe extends RpcTarget {
   async collectResourceUrl() {
     if (hasBlockingCheckboxFailure(checkboxOptionsByName)) {
-      throw new Error("Configurator options did not load.");
+      throw new Error(localize(language, {
+        en: "Configurator options did not load.",
+        ja: "コンフィギュレーターのオプションを読み込めませんでした。",
+      }));
     }
-    const resourceUrl = await spec?.resourceUrl?.({ values, ui });
+    const resourceUrl = await spec?.resourceUrl?.({ values, ui, language });
     if (typeof resourceUrl !== "string" || resourceUrl.length === 0) {
-      throw new Error("Configurator did not provide a resource URL.");
+      throw new Error(localize(language, {
+        en: "Configurator did not provide a resource URL.",
+        ja: "コンフィギュレーターからリソース URL が返されませんでした。",
+      }));
     }
     return resourceUrl;
   }
@@ -700,6 +764,10 @@ class ResourceConfiguratorIframe extends RpcTarget {
         popup.dispatchEvent(new Event("__force-close"));
       }
     }
+  }
+
+  setLanguage(nextLanguage) {
+    applyLanguage(nextLanguage);
   }
 }
 
@@ -743,6 +811,7 @@ async function seedInitialValues() {
       ? await spec.initialValuesFromResourceUrl({
           resourceUrl: initialResource.resourceUrl,
           resourceUrlPattern: initialResource.resourceUrlPattern,
+          language,
           ui,
         })
       : defaultValuesFromResourceUrl(initialResource.resourceUrl, initialResource.resourceUrlPattern);
@@ -766,10 +835,20 @@ async function main() {
   window.parent.postMessage({ type: "handshake" }, "*", [port2]);
   host = newMessagePortRpcSession(port1, new ResourceConfiguratorIframe());
   ui = host.gatekeeper;
+  try {
+    applyLanguage(await host.getLanguage(), false);
+  } catch {
+    applyLanguage("en", false);
+  }
 
-  Object.assign(globalThis, { h, Fragment, Section, Field, TextInput, RadioCards, CheckboxList, Autocomplete });
+  Object.assign(globalThis, {
+    h, Fragment, localize, Section, Field, TextInput, RadioCards, CheckboxList, Autocomplete,
+  });
   spec = new Function(${JSON.stringify(configuratorUIModuleSource)})();
-  if (!spec) throw new Error("Configurator UI module did not define a configurator UI.");
+  if (!spec) throw new Error(localize(language, {
+    en: "Configurator UI module did not define a configurator UI.",
+    ja: "コンフィギュレーター UI モジュールにコンフィギュレーター UI が定義されていません。",
+  }));
   values = { ...(spec.initial || {}) };
   await seedInitialValues();
   postSelectionState();

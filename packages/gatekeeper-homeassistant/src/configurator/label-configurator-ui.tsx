@@ -1,4 +1,4 @@
-import { Autocomplete, Field, h, Section, type ConfiguratorUISpec } from "@gadgets/configurator-ui";
+import { localize, Autocomplete, Field, h, Section, type ConfiguratorUISpec } from "@gadgets/configurator-ui";
 import type {
   HomeAssistantLabelConfiguratorRpc,
   HomeAssistantLabelConfiguratorValues,
@@ -15,13 +15,13 @@ export default {
     return ui.resourceUrl(values.labelId);
   },
 
-  render({ values, setValues, ui }) {
+  render({ values, setValues, ui, language }) {
     return <Section>
-      <Field label="Label" description="Choose a Home Assistant label. The binding grants access to every entity carrying this label.">
+      <Field label={localize(language, { en: "Label", ja: "ラベル" })} description={localize(language, { en: "Choose a Home Assistant label. The binding grants access to every entity carrying this label.", ja: "Home Assistant のラベルを選択します。このバインディングは、そのラベルが付いたすべてのエンティティへのアクセスを許可します。" })}>
         <Autocomplete
           name="labelId"
           value={values.labelId}
-          placeholder="Search labels..."
+          placeholder={localize(language, { en: "Search labels...", ja: "ラベルを検索..." })}
           loadOptions={query => ui.listLabels(query)}
           onChange={labelId => setValues({ labelId })}
         />

@@ -1,5 +1,5 @@
 import { RpcStub } from "capnweb";
-import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError } from '@gadgets/workshop-shared/api';
+import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, LanguagePreference } from '@gadgets/workshop-shared/api';
 import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, assertConnectorConfigured, resourceAllowsNewConnections } from "@gadgets/workshop-shared/gatekeeper";
 import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
 import { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
@@ -199,6 +199,7 @@ function makeUserStorage(storage: DurableObjectStorage) {
       },
       quickModel: <string | null>null,
       preferredModel: <string | null>null,
+      languagePreference: <LanguagePreference>"auto",
       onboardingCompleted: false,
 
       // Set once the user's pre-existing workspaces have been asked to populate the outputs index
@@ -591,6 +592,20 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     } else {
       return null;
     }
+  }
+
+  async getLanguagePreference(): Promise<LanguagePreference> {
+    let preference: unknown = this.storage.languagePreference.get();
+    return preference === "auto" || preference === "en" || preference === "ja"
+      ? preference
+      : "auto";
+  }
+
+  async setLanguagePreference(preference: LanguagePreference): Promise<void> {
+    if (preference !== "auto" && preference !== "en" && preference !== "ja") {
+      throw new TypeError("Unsupported language preference.");
+    }
+    this.storage.languagePreference.put(preference);
   }
 
   async getPreferredModel(): Promise<string | null> {
@@ -1182,8 +1197,12 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     };
 
     let callback = this.ctx.exports.GatekeeperConnectCallbackImpl({props});
+    const preference = await this.getLanguagePreference();
+    const language = preference === "auto"
+      ? this.env.DEFAULT_LANGUAGE === "ja" ? "ja" : "en"
+      : preference;
 
-    let {url} = await vendor.connectAccount(callback, {resourceUrlPatterns});
+    let {url} = await vendor.connectAccount(callback, {resourceUrlPatterns, language});
     logger.info("account connect started", {
       event: "account.connect.started", vendorId, accountId,
     });

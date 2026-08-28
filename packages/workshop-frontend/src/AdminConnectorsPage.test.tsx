@@ -11,6 +11,7 @@ import type {
   AuthenticatedApi,
 } from '@gadgets/workshop-shared/api'
 import { useAuthenticatedApi } from './AuthContext'
+import i18n from './i18n/config'
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -89,12 +90,13 @@ describe('/admin/connectors', () => {
   let root: Root | undefined
   let container: HTMLDivElement | undefined
 
-  afterEach(() => {
+  afterEach(async () => {
     act(() => root?.unmount())
     container?.remove()
     root = undefined
     container = undefined
     addToast.mockReset()
+    await i18n.changeLanguage('en')
     vi.restoreAllMocks()
   })
 
@@ -316,6 +318,22 @@ describe('/admin/connectors', () => {
     expect([...rendered.querySelectorAll('input')].every((input) => input.disabled)).toBe(true)
     expect(rendered.textContent).not.toContain('Save configuration')
     expect(rendered.textContent).not.toContain('Update configuration')
+  })
+
+  it('renders connector setup guidance and state in Japanese', async () => {
+    await i18n.changeLanguage('ja')
+    auth({
+      listConnectorConfigurations:
+        vi.fn<() => Promise<AdminConnectorConfiguration[]>>(async () => CONNECTORS),
+    })
+    const rendered = await render()
+
+    expect(rendered.textContent).toContain('コネクター設定')
+    expect(rendered.textContent).toContain('設定済み')
+    expect(rendered.textContent).toContain('設定が必要')
+    expect(rendered.textContent).toContain('コールバック URL')
+    expect(rendered.textContent).toContain('セットアップガイドを見る')
+    expect(rendered.textContent).toContain('設定を保存')
   })
 
   it('shows empty and failed list states', async () => {

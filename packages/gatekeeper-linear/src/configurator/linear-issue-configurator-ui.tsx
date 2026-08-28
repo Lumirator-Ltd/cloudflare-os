@@ -1,4 +1,4 @@
-import { Autocomplete, Field, h, Section, type ConfiguratorUISpec } from "@gadgets/configurator-ui";
+import { localize, Autocomplete, Field, h, Section, type ConfiguratorUISpec } from "@gadgets/configurator-ui";
 import type {
   LinearIssueConfiguratorRpc,
   LinearIssueConfiguratorValues,
@@ -23,13 +23,13 @@ export default {
     return `https://linear.app/${workspaceUrlKey}/issue/${values.issueIdentifier}`;
   },
 
-  render({ values, setValues, ui }) {
+  render({ values, setValues, ui, language }) {
     return <Section>
-      <Field label="Issue" description="Search issues, or type an identifier like ENG-123.">
+      <Field label={localize(language, { en: "Issue", ja: "Issue" })} description={localize(language, { en: "Search issues, or type an identifier like ENG-123.", ja: "Issue を検索するか、ENG-123 のような識別子を入力します。" })}>
         <Autocomplete
           name="issueIdentifier"
           value={values.issueIdentifier}
-          placeholder="Search issues..."
+          placeholder={localize(language, { en: "Search issues...", ja: "Issue を検索..." })}
           loadOptions={query => ui.listIssues(query)}
           onChange={issueIdentifier => setValues({ issueIdentifier })}
         />

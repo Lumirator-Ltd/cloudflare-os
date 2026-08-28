@@ -1,16 +1,24 @@
 import type { RpcTarget } from "capnweb";
 
-/** The complete appearance state sent from Workshop to a sandboxed gatekeeper app. */
+/** Languages supported by first-party Workshop localization. */
+export type SupportedLanguage = "en" | "ja";
+
+/** The complete presentation state sent from Workshop to a sandboxed gatekeeper app. */
 export interface GatekeeperAppTheme {
   /** The concrete light or dark mode resolved by Workshop. */
   mode: "light" | "dark";
   /** The deployment accent seed, or null to use the app's base palette. */
   accentColor: string | null;
+  /**
+   * The current Workshop interface language. Omitted by legacy hosts; receivers must default
+   * missing or unrecognized wire values to English.
+   */
+  language?: SupportedLanguage;
 }
 
-/** A sandboxed gatekeeper app capability that receives complete appearance updates. */
+/** A sandboxed gatekeeper app capability that receives complete presentation updates. */
 export interface GatekeeperAppThemeReceiver extends RpcTarget {
-  /** Applies the latest Workshop appearance state. */
+  /** Applies the latest Workshop presentation state. */
   setTheme(theme: GatekeeperAppTheme): void;
 }
 

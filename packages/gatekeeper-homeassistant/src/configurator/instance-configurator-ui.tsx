@@ -1,4 +1,4 @@
-import { Field, h, Section, type ConfiguratorUISpec } from "@gadgets/configurator-ui";
+import { localize, Field, h, Section, type ConfiguratorUISpec } from "@gadgets/configurator-ui";
 import type {
   HomeAssistantInstanceConfiguratorRpc,
   HomeAssistantInstanceConfiguratorValues,
@@ -23,11 +23,11 @@ export default {
   // can't lazily fetch and display the actual HA instance name here. We render static text
   // and let the user trust that the configurator wires up the correct account; the `ui`
   // capability is only used by `resourceUrl` above.
-  render() {
+  render({ language }) {
     return <Section>
       <Field
-        label="Whole instance access"
-        description="This binding grants access to every area, device, entity, and dashboard on the connected Home Assistant instance.">
+        label={localize(language, { en: "Whole instance access", ja: "インスタンス全体へのアクセス" })}
+        description={localize(language, { en: "This binding grants access to every area, device, entity, and dashboard on the connected Home Assistant instance.", ja: "このバインディングは、接続された Home Assistant インスタンスのすべてのエリア、デバイス、エンティティ、ダッシュボードへのアクセスを許可します。" })}>
       </Field>
     </Section>;
   },

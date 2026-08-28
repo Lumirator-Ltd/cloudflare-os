@@ -1,4 +1,4 @@
-import { Autocomplete, Field, h, Section, type ConfiguratorUISpec } from "@gadgets/configurator-ui";
+import { localize, Autocomplete, Field, h, Section, type ConfiguratorUISpec } from "@gadgets/configurator-ui";
 import type {
   ConfluenceSiteConfiguratorRpc,
   ConfluenceSiteConfiguratorValues,
@@ -19,13 +19,13 @@ export default {
     return values.siteUrl ?? "";
   },
 
-  render({ values, setValues, ui }) {
+  render({ values, setValues, ui, language }) {
     return <Section>
-      <Field label="Confluence site" description="Choose the Confluence site to connect.">
+      <Field label={localize(language, { en: "Confluence site", ja: "Confluence サイト" })} description={localize(language, { en: "Choose the Confluence site to connect.", ja: "接続する Confluence サイトを選択します。" })}>
         <Autocomplete
           name="siteUrl"
           value={values.siteUrl}
-          placeholder="Search sites..."
+          placeholder={localize(language, { en: "Search sites...", ja: "サイトを検索..." })}
           loadOptions={query => ui.listSites(query)}
           onChange={siteUrl => setValues({ siteUrl })}
         />

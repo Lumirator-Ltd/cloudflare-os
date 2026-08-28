@@ -23,12 +23,35 @@ vi.mock("./ThemeContext", () => ({
   useTheme: () => ({ resolvedThemeMode: "light" }),
 }));
 
+const languageStore = vi.hoisted(() => ({
+  value: "en" as "en" | "ja",
+  listeners: new Set<() => void>(),
+}));
+vi.mock("./i18n/LanguageProvider", async () => {
+  const { useSyncExternalStore } = await vi.importActual<typeof import("react")>("react");
+  return {
+    useLanguage: () => ({
+      effectiveLanguage: useSyncExternalStore(
+        (listener) => {
+          languageStore.listeners.add(listener);
+          return () => languageStore.listeners.delete(listener);
+        },
+        () => languageStore.value,
+      ),
+    }),
+  };
+});
+
 vi.mock("./ServerConfigContext", () => ({
   useServerConfig: () => ({ accentColor: "#7c3aed" }),
 }));
 
 vi.mock("./errorReporting", () => ({
   forwardTrustedFrameError: () => false,
+}));
+
+vi.mock("react-i18next", () => ({
+  useTranslation: () => ({ t: (key: string) => key }),
 }));
 
 const WORKSPACE_ID = "a".repeat(64);
@@ -54,7 +77,11 @@ interface TestHost extends RpcTarget {
 class EmptyUi extends RpcTarget {}
 
 class TestThemeReceiver extends RpcTarget implements GatekeeperAppThemeReceiver {
-  setTheme(_theme: GatekeeperAppTheme): void {}
+  readonly themes: GatekeeperAppTheme[] = [];
+
+  setTheme(theme: GatekeeperAppTheme): void {
+    this.themes.push(theme);
+  }
 }
 
 describe("SandboxedGatekeeperApp navigation", () => {
@@ -63,7 +90,10 @@ describe("SandboxedGatekeeperApp navigation", () => {
   let host: RpcStub<TestHost> | undefined;
 
   beforeEach(() => {
+    languageStore.value = "en";
+    languageStore.listeners.clear();
     listGadgets.mockClear();
+    vi.spyOn(window, "scrollTo").mockImplementation(() => {});
   });
 
   afterEach(async () => {
@@ -114,7 +144,18 @@ describe("SandboxedGatekeeperApp navigation", () => {
     await expect(host.subscribeTheme(themeReceiver)).resolves.toEqual({
       mode: "light",
       accentColor: "#7c3aed",
+      language: "en",
     });
+
+    await act(async () => {
+      languageStore.value = "ja";
+      for (const listener of languageStore.listeners) listener();
+    });
+    await vi.waitFor(() => expect(themeReceiver.themes).toContainEqual({
+      mode: "light",
+      accentColor: "#7c3aed",
+      language: "ja",
+    }));
 
     await act(async () => {
       await host!.openWorkspace(WORKSPACE_ID, 2);

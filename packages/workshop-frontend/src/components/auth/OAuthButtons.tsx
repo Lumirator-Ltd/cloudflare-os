@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { RpcStub } from 'capnweb'
 import { PublicApi, AuthVendorInfo } from '@gadgets/workshop-shared/api'
 import { Button, Banner } from '@cloudflare/kumo'
+import { useTranslation } from 'react-i18next'
 import { CONNECTOR_SETUP_GUIDANCE } from '../../connectorReadiness'
 
 interface OAuthButtonsProps {
@@ -16,6 +17,7 @@ interface OAuthButtonsProps {
  * stored and the app re-authenticates.
  */
 export default function OAuthButtons({ rpcStub, vendors, onSuccess }: OAuthButtonsProps) {
+  const { t } = useTranslation()
   const [error, setError] = useState<string | null>(null)
   const [pending, setPending] = useState<string | null>(null)
 
@@ -80,7 +82,7 @@ export default function OAuthButtons({ rpcStub, vendors, onSuccess }: OAuthButto
           if (popup.closed) finish(() => reject(new Error('Sign-in was cancelled.')))
         }, 500)
         attempt.wait()
-          .then(t => finish(() => resolve(t)))
+          .then(sessionToken => finish(() => resolve(sessionToken)))
           .catch(e => finish(() => reject(e instanceof Error ? e : new Error('Could not sign in'))))
       })
       if (!mountedRef.current) return  // user navigated away mid-flow; drop the result
@@ -114,7 +116,7 @@ export default function OAuthButtons({ rpcStub, vendors, onSuccess }: OAuthButto
                 style={{ height: 18, width: 'auto' }}
               />
             )}
-            Continue with {vendor.displayName}
+            {t('shell.auth.continueWith', { vendor: vendor.displayName })}
           </Button>
           {!vendor.configured && (
             <p className="mt-1 text-xs text-kumo-subtle">

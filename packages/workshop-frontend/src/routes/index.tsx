@@ -22,6 +22,7 @@ import {
 import { useDocumentTitle } from "../useDocumentTitle";
 import { homePromptFromSearch } from "../homePrompt";
 import { composerDraftStorageKey } from "../composerDraft";
+import { useTranslation } from "react-i18next";
 
 type HomeSearch = { prompt?: string };
 
@@ -40,7 +41,8 @@ function HomePage() {
 }
 
 export function HomePageContent({ prompt }: HomeSearch) {
-  useDocumentTitle("Home");
+  const { t } = useTranslation();
+  useDocumentTitle(t("shell.pageTitle.home"));
 
   const { authenticatedApi, currentUser } = useAuthenticatedApi();
   const navigate = useNavigate();
@@ -70,13 +72,13 @@ export function HomePageContent({ prompt }: HomeSearch) {
         // Toast unless it's a connection error (reconnect refetches); a do-reset here already
         // survived the Worker's same-colo retry, so the user should hear about it.
         if (classifyRpcError(err) !== "connection") {
-          toasts.add({ title: "Couldn't load AI models", variant: "error" });
+          toasts.add({ title: t("shell.home.modelsLoadError"), variant: "error" });
         }
       });
     return () => {
       cancelled = true;
     };
-  }, [authenticatedApi]);
+  }, [authenticatedApi, t, toasts]);
 
   const handleModelChange = useCallback((value: string | null) => {
     setSelectedModel(value);
@@ -118,7 +120,7 @@ export function HomePageContent({ prompt }: HomeSearch) {
               logRpcFailure("Failed to set initial workspace title:", err,
                   { reportSite: "workspace.rename.initial" });
               toasts.add({
-                title: "Workspace created, but couldn't set its name",
+                title: t("shell.home.workspaceNameError"),
                 variant: "error",
               });
             })
@@ -141,12 +143,12 @@ export function HomePageContent({ prompt }: HomeSearch) {
           provisionalOverseerRef.current = null;
         }
         if (!transient) {
-          toasts.add({ title: "Failed to create workspace", variant: "error" });
+          toasts.add({ title: t("shell.home.workspaceCreateError"), variant: "error" });
         }
         throw err;
       }
     },
-    [ensureProvisionalGadget, navigate, toasts],
+    [ensureProvisionalGadget, navigate, toasts, t],
   );
 
   const getOverseer = useCallback((): RpcStub<Overseer> => {
@@ -184,10 +186,10 @@ export function HomePageContent({ prompt }: HomeSearch) {
         {/* Hero */}
         <header className="text-center">
           <h1 className="text-3xl font-semibold tracking-tight leading-tight text-kumo-default sm:text-4xl">
-            What are we working on?
+            {t("shell.home.title")}
           </h1>
           <p className="mx-auto mt-3 max-w-md text-[14px] leading-5 tracking-[-0.25px] text-kumo-subtle">
-            Ask a question, create an output, or create an app that works with your tools and data.
+            {t("shell.home.subtitle")}
           </p>
         </header>
 

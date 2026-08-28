@@ -2,10 +2,9 @@ import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ManagementSchedule } from "../src/management-types";
-import SchedulerPage, {
-  CREATE_SCHEDULE_PROMPT,
-  type ScheduleManagementClient,
-} from "./SchedulerPage";
+import SchedulerPage, { type ScheduleManagementClient } from "./SchedulerPage";
+import { AppLanguageProvider } from "./i18n";
+import { applyAppTheme, type ResolvedThemeMode } from "./theme";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -88,6 +87,7 @@ describe("SchedulerPage", () => {
 
   afterEach(() => {
     act(() => root?.unmount());
+    applyAppTheme({ mode: "light", accentColor: null, language: "en" });
     container?.remove();
     vi.restoreAllMocks();
   });
@@ -110,7 +110,7 @@ describe("SchedulerPage", () => {
     await click('[data-action="open-schedule"]', "Weekly roundup");
     expect(host.openWorkspace).toHaveBeenLastCalledWith(ROUNDUP_WORKSPACE, 2);
     await click('[data-action="create-schedule"]');
-    expect(host.openPrompt).toHaveBeenCalledWith(CREATE_SCHEDULE_PROMPT);
+    expect(host.openPrompt).toHaveBeenCalledWith(expect.stringContaining("scheduled task"));
   });
 
   it("expands the failure reason on needs-attention rows only", async () => {
@@ -233,6 +233,33 @@ describe("SchedulerPage", () => {
     expect(container!.querySelector('[data-filter="all"]')).not.toBeNull();
   });
 
+  it("renders Japanese copy, preserves user content, and reacts to host language changes", async () => {
+    const list = vi.fn<ScheduleManagementClient["list"]>(async () => ({
+      schedules: [active, dead],
+    }));
+    const host = hostProps();
+    await render(<SchedulerPage api={{ list }} {...host} />);
+
+    expect(container!.textContent).toContain("Scheduled tasks");
+    await act(async () => {
+      applyAppTheme({ mode: "light", accentColor: null, language: "ja" });
+    });
+    await vi.waitFor(() => expect(container!.textContent).toContain("スケジュールされたタスク"));
+
+    expect(container!.textContent).toContain("スケジュールを作成");
+    expect(container!.textContent).toContain("すべて");
+    expect(container!.textContent).toContain("要確認");
+    expect(container!.textContent).toContain("はじめに");
+    expect(container!.textContent).toContain("モーニングブリーフ");
+    expect(container!.textContent).toContain("Morning brief");
+    expect(container!.textContent).toContain("Daily Brief");
+    expect(container!.textContent).not.toContain("Create schedule");
+
+    await click('[data-action="create-schedule"]');
+    expect(host.openPrompt).toHaveBeenLastCalledWith(expect.stringContaining("スケジュール"));
+    expect(host.openPrompt).not.toHaveBeenLastCalledWith(expect.stringContaining("Help me"));
+  });
+
   it("maps finished schedules to completed and expired states", async () => {
     const list = vi.fn<ScheduleManagementClient["list"]>(async (options) => ({
       schedules: options?.statuses?.includes("completed") ? [completed, expired] : [active],
@@ -255,12 +282,17 @@ describe("SchedulerPage", () => {
     expect(rows.find((row) => row.textContent?.includes("Quarterly export"))?.disabled).toBe(false);
   });
 
-  async function render(element: React.ReactNode): Promise<void> {
+  async function render(
+    element: React.ReactNode,
+    language: "en" | "ja" = "en",
+    mode: ResolvedThemeMode = "light",
+  ): Promise<void> {
+    applyAppTheme({ mode, accentColor: null, language });
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
     await act(async () => {
-      root!.render(element);
+      root!.render(<AppLanguageProvider>{element}</AppLanguageProvider>);
     });
   }
 

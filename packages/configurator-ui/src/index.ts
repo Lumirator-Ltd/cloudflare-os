@@ -1,3 +1,17 @@
+/** Languages a sandboxed configurator UI can receive from Workshop. */
+export type ConfiguratorUILanguage = "en" | "ja";
+
+/** A complete localized choice for every supported configurator language. */
+export type ConfiguratorUILocalizedText = Record<ConfiguratorUILanguage, string>;
+
+/** Selects localized text. Provided by the configurator UI sandbox runtime. */
+export function localize(
+  _language: ConfiguratorUILanguage,
+  _choices: ConfiguratorUILocalizedText,
+): string {
+  throw new Error("localize is provided by the configurator UI sandbox runtime.");
+}
+
 /** Values owned by a sandboxed configurator UI. */
 export type ConfiguratorUIValues = Record<string, string | null | undefined>;
 
@@ -15,6 +29,8 @@ export type ConfiguratorUIRenderContext<
   TValues extends ConfiguratorUIValues = ConfiguratorUIValues,
 > = {
   values: TValues;
+  /** The current Workshop interface language. */
+  language: ConfiguratorUILanguage;
   setValues(values: Partial<TValues>): void;
   clearFields(...names: (keyof TValues & string)[]): void;
   /**
@@ -31,6 +47,8 @@ export type ConfiguratorUIResourceContext<
   TValues extends ConfiguratorUIValues = ConfiguratorUIValues,
 > = {
   values: TValues;
+  /** The current Workshop interface language. */
+  language: ConfiguratorUILanguage;
   ui: TUI;
 }
 
@@ -60,6 +78,8 @@ export type ConfiguratorUISpec<
   initialValuesFromResourceUrl?(context: {
     resourceUrl: string;
     resourceUrlPattern: string;
+    /** The current Workshop interface language. */
+    language: ConfiguratorUILanguage;
     ui: TUI;
   }): Partial<TValues> | Promise<Partial<TValues>>;
 

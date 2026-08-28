@@ -17,11 +17,13 @@ import {
 import { WorkshopButton } from './components/WorkshopControls'
 import Avatar from './components/Avatar'
 import {
-  CONNECTOR_SETUP_GUIDANCE,
+  connectorSetupGuidance,
   connectionErrorMessage,
   connectorIsConfigured,
 } from './connectorReadiness'
 import { AccountsSubscriberAdapter } from './accountsSubscriber'
+import { useTranslation } from 'react-i18next'
+import i18n from './i18n/config'
 
 // Shown when a non-owner opens a shared Gadget that reads data through one or more gatekeeper
 // bindings, and they haven't yet chosen which of their own connected accounts to use for each one.
@@ -85,6 +87,7 @@ export default function ObserverConfigModal({
   onConfirm,
   onCancel,
 }: ObserverConfigModalProps) {
+  const { t } = useTranslation(undefined, { i18n })
   const toasts = useKumoToastManager()
 
   const [accounts, setAccounts] = useState<Map<number, AccountInfo>>(new Map())
@@ -147,7 +150,7 @@ export default function ObserverConfigModal({
       // Loud on purpose: the modal has no retry path, so a quieted transient failure would
       // strand the user on a permanent loader.
       console.error('Failed to subscribe to connected accounts:', err)
-      toasts.add({ title: 'Failed to load your connected accounts', variant: 'error' })
+      toasts.add({ title: t('gatekeepers.observer.loadAccountsFailed'), variant: 'error' })
     })
 
     return () => {
@@ -225,7 +228,7 @@ export default function ObserverConfigModal({
     } catch (err) {
       console.error('Failed to initiate connection:', err)
       toasts.add({
-        title: connectionErrorMessage(err, 'Failed to start connection flow'),
+        title: connectionErrorMessage(err, t('gatekeepers.common.connectionFailed')),
         variant: 'error',
       })
       connectingRef.current = null
@@ -241,7 +244,7 @@ export default function ObserverConfigModal({
       // Subscription fires add() with credentialsValid:true on completion, clearing `reconnecting`.
     } catch (err) {
       console.error('Failed to initiate reconnection:', err)
-      toasts.add({ title: 'Failed to start re-authentication flow', variant: 'error' })
+      toasts.add({ title: t('gatekeepers.observer.reauthFailed'), variant: 'error' })
       setReconnecting(null)
     }
   }
@@ -283,7 +286,7 @@ export default function ObserverConfigModal({
       }
     } catch (err) {
       console.error('Failed to request additional access:', err)
-      toasts.add({ title: 'Failed to request additional access', variant: 'error' })
+      toasts.add({ title: t('gatekeepers.common.grantFailed'), variant: 'error' })
       setGranting(null)
     }
   }
@@ -323,14 +326,12 @@ export default function ObserverConfigModal({
     <Dialog.Root open disablePointerDismissal onOpenChange={open => { if (!open) onCancel() }}>
       <Dialog className="p-6" size="lg">
         <Dialog.Title className="mb-2 text-lg font-semibold">
-          {isRetry ? 'Verify your access again' : 'Verify your access'}
+          {isRetry ? t('gatekeepers.observer.verifyAgainTitle') : t('gatekeepers.observer.verify')}
         </Dialog.Title>
         <Text variant="secondary" size="sm" as="p">
           {isRetry
-            ? 'We couldn’t confirm your access to everything this workspace has read. Re-authenticate ' +
-              'the account below, or choose a different one, then try again.'
-            : 'Before opening this workspace, confirm that your own accounts can access the connected ' +
-              'data it uses.'}
+            ? t('gatekeepers.observer.retryDescription')
+            : t('gatekeepers.observer.description')}
         </Text>
 
         {!ready || !vendorsReady ? (
@@ -375,10 +376,10 @@ export default function ObserverConfigModal({
                         disabled={!configured || connecting === need.vendorId}
                       >
                         {!configured
-                          ? CONNECTOR_SETUP_GUIDANCE
+                          ? connectorSetupGuidance()
                           : connecting === need.vendorId
-                            ? 'Waiting for connection…'
-                            : 'Connect'}
+                            ? t('gatekeepers.observer.waitingConnection')
+                            : t('gatekeepers.observer.connect')}
                       </WorkshopButton>
                     )}
                   </div>
@@ -403,14 +404,14 @@ export default function ObserverConfigModal({
                       {matching.length === 1 ? (
                         <div className="flex min-h-10 items-center gap-3 rounded-lg border border-kumo-line bg-kumo-elevated/50 px-3 py-2">
                           <div className="min-w-0 flex-1">
-                            <div className="text-[11px] leading-4 text-kumo-subtle">Using your account</div>
+                            <div className="text-[11px] leading-4 text-kumo-subtle">{t('gatekeepers.observer.usingAccount')}</div>
                             <div className="truncate text-sm font-medium text-kumo-default">
                               {accountLabel(matching[0], matching[0].id)}
                             </div>
                           </div>
                           {accountSatisfies(need, matching[0]) && (
                             <span className="flex shrink-0 items-center gap-1 text-xs font-medium text-kumo-success">
-                              <CheckCircle size={15} weight="fill" /> Ready
+                              <CheckCircle size={15} weight="fill" /> {t('gatekeepers.observer.ready')}
                             </span>
                           )}
                         </div>
@@ -422,7 +423,7 @@ export default function ObserverConfigModal({
                               ? String(choices[need.gatekeeperId])
                               : undefined
                           }
-                          placeholder={`Choose a ${vendorName} account…`}
+                          placeholder={t('gatekeepers.observer.chooseAccount', { vendor: vendorName })}
                           onValueChange={v =>
                             setChoices(prev => ({ ...prev, [need.gatekeeperId]: Number(v) }))
                           }
@@ -431,7 +432,7 @@ export default function ObserverConfigModal({
                           {matching.map(acct => (
                             <Select.Option key={acct.id} value={String(acct.id)}>
                               {accountLabel(acct, acct.id)}
-                              {!acct.credentialsValid ? ' (expired)' : ''}
+                              {!acct.credentialsValid ? ` (${t('gatekeepers.observer.expired')})` : ''}
                             </Select.Option>
                           ))}
                         </Select>
@@ -452,8 +453,8 @@ export default function ObserverConfigModal({
                             <Warning size={12} />
                           )}
                           {granting === chosen.id
-                            ? 'Waiting for access…'
-                            : 'Grant the access needed to verify this resource'}
+                            ? t('gatekeepers.observer.waitingAccess')
+                            : t('gatekeepers.observer.grantVerify')}
                         </button>
                       )}
 
@@ -476,10 +477,10 @@ export default function ObserverConfigModal({
                             <Warning size={12} />
                           )}
                           {reconnecting === chosen.id
-                            ? 'Re-authenticating…'
+                            ? t('gatekeepers.observer.reauthenticating')
                             : chosen.credentialsValid
-                              ? 'Click to re-authenticate this account'
-                              : 'This account has expired — click to re-authenticate'}
+                              ? t('gatekeepers.observer.reauthenticate')
+                              : t('gatekeepers.observer.expiredReauthenticate')}
                         </button>
                       )}
 
@@ -492,10 +493,10 @@ export default function ObserverConfigModal({
                         >
                           <Plus size={11} />
                           {!configured
-                            ? CONNECTOR_SETUP_GUIDANCE
+                            ? connectorSetupGuidance()
                             : connecting === need.vendorId
-                              ? 'Waiting for connection…'
-                              : 'Connect a different account'}
+                              ? t('gatekeepers.observer.waitingConnection')
+                              : t('gatekeepers.observer.differentAccount')}
                         </button>
                       )}
                     </div>
@@ -508,14 +509,14 @@ export default function ObserverConfigModal({
 
         <div className="flex justify-end gap-2 mt-6">
           <WorkshopButton tone="secondary" onClick={onCancel}>
-            Cancel
+            {t('common.cancel')}
           </WorkshopButton>
           <WorkshopButton
             tone="primary"
             onClick={handleConfirm}
             disabled={!ready || !vendorsReady || !allSatisfied}
           >
-            {isRetry ? 'Verify again' : 'Verify and open'}
+            {isRetry ? t('gatekeepers.observer.verifyAgain') : t('gatekeepers.observer.verifyOpen')}
           </WorkshopButton>
         </div>
       </Dialog>

@@ -1,4 +1,4 @@
-import { Field, h, Section, TextInput, type ConfiguratorUISpec } from "@gadgets/configurator-ui";
+import { localize, Field, h, Section, TextInput, type ConfiguratorUISpec } from "@gadgets/configurator-ui";
 import type { ThreadConfiguratorRpc, ThreadConfiguratorValues } from "./thread-configurator-types";
 
 function parsePermalink(raw: string): { conversationId: string; messageId: string } | null {
@@ -32,16 +32,16 @@ export default {
     return parsePermalink(resourceUrl) ? { permalink: resourceUrl } : {};
   },
 
-  render({ values, setValues }) {
+  render({ values, setValues, language }) {
     return <Section>
       <Field
-        label="Thread permalink"
-        description="Paste a Slack message link (Copy link on a message). It looks like https://your-workspace.slack.com/archives/C0.../p123..."
+        label={localize(language, { en: "Thread permalink", ja: "スレッドのパーマリンク" })}
+        description={localize(language, { en: "Paste a Slack message link (Copy link on a message). It looks like https://your-workspace.slack.com/archives/C0.../p123...", ja: "Slack メッセージのリンク（メッセージの「リンクをコピー」）を貼り付けます。例: https://your-workspace.slack.com/archives/C0.../p123..." })}
       >
         <TextInput
           name="permalink"
           value={values.permalink}
-          placeholder="https://your-workspace.slack.com/archives/C.../p..."
+          placeholder={localize(language, { en: "https://your-workspace.slack.com/archives/C.../p...", ja: "https://your-workspace.slack.com/archives/C.../p..." })}
           onChange={permalink => setValues({ permalink })}
         />
       </Field>

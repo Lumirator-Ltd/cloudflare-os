@@ -1,4 +1,4 @@
-import { Autocomplete, Field, h, Section, type ConfiguratorUISpec } from "@gadgets/configurator-ui";
+import { localize, Autocomplete, Field, h, Section, type ConfiguratorUISpec } from "@gadgets/configurator-ui";
 import type {
   HomeAssistantAreaConfiguratorRpc,
   HomeAssistantAreaConfiguratorValues,
@@ -15,13 +15,13 @@ export default {
     return ui.resourceUrl(values.areaId);
   },
 
-  render({ values, setValues, ui }) {
+  render({ values, setValues, ui, language }) {
     return <Section>
-      <Field label="Area" description="Choose a Home Assistant area (room).">
+      <Field label={localize(language, { en: "Area", ja: "エリア" })} description={localize(language, { en: "Choose a Home Assistant area (room).", ja: "Home Assistant のエリア（部屋）を選択します。" })}>
         <Autocomplete
           name="areaId"
           value={values.areaId}
-          placeholder="Search areas..."
+          placeholder={localize(language, { en: "Search areas...", ja: "エリアを検索..." })}
           loadOptions={query => ui.listAreas(query)}
           onChange={areaId => setValues({ areaId })}
         />

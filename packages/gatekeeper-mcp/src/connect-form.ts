@@ -22,24 +22,92 @@ const FORM_STYLE = `
   button:hover { opacity: .9; }
 `;
 
-/** Renders the endpoint prompt shown when the user starts connecting. */
-export function connectFormHtml(path: string, error?: string): string {
+type ConnectFormLanguage = "en" | "ja";
+
+type ConnectFormCopy = {
+  title: string;
+  introduction: string;
+  serverUrl: string;
+  placeholder: string;
+  trustNotice: string;
+  continue: string;
+};
+
+const CONNECT_FORM_COPY = {
+  en: {
+    title: "Connect an MCP server",
+    introduction:
+      "We will discover the server's tools and, if it requires authorization, take you through its sign-in.",
+    serverUrl: "Server URL",
+    placeholder: "https://example.com/mcp",
+    trustNotice:
+      "Only connect a server you trust. Its own annotations decide which of its tools run without " +
+      "asking you and which wait for your approval, and an annotation is only as trustworthy as " +
+      "the server that sent it.",
+    continue: "Continue",
+  },
+  ja: {
+    title: "MCP サーバーに接続",
+    introduction:
+      "サーバーのツールを検出し、認証が必要な場合はサインインへ進みます。",
+    serverUrl: "サーバー URL",
+    placeholder: "https://example.com/mcp",
+    trustNotice:
+      "信頼できるサーバーだけに接続してください。確認なしで実行するツールと承認待ちにする" +
+      "ツールはサーバー自身のアノテーションで決まり、その信頼性は送信元のサーバーに依存します。",
+    continue: "続行",
+  },
+} satisfies Record<ConnectFormLanguage, ConnectFormCopy>;
+
+function supportedLanguage(language: unknown): ConnectFormLanguage {
+  return language === "ja" ? "ja" : "en";
+}
+
+/** Builds the one-time account connection URL with its resolved form language. */
+export function buildConnectUrl(
+  baseUrl: string,
+  accountId: string,
+  initiationNonce: string,
+  language?: string,
+): string {
+  const url = new URL(`${baseUrl}/${accountId}/${initiationNonce}`);
+  url.searchParams.set("language", supportedLanguage(language));
+  return url.href;
+}
+
+/** Resolves the connect form language, preferring a submitted form value over the URL query. */
+export function resolveConnectFormLanguage(
+  requestUrl: string,
+  form?: Pick<FormData, "get">,
+): ConnectFormLanguage {
+  return supportedLanguage(
+    form?.get("language") ?? new URL(requestUrl).searchParams.get("language"),
+  );
+}
+
+/**
+ * Renders the endpoint prompt shown when the user starts connecting.
+ *
+ * `language` is the request-boundary localization contract: pass `"ja"` when the caller has the
+ * user's preference. Omitted or unsupported values deterministically use English.
+ */
+export function connectFormHtml(path: string, error?: string, language?: string): string {
+  const resolvedLanguage = supportedLanguage(language);
+  const copy = CONNECT_FORM_COPY[resolvedLanguage];
   return `<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8">
+<html lang="${resolvedLanguage}"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Connect an MCP server</title><style>${PAGE_STYLE}${FORM_STYLE}</style></head>
+<title>${copy.title}</title><style>${PAGE_STYLE}${FORM_STYLE}</style></head>
 <body><main>
-  <h1>Connect an MCP server</h1>
-  <p class="sub">We will discover the server's tools and, if it requires authorization, take you
-  through its sign-in.</p>
+  <h1>${copy.title}</h1>
+  <p class="sub">${copy.introduction}</p>
   ${error ? `<p class="err">${escapeHtml(error)}</p>` : ""}
   <form method="POST" action="${escapeHtml(path)}">
-    <label for="url">Server URL</label>
-    <input id="url" type="url" name="url" placeholder="https://example.com/mcp" required autofocus>
-    <p class="hint">Only connect a server you trust. Its own annotations decide which of its tools
-    run without asking you and which wait for your approval, and an annotation is only as
-    trustworthy as the server that sent it.</p>
-    <button type="submit">Continue</button>
+    <input type="hidden" name="language" value="${resolvedLanguage}">
+    <label for="url">${copy.serverUrl}</label>
+    <input id="url" type="url" name="url" placeholder="${copy.placeholder}" required autofocus>
+    <p class="hint">${copy.trustNotice}</p>
+    <button type="submit">${copy.continue}</button>
   </form>
 </main></body></html>`;
 }

@@ -1,4 +1,5 @@
 import { List, GridFour } from '@phosphor-icons/react'
+import { useTranslation } from 'react-i18next'
 
 /**
  * Shared grid/list segmented toggle. Used on Gatekeepers and Outputs so view-switching looks and
@@ -11,9 +12,10 @@ export default function ViewToggle({
   view: 'grid' | 'list'
   onChange: (view: 'grid' | 'list') => void
 }) {
+  const { t } = useTranslation()
   const options = [
-    { value: 'list' as const, Icon: List, label: 'List view' },
-    { value: 'grid' as const, Icon: GridFour, label: 'Grid view' },
+    { value: 'list' as const, Icon: List, label: t('common.listView') },
+    { value: 'grid' as const, Icon: GridFour, label: t('common.gridView') },
   ]
   return (
     <div className="inline-flex shrink-0 items-center gap-0.5 rounded-lg border border-kumo-line bg-kumo-base p-0.5">
