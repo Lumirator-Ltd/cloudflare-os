@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+/* eslint-disable react/react-in-jsx-scope */
 
 import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
