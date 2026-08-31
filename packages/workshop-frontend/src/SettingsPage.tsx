@@ -8,6 +8,7 @@ import { User, Pencil, Check, X, Lock, Camera, Copy, Eye, EyeSlash } from '@phos
 import { useAvatar, invalidateAvatarCache } from './useAvatar'
 import { compressAvatar, avatarBlobUrl } from './avatarUtils'
 import UsageSettings from './components/billing/UsageSettings'
+import TelegramSettings from './components/TelegramSettings'
 import { useDocumentTitle } from './useDocumentTitle'
 
 // Shared, on-language control classes (match the rest of the app: Workspaces/Blueprints headers,
@@ -376,6 +377,8 @@ export default function SettingsPage() {
             </div>
           </div>
         </section>
+
+        <TelegramSettings />
 
         {/* Usage & billing — only when the Cloudflare limits flow is enabled server-side */}
         <UsageSettings />
