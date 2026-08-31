@@ -228,6 +228,31 @@ function makeUserStorage(storage: DurableObjectStorage) {
 
 type UserStorage = ReturnType<typeof makeUserStorage>;
 
+function findConnectedAccountByIdentity(
+  storage: UserStorage,
+  vendorId: string,
+  uniqueName: string,
+  excludeId?: number,
+): ConnectedAccountRecord | undefined {
+  let nextAccountId = storage.nextAccountId.get();
+  for (let id = 0; id < nextAccountId; id++) {
+    if (id === excludeId) continue;
+    let existing: ConnectedAccountRecord | undefined;
+    try {
+      existing = storage.connectedAccounts.get(id);
+    } catch (error) {
+      logger.warn("skipping connected account during identity lookup: failed to load", {
+        event: "connected.account.identity.lookup.skipped", accountId: id, error,
+      });
+      continue;
+    }
+    if (existing?.vendorId === vendorId && existing.description.uniqueName === uniqueName) {
+      return existing;
+    }
+  }
+  return undefined;
+}
+
 async function assertVendorConfigured(
     vendors: Map<string, Service<GatekeeperVendor>>,
     vendorId: string,
@@ -1622,7 +1647,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     // broken whenever the old token had expired or was rotated out by this very re-auth — the
     // opposite of what signing in again should accomplish.
     if (uniqueName) {
-      let existing = this.#findConnectedAccountByIdentity(vendorId, uniqueName);
+      let existing = findConnectedAccountByIdentity(this.storage, vendorId, uniqueName);
       if (existing) {
         // Drop the now-stale grant (a separate gatekeeper-side object from the fresh one), then point
         // the existing record — keeping its id, so UI references stay stable — at the fresh grant.
@@ -1654,40 +1679,25 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     });
   }
 
-  // Find an existing connected account for the given vendor + identity (uniqueName), excluding
-  // `excludeId`. Skips records that fail to load, for the same reasons as subscribeConnectedAccounts():
-  // a single corrupt record (e.g. one referencing a Worker binding that no longer exists) must not
-  // poison the scan and prevent the user from connecting any new account.
-  #findConnectedAccountByIdentity(vendorId: string, uniqueName: string, excludeId?: number)
-      : ConnectedAccountRecord | undefined {
-    let nextAccountId = this.storage.nextAccountId.get();
-    for (let id = 0; id < nextAccountId; id++) {
-      if (id === excludeId) continue;
-      let existing: ConnectedAccountRecord | undefined;
-      try {
-        existing = this.storage.connectedAccounts.get(id);
-      } catch (err) {
-        logger.warn("skipping connected account during identity lookup: failed to load", {
-          event: "connected.account.identity.lookup.skipped", accountId: id, error: err,
-        });
-        continue;
-      }
-      if (!existing) continue;
-      if (existing.vendorId === vendorId && existing.description.uniqueName === uniqueName) {
-        return existing;
-      }
-    }
-    return undefined;
-  }
-
   async putConnectedAccount(record: ConnectedAccountRecord) {
     let uniqueName = record.description.uniqueName;
-    if (uniqueName &&
-        this.#findConnectedAccountByIdentity(record.vendorId, uniqueName, record.id)) {
+    if (uniqueName && findConnectedAccountByIdentity(
+      this.storage,
+      record.vendorId,
+      uniqueName,
+      record.id,
+    )) {
       // OAuth providers often return the currently logged-in identity when the user tries to add
-      // another account. Avoid showing duplicate account rows: keep the existing record stable for
-      // any UI references, and revoke the newly-created duplicate grant.
-      await record.account.revoke();
+      // another account. Cleanup cannot be awaited here: the provider may still be waiting for this
+      // completion callback while serializing revoke behind it.
+      this.ctx.waitUntil(Promise.resolve()
+        .then(() => record.account.revoke())
+        .catch(error => logger.error("failed to revoke duplicate connected account", {
+          event: "connected.account.duplicate.revoke.failed",
+          accountId: record.id,
+          vendorId: record.vendorId,
+          error,
+        })));
       return;
     }
 
@@ -1717,7 +1727,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   async getGatekeeperClassFor(accountId: number, url: string)
       : Promise<{class: DurableObjectClass<Gatekeeper<any>>, vendorId: string,
-                  typeUrlPattern: string}> {
+                  typeUrlPattern: string, workspaceAccess?: SupportedResource["workspaceAccess"]}> {
     let account = this.storage.connectedAccounts.get(accountId);
     if (!account) throw new Error("No such account.");
     let {class: cls, resource} = await account.account.getGatekeeperClassFor(url);
@@ -1743,7 +1753,12 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
           `The "${resource.title}" resource is disabled on this deployment by an administrator.`);
     }
 
-    return {class: cls, vendorId: account.vendorId, typeUrlPattern: resource.urlPattern};
+    return {
+      class: cls,
+      vendorId: account.vendorId,
+      typeUrlPattern: resource.urlPattern,
+      workspaceAccess: resource.workspaceAccess,
+    };
   }
 
   /**

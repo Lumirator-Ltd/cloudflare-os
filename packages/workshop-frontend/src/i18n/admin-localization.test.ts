@@ -205,4 +205,13 @@ describe("Workshop admin and catalog localization", () => {
     expect(jaAdmin.admin.validation.tooLongBy).toBe("{{count}} 文字超過しています");
     expect(jaAdmin.billing.reset.daysHours).toBe("{{days}}日 {{hours}}時間後にリセット");
   });
+
+  it("localizes the complete owner-only workspace warning", () => {
+    expect(enAdmin.gatekeepers.connectorModal.ownerOnlyDescription).toBe(
+      "This account can only be used in a private workspace owned by you. After adding it, this workspace remains private even if you remove the connection.",
+    );
+    expect(jaAdmin.gatekeepers.connectorModal.ownerOnlyDescription).toBe(
+      "このアカウントは、接続したご本人が所有する非公開ワークスペースでのみ使用できます。追加後は、この接続を削除してもワークスペースを共有できません。",
+    );
+  });
 });

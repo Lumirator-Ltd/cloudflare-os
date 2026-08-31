@@ -159,6 +159,18 @@ test("worker entries carry the deploy contract", () => {
       hubspot.bindings.find((b) => b.name === "CLIENT_SECRET"),
       { type: "secret_text", name: "CLIENT_SECRET", text: "$SECRET(CLIENT_SECRET)" });
 
+  const x = workers["gatekeeper-x"];
+  assert.equal(x.kind, "gatekeeper");
+  assert.equal(x.shortName, "x");
+  assert.equal(x.vars.BASE_URL, "$PUBLIC_BASE_URL/gatekeeper/x");
+  assert.ok(x.installable);
+  assert.deepEqual(x.inputs, []);
+  assert.ok(!x.bindings.some((binding) =>
+    binding.name === "CLIENT_ID" || binding.name === "CLIENT_SECRET"));
+  assert.deepEqual(
+      x.migrations,
+      [{ tag: "v0", new_sqlite_classes: ["UserAccount", "XAccountGatekeeperImpl"] }]);
+
   // gatekeeper-email ships in the release but is not installable (needs Email Routing/a zone).
   assert.equal(workers["gatekeeper-email"].installable, false);
   assert.deepEqual(workers["gatekeeper-email"].inputs, []);

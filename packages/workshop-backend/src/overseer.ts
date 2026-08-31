@@ -288,6 +288,7 @@ type LegacyBlueprintBindingAnnotation = BlueprintBindingAnnotation & {
 };
 
 function defaultBlueprintBindingTitle(record: GatekeeperRecord, bindingName?: string): string {
+  if (record.ownerOnly) return bindingName || "Owner-only connection";
   return record.resourceTitle || bindingName || "Connection";
 }
 
@@ -305,6 +306,7 @@ type GatekeeperRecord = {
   hasSlashCommands?: true;  // denormalized from ResourceDescription
   class: GatekeeperClass,
   hook?: string,  // export name to which the gatekeeper's hook is connected
+  ownerOnly?: true;
 
   // Records how this gatekeeper was originally created, enabling blueprint metadata derivation.
   creationSpec?: GatekeeperCreationSpec;
@@ -857,6 +859,9 @@ function makeOverseerStorage(storage: DurableObjectStorage) {
       // True if any past observation was authorized that had the `prohibitAllSharing` flag set
       // in its `ObservationDescription`.
       prohibitAllSharing: false,
+
+      // Sticky because removing a connection cannot remove its data from workspace history.
+      ownerOnlyWorkspace: false,
     },
 
     collections: {
@@ -1165,6 +1170,7 @@ class OverseerImpl implements AgentHooks {
   #activeAccessGrantingSharingMutations = 0;
   #activeSharingRevocations = 0;
   #sharingLockdownTransitions = 0;
+  #ownerOnlyCreationTransitions = 0;
 
   #preparingChatMessages = new Map<number, Promise<void>>();
 
@@ -2687,6 +2693,53 @@ class OverseerImpl implements AgentHooks {
     });
   }
 
+  isOwnerOnlyGatekeeper(gatekeeperId: WorkpieceId): boolean {
+    return this.storage.gatekeepers.get(gatekeeperId)?.ownerOnly === true;
+  }
+
+  hasOwnerOnlyRestriction(): boolean {
+    if (this.#ownerOnlyCreationTransitions > 0 || this.storage.ownerOnlyWorkspace.get()) return true;
+    return [...this.storage.gatekeepers.list()].some(record => record.ownerOnly === true);
+  }
+
+  isSharingProhibited(): boolean {
+    return this.storage.prohibitAllSharing.get() || this.hasOwnerOnlyRestriction();
+  }
+
+  assertOwnerOnlyActionResolver(
+      gatekeeperId: WorkpieceId, clientUserId: string, isOwner: boolean): void {
+    if (this.isOwnerOnlyGatekeeper(gatekeeperId) &&
+        (!isOwner || clientUserId !== this.ownerId)) {
+      throw new Error(
+          "Only the workspace owner may resolve actions for an owner-only connection.");
+    }
+  }
+
+  async runOwnerOnlyGatekeeperCreation<T>(create: () => Promise<T>): Promise<T> {
+    if (this.#activeAccessGrantingSharingMutations > 0) {
+      throw new Error(
+          "An owner-only connection cannot be created while sharing access is being granted.");
+    }
+    if (this.#activeSharingRevocations > 0) {
+      throw new Error(
+          "An owner-only connection cannot be created while sharing access is being revoked.");
+    }
+
+    this.#ownerOnlyCreationTransitions += 1;
+    try {
+      if ((await this.getSharingManager()).hasAnyShares()) {
+        throw new Error(
+            "This owner-only connection can only be added to a private workspace with no " +
+            "collaborators or share links.");
+      }
+      let result = await create();
+      this.storage.ownerOnlyWorkspace.put(true);
+      return result;
+    } finally {
+      this.#ownerOnlyCreationTransitions -= 1;
+    }
+  }
+
   #assertSharingMutationAllowed(): void {
     if (this.storage.prohibitAllSharing.get() || this.#sharingLockdownTransitions > 0) {
       throw new Error(
@@ -2701,6 +2754,11 @@ class OverseerImpl implements AgentHooks {
 
   async runAccessGrantingSharingMutation<T>(mutation: () => T | Promise<T>): Promise<T> {
     this.#assertSharingMutationAllowed();
+    if (this.hasOwnerOnlyRestriction()) {
+      throw new Error(
+          "This workspace has an owner-only connection and must remain a private workspace until " +
+          "that connection is removed.");
+    }
     this.#activeAccessGrantingSharingMutations += 1;
     try {
       return await mutation();
@@ -2767,6 +2825,9 @@ class OverseerImpl implements AgentHooks {
           "This action cannot be applied while sharing access is being revoked. Try again after " +
           "the workspace restarts.");
     }
+    if (autoApproved && this.isOwnerOnlyGatekeeper(record.gatekeeperId)) {
+      throw new Error("Auto-approval is unavailable for owner-only connections.");
+    }
 
     this.#activeActionApplications += 1;
     try {
@@ -2790,6 +2851,10 @@ class OverseerImpl implements AgentHooks {
   // Delegates to the single-flight drainer, which guards against concurrent drains for the same
   // gatekeeper double-applying an action (the DO's input gate is open across the apply await).
   drainAutoApprovals(gatekeeperId: number): Promise<void> {
+    if (this.isOwnerOnlyGatekeeper(gatekeeperId)) {
+      return Promise.reject(
+          new Error("Auto-approval is unavailable for owner-only connections."));
+    }
     return this.#autoApprovalDrainer.drain(gatekeeperId);
   }
 
@@ -2825,18 +2890,21 @@ class OverseerImpl implements AgentHooks {
     return this.#preparingChatMessages.get(chatId);
   }
 
-  async addGatekeeper(cls: GatekeeperClass, creationSpec?: GatekeeperCreationSpec)
+  async addGatekeeper(
+      cls: GatekeeperClass, creationSpec?: GatekeeperCreationSpec, ownerOnly = false)
       : Promise<GatekeeperClient<any>> {
     let id = this.allocateWorkpieceId();
     let gatekeeperRecord: GatekeeperRecord = {
       id,
       class: cls,
       creationSpec,
+      ...(ownerOnly ? {ownerOnly: true as const} : {}),
     };
     this.storage.gatekeepers.put(gatekeeperRecord);
 
-    let facet = this.getGatekeeperFacet(id);
+    let facet: Fetcher<Gatekeeper<any>>;
     try {
+      facet = this.getGatekeeperFacet(id);
       let description = await facet.describe();
       gatekeeperRecord.resourceTitle = description.title;
       gatekeeperRecord.resourceUrl = description.url;
@@ -3202,7 +3270,8 @@ class OverseerImpl implements AgentHooks {
 
     // Same auto-approval gate as before, named because awaitDecision uses it too. The drain is
     // deferred because applying calls back into the gatekeeper facet still awaiting submitAction.
-    let willAutoApprove = !!(description.autoApprovable && description.actionKind &&
+    let willAutoApprove = !!(!gatekeeper?.ownerOnly && description.autoApprovable &&
+        description.actionKind &&
         this.storage.autoApproveTags.get(`${gatekeeperId}:${description.actionKind.tag}`) !== undefined);
 
     // Only agent turns suspend on awaitDecision, and only when a manual decision is pending.
@@ -5263,6 +5332,10 @@ class OverseerImpl implements AgentHooks {
         description: annotation?.description ?? "",
       };
       let suggestValue = annotation?.suggestValue ?? false;
+      if (gk.ownerOnly) {
+        base = { title: bindingName, description: "" };
+        suggestValue = false;
+      }
 
       if (spec.type === "gatekeeper") {
         bindings[bindingName] = {
@@ -6837,6 +6910,9 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     let role: CollaboratorRole = "build";
 
     if (!isOwner) {
+      if (this.impl.hasOwnerOnlyRestriction()) {
+        throw createOpenGadgetError(OPEN_GADGET_ERROR_CODES.workspaceAccessDenied);
+      }
       if (this.impl.storage.prohibitAllSharing.get()) {
         // `prohibitAllSharing` can only have been set when the gadget had no shares (see
         // `authorizeObservation`), and no new shares can be created while it's set, so any
@@ -7629,7 +7705,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       id: this.impl.ctx.id.toString(),
       title: this.impl.storage.title.get(),
       totalCost: this.impl.storage.totalCost.get(),
-      sharingProhibited: this.impl.storage.prohibitAllSharing.get(),
+      sharingProhibited: this.impl.isSharingProhibited(),
       role: "build",
       defaultGadgetId: this.impl.defaultGadgetId,
     };
@@ -7648,7 +7724,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       id: this.impl.ctx.id.toString(),
       title: this.impl.storage.title.get(),
       totalCost: this.impl.storage.totalCost.get(),
-      sharingProhibited: this.impl.storage.prohibitAllSharing.get(),
+      sharingProhibited: this.impl.isSharingProhibited(),
       role: "build",
       defaultGadgetId: this.impl.defaultGadgetId,
     };
@@ -7671,8 +7747,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       }
     };
     let sharingProhibitedSubscriber = {
-      update(value: boolean | undefined) {
-        metadata.sharingProhibited = value;
+      update: () => {
+        metadata.sharingProhibited = this.impl.isSharingProhibited();
         callback(metadata).catch(unsubscribe);
       }
     };
@@ -7681,12 +7757,14 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       this.impl.storage.title.unsubscribe(titleSubscriber);
       this.impl.storage.totalCost.unsubscribe(costSubscriber);
       this.impl.storage.prohibitAllSharing.unsubscribe(sharingProhibitedSubscriber);
+      this.impl.storage.ownerOnlyWorkspace.unsubscribe(sharingProhibitedSubscriber);
       callback[Symbol.dispose]();
     };
 
     this.impl.storage.title.subscribe(titleSubscriber);
     this.impl.storage.totalCost.subscribe(costSubscriber);
     this.impl.storage.prohibitAllSharing.subscribe(sharingProhibitedSubscriber);
+    this.impl.storage.ownerOnlyWorkspace.subscribe(sharingProhibitedSubscriber);
 
     callback(metadata).catch(unsubscribe);
 
@@ -7927,7 +8005,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async newGatekeeper(accountId: number, resourceUrl: string)
       : Promise<GatekeeperClient<any> | null> {
-    let {class: cls, vendorId, typeUrlPattern} =
+    let {class: cls, vendorId, typeUrlPattern, workspaceAccess} =
         await this.#clientUser.getGatekeeperClassFor(accountId, resourceUrl);
     let creationSpec: GatekeeperCreationSpec = {
       type: "gatekeeper",
@@ -7935,7 +8013,17 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       resourceUrl,
       typeUrlPattern,
     };
-    let result = await this.impl.addGatekeeper(cls, creationSpec);
+
+    let result: GatekeeperClient<any>;
+    if (workspaceAccess === "owner-only") {
+      if (!this.isOwner || this.clientUserId !== this.impl.ownerId) {
+        throw new Error("Only the workspace owner can add an owner-only connection.");
+      }
+      result = await this.impl.runOwnerOnlyGatekeeperCreation(
+          () => this.impl.addGatekeeper(cls, creationSpec, true));
+    } else {
+      result = await this.impl.addGatekeeper(cls, creationSpec);
+    }
     await this.recordConnectionCreated(result, "gatekeeper", vendorId);
     return result;
   }
@@ -8035,6 +8123,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     if (action.type === "observation") {
       throw new Error("Observations can't have 'pending' state.");
     }
+    this.impl.assertOwnerOnlyActionResolver(
+        action.gatekeeperId, this.clientUserId, this.isOwner);
 
     // Resolve the approver's identity before applying, so a failed profile fetch can't leave the
     // action applied in the world but still "pending" in storage.
@@ -8049,7 +8139,9 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
     // Clearing this manual gate may unblock later auto-eligible pending actions on the same
     // gatekeeper, so cascade a drain (in-order) once this one is applied.
-    this.impl.ctx.waitUntil(this.impl.drainAutoApprovals(action.gatekeeperId));
+    if (!this.impl.isOwnerOnlyGatekeeper(action.gatekeeperId)) {
+      this.impl.ctx.waitUntil(this.impl.drainAutoApprovals(action.gatekeeperId));
+    }
   }
 
   async listHooks(): Promise<BoundHookInfo[]> {
@@ -8183,6 +8275,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     if (action.type !== "action") {
       throw new Error(`Can't reject an observation: ${id}`);
     }
+    this.impl.assertOwnerOnlyActionResolver(
+        action.gatekeeperId, this.clientUserId, this.isOwner);
 
     let gatekeeper = this.impl.getGatekeeperFacet(action.gatekeeperId);
 
@@ -8211,6 +8305,9 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     if (!gatekeeper) {
       throw new Error(`No such gatekeeper: ${gatekeeperId}`);
     }
+    if (gatekeeper.ownerOnly) {
+      throw new Error("Auto-approval is unavailable for owner-only connections.");
+    }
 
     let profile = await this.#getClientProfile();
     this.impl.storage.autoApproveTags.put({
@@ -8231,10 +8328,12 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   // List the enabled auto-approval rules.
   async listAutoApprovedActionKinds()
       : Promise<Array<{ gatekeeperId: WorkpieceId; actionKind: ActionKind }>> {
-    return [...this.impl.storage.autoApproveTags.list()].map(rule => ({
-      gatekeeperId: rule.gatekeeperId,
-      actionKind: rule.actionKind,
-    }));
+    return [...this.impl.storage.autoApproveTags.list()]
+        .filter(rule => !this.impl.isOwnerOnlyGatekeeper(rule.gatekeeperId))
+        .map(rule => ({
+          gatekeeperId: rule.gatekeeperId,
+          actionKind: rule.actionKind,
+        }));
   }
 
   async listPreApprovableActions(): Promise<PreApprovableAction[]> {
@@ -8252,7 +8351,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     // gatekeepers we couldn't reach) so one bad connection doesn't hide everyone else's actions.
     let perGatekeeper = [...boundIds]
         .map(id => this.impl.storage.gatekeepers.get(id))
-        .filter(gk => gk !== undefined)
+        .filter((gk): gk is GatekeeperRecord => gk !== undefined && !gk.ownerOnly)
         .map(async (gk): Promise<PreApprovableAction[]> => {
       let facet = this.impl.getGatekeeperFacet(gk.id);
       let kinds = await facet.getAutoApprovableActions();
