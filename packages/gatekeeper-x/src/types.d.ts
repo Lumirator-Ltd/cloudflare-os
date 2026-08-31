@@ -1,3 +1,5 @@
+import type { RpcTarget } from "cloudflare:workers";
+
 export interface XPageOptions {
   /** Number of records to request. Defaults to 10 and cannot exceed 20. */
   maxResults?: number;
@@ -47,7 +49,7 @@ export interface XUserPage {
 }
 
 /** Whole-account X API. Every read consumes the connected user's X API credits. */
-export interface XAccountSession {
+export interface XAccountSession extends RpcTarget {
   getMe(): Promise<XUser>;
   getUser(input: { id?: string; username?: string }): Promise<XUser>;
   getPost(id: string): Promise<XPost>;

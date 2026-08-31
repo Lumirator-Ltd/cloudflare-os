@@ -9,6 +9,7 @@ import {
 } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { X_OAUTH_SCOPES } from "../src/x-api";
+import { isConnectedAccountUrl } from "../src/x";
 
 const BASE_URL = "https://workshop.example/gatekeeper/x";
 const CLIENT_ID = "x-client-id";
@@ -34,10 +35,12 @@ type Callback = Fetcher & {
   describeConnected(): Promise<Record<string, unknown>>;
   reconnectConnected(): Promise<{ url: string }>;
   revokeConnected(): Promise<void>;
+  validateConnectedUrl(url: string): Promise<Record<string, unknown>>;
+  configuredResourceUrl(pattern: string): Promise<string>;
 };
 
 type UserAccountRpc = {
-  getAccessToken(): Promise<string>;
+  performRead(operation: { type: "getMe" }): Promise<unknown>;
   getCredentialGeneration(): Promise<number>;
 };
 
@@ -283,6 +286,16 @@ describe("X connected account OAuth", () => {
       .toEqual(new Map());
   });
 
+  it("serves only the canonical owner-only account resource", async () => {
+    await completeFlow();
+
+    await expect(callback.validateConnectedUrl("https://x.com/XDevelopers"))
+      .resolves.toMatchObject({ title: "X Account", workspaceAccess: "owner-only" });
+    expect(isConnectedAccountUrl("https://evil.example/XDevelopers", USER)).toBe(false);
+    await expect(callback.configuredResourceUrl("https://*"))
+      .resolves.toBe("https://x.com/XDevelopers");
+  });
+
   it("preserves the resolved form language for reconnect", async () => {
     const fetchMock = oauthFetch();
     vi.stubGlobal("fetch", fetchMock);
@@ -346,17 +359,23 @@ describe("X connected account OAuth", () => {
       const credentials = state.storage.kv.get<any>("credentials");
       state.storage.kv.put("credentials", { ...credentials, accessTokenExpiresAt: Date.now() - 1 });
     });
-    const fetchMock = vi.fn(async () => oauthGrant({
-      accessToken: "rotated-access",
-      refreshToken: "rotated-refresh",
-    })) as typeof fetch;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === "https://api.x.com/2/oauth2/token") {
+        return oauthGrant({
+          accessToken: "rotated-access",
+          refreshToken: "rotated-refresh",
+        });
+      }
+      return Response.json({ data: USER });
+    }) as typeof fetch;
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(Promise.all([
-      account(initial.doId).getAccessToken(),
-      account(initial.doId).getAccessToken(),
-    ])).resolves.toEqual(["rotated-access", "rotated-access"]);
-    expect(fetchMock).toHaveBeenCalledOnce();
+      account(initial.doId).performRead({ type: "getMe" }),
+      account(initial.doId).performRead({ type: "getMe" }),
+    ])).resolves.toEqual([USER, USER]);
+    expect(fetchMock.mock.calls.filter(([input]) =>
+      String(input) === "https://api.x.com/2/oauth2/token")).toHaveLength(1);
     expect(await storageValue<any>(initial.doId, "credentials")).toMatchObject({
       accessToken: "rotated-access",
       refreshToken: "rotated-refresh",
@@ -377,11 +396,11 @@ describe("X connected account OAuth", () => {
 
     const first = await runInDurableObject(
       account(initial.doId),
-      instance => (instance as unknown as UserAccountRpc).getAccessToken(),
+      instance => (instance as unknown as UserAccountRpc).performRead({ type: "getMe" }),
     ).catch(error => error as Error);
     const second = await runInDurableObject(
       account(initial.doId),
-      instance => (instance as unknown as UserAccountRpc).getAccessToken(),
+      instance => (instance as unknown as UserAccountRpc).performRead({ type: "getMe" }),
     ).catch(error => error as Error);
     expect(first.message).toMatch(/reconnect/i);
     expect(second.message).toMatch(/reconnect/i);

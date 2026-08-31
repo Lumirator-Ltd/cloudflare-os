@@ -5,7 +5,7 @@ interface __BaseEnv_Env {
 }
 declare namespace Cloudflare {
 	interface GlobalProps {
-		mainModule: typeof import("./.wrangler/validate/src/x");
+		mainModule: typeof import("./src/x");
 		durableNamespaces: "UserAccount" | "XAccountGatekeeperImpl";
 	}
 	interface Env extends __BaseEnv_Env {}

@@ -80,6 +80,20 @@ export class TestCallbackStore extends DurableObject {
   revokeConnected(): Promise<void> {
     return this.#user().revoke();
   }
+
+  async validateConnectedUrl(url: string): Promise<Record<string, unknown>> {
+    const result = await this.#user().getGatekeeperClassFor(url);
+    return result.resource;
+  }
+
+  async configuredResourceUrl(pattern: string): Promise<string> {
+    const frame = await this.#user().startResourceConfigurator(pattern);
+    try {
+      return await (frame.ui as Fetcher<{ resourceUrl(): Promise<string> }>).resourceUrl();
+    } finally {
+      frame.ui[Symbol.dispose]();
+    }
+  }
 }
 
 export class TestConnectCallback extends WorkerEntrypoint implements GatekeeperConnectCallback {
@@ -117,5 +131,13 @@ export class TestConnectCallback extends WorkerEntrypoint implements GatekeeperC
 
   revokeConnected(): Promise<void> {
     return this.#store().revokeConnected();
+  }
+
+  validateConnectedUrl(url: string): Promise<Record<string, unknown>> {
+    return this.#store().validateConnectedUrl(url);
+  }
+
+  configuredResourceUrl(pattern: string): Promise<string> {
+    return this.#store().configuredResourceUrl(pattern);
   }
 }

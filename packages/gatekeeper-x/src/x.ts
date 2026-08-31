@@ -24,7 +24,15 @@ import {
   refreshXAccessToken,
   xPkceChallenge,
 } from "./x-api";
-import { XApi, type XUser } from "./x-api-client";
+import {
+  XApi,
+  type XPageOptions,
+  type XPost,
+  type XPostPage,
+  type XUser,
+  type XUserPage,
+} from "./x-api-client";
+import type { XAccountSession } from "./types";
 import {
   buildXConnectUrl,
   parseXCredentialForm,
@@ -56,6 +64,19 @@ type OAuthAttempt = {
   clientId: string;
   clientSecret: string;
 };
+
+export type XReadOperation =
+  | { type: "getMe" }
+  | { type: "getUser"; input: { id?: string; username?: string } }
+  | { type: "getPost"; id: string }
+  | { type: "listMyPosts"; options?: XPageOptions }
+  | { type: "listMentions"; options?: XPageOptions }
+  | { type: "listHomeTimeline"; options?: XPageOptions }
+  | { type: "searchRecent"; query: string; options?: XPageOptions }
+  | { type: "listLikedPosts"; options?: XPageOptions }
+  | { type: "listBookmarks"; options?: XPageOptions }
+  | { type: "listFollowers"; options?: XPageOptions }
+  | { type: "listFollowing"; options?: XPageOptions };
 
 type StoredCredentials = {
   clientId: string;
@@ -113,7 +134,7 @@ function connectedAccountUrl(user: XUser): string {
   return `https://x.com/${user.username}`;
 }
 
-function isConnectedAccountUrl(value: string, user: XUser): boolean {
+export function isConnectedAccountUrl(value: string, user: XUser): boolean {
   try {
     const url = new URL(value);
     return url.protocol === "https:" && url.hostname === "x.com" &&
@@ -442,8 +463,12 @@ export class UserAccount extends DurableObject<Env> {
         if (attempt.reconnecting) {
           await callback.credentialsRestored();
         } else {
-          await callback.complete(this.ctx.exports.XGatekeeperUser({
-            props: { userObjectId: this.ctx.id.toString() } satisfies XGatekeeperUserProps,
+          const exportsObject = Reflect.get(this.ctx, "exports") as object;
+          const createUser = Reflect.get(exportsObject, "XGatekeeperUser") as (
+            options: { props: XGatekeeperUserProps },
+          ) => Fetcher<GatekeeperUser>;
+          await callback.complete(createUser({
+            props: { userObjectId: this.ctx.id.toString() },
           }));
         }
       } catch (error) {
@@ -468,7 +493,7 @@ export class UserAccount extends DurableObject<Env> {
     return credentials.generation;
   }
 
-  async getAccessToken(): Promise<string> {
+  async #getAccessToken(): Promise<string> {
     const cached = this.ctx.storage.kv.get<StoredCredentials>("credentials");
     if (!cached) throw new Error("X credentials are unavailable. Reconnect the account.");
     if (cached.accessTokenExpiresAt > Date.now() + ACCESS_TOKEN_SAFETY_MS) {
@@ -512,6 +537,37 @@ export class UserAccount extends DurableObject<Env> {
         throw error;
       }
     });
+  }
+
+  async performRead(operation: XReadOperation): Promise<unknown> {
+    const accessToken = await this.#getAccessToken();
+    const credentials = this.ctx.storage.kv.get<StoredCredentials>("credentials");
+    if (!credentials) throw new Error("X credentials are unavailable. Reconnect the account.");
+    const api = new XApi({
+      accessToken,
+      userId: credentials.user.id,
+    });
+    try {
+      switch (operation.type) {
+        case "getMe": return await api.getMe();
+        case "getUser": return await api.getUser(operation.input);
+        case "getPost": return await api.getPost(operation.id);
+        case "listMyPosts": return await api.listMyPosts(operation.options);
+        case "listMentions": return await api.listMentions(operation.options);
+        case "listHomeTimeline": return await api.listHomeTimeline(operation.options);
+        case "searchRecent": return await api.searchRecent(operation.query, operation.options);
+        case "listLikedPosts": return await api.listLikedPosts(operation.options);
+        case "listBookmarks": return await api.listBookmarks(operation.options);
+        case "listFollowers": return await api.listFollowers(operation.options);
+        case "listFollowing": return await api.listFollowing(operation.options);
+      }
+    } catch (error) {
+      if (error instanceof XApiError && error.kind === "credentials-expired") {
+        await this.#noteCredentialsExpired();
+        throw new Error("X credentials have expired. Reconnect the account.", { cause: error });
+      }
+      throw error;
+    }
   }
 
   async #noteCredentialsExpired(): Promise<void> {
@@ -559,7 +615,7 @@ export class XGatekeeperUser extends WorkerEntrypoint<Env, XGatekeeperUserProps>
   }
 
   async getGatekeeperClassFor(url: string): Promise<{
-    class: DurableObjectClass<Gatekeeper<any>>;
+    class: DurableObjectClass<Gatekeeper<XAccountSession>>;
     resource: SupportedResource;
   }> {
     const user = await this.#account().getProfile();
@@ -629,9 +685,143 @@ class XAccountConfigurator extends RpcTarget {
   }
 }
 
+type XReadAccount = {
+  performRead(operation: XReadOperation): Promise<unknown>;
+};
+
+function countedTitle(count: number, singular: string, plural: string): string {
+  return `Read ${count} ${count === 1 ? singular : plural}`;
+}
+
+@validateRpc()
+export class XAccountSessionImpl extends RpcTarget implements XAccountSession {
+  constructor(
+    private readonly account: XReadAccount,
+    private readonly approvalQueue: RpcStub<ApprovalQueue>,
+  ) {
+    super();
+  }
+
+  [Symbol.dispose](): void {
+    this.approvalQueue[Symbol.dispose]();
+  }
+
+  async #read<T>(
+    operation: XReadOperation,
+    describe: (result: T) => { title: string; description: string },
+  ): Promise<T> {
+    const result = await this.account.performRead(operation) as T;
+    await this.approvalQueue.authorizeObservation(describe(result));
+    return result;
+  }
+
+  getMe(): Promise<XUser> {
+    return this.#read<XUser>({ type: "getMe" }, () => ({
+      title: "Read X account profile",
+      description: "Read the connected X account's current profile.",
+    }));
+  }
+
+  getUser(input: { id?: string; username?: string }): Promise<XUser> {
+    return this.#read<XUser>({ type: "getUser", input }, result => ({
+      title: `Read X profile @${result.username}`,
+      description: `Read public profile metadata for X user ${result.id}.`,
+    }));
+  }
+
+  getPost(id: string): Promise<XPost> {
+    return this.#read<XPost>({ type: "getPost", id }, result => ({
+      title: `Read X post ${result.id}`,
+      description: `Read post ${result.id} from X.`,
+    }));
+  }
+
+  listMyPosts(options?: XPageOptions): Promise<XPostPage> {
+    return this.#postPage({ type: "listMyPosts", options }, "X post");
+  }
+
+  listMentions(options?: XPageOptions): Promise<XPostPage> {
+    return this.#postPage({ type: "listMentions", options }, "X mention");
+  }
+
+  listHomeTimeline(options?: XPageOptions): Promise<XPostPage> {
+    return this.#postPage({ type: "listHomeTimeline", options }, "X timeline post");
+  }
+
+  searchRecent(query: string, options?: XPageOptions): Promise<XPostPage> {
+    return this.#postPage({ type: "searchRecent", query, options }, "recent X search result");
+  }
+
+  listLikedPosts(options?: XPageOptions): Promise<XPostPage> {
+    return this.#postPage({ type: "listLikedPosts", options }, "liked X post");
+  }
+
+  listBookmarks(options?: XPageOptions): Promise<XPostPage> {
+    return this.#postPage({ type: "listBookmarks", options }, "X bookmark");
+  }
+
+  listFollowers(options?: XPageOptions): Promise<XUserPage> {
+    return this.#userPage({ type: "listFollowers", options }, "X follower");
+  }
+
+  listFollowing(options?: XPageOptions): Promise<XUserPage> {
+    return this.#userPage({ type: "listFollowing", options }, "followed X account");
+  }
+
+  #postPage(operation: XReadOperation, label: string): Promise<XPostPage> {
+    return this.#read<XPostPage>(operation, result => ({
+      title: countedTitle(result.data.length, label, `${label}s`),
+      description: `Read one bounded page containing ${result.data.length} ${label}${result.data.length === 1 ? "" : "s"}.`,
+    }));
+  }
+
+  #userPage(operation: XReadOperation, label: string): Promise<XUserPage> {
+    return this.#read<XUserPage>(operation, result => ({
+      title: countedTitle(result.data.length, label, `${label}s`),
+      description: `Read one bounded page containing ${result.data.length} ${label}${result.data.length === 1 ? "" : "s"}.`,
+    }));
+  }
+
+  async createPost(_text: string): Promise<void> {
+    throw new Error("X mutations are not available yet.");
+  }
+
+  async reply(_text: string, _postId: string): Promise<void> {
+    throw new Error("X mutations are not available yet.");
+  }
+
+  async deletePost(_postId: string): Promise<void> {
+    throw new Error("X mutations are not available yet.");
+  }
+
+  async like(_postId: string): Promise<void> {
+    throw new Error("X mutations are not available yet.");
+  }
+
+  async unlike(_postId: string): Promise<void> {
+    throw new Error("X mutations are not available yet.");
+  }
+
+  async bookmark(_postId: string): Promise<void> {
+    throw new Error("X mutations are not available yet.");
+  }
+
+  async removeBookmark(_postId: string): Promise<void> {
+    throw new Error("X mutations are not available yet.");
+  }
+
+  async follow(_userId: string): Promise<void> {
+    throw new Error("X mutations are not available yet.");
+  }
+
+  async unfollow(_userId: string): Promise<void> {
+    throw new Error("X mutations are not available yet.");
+  }
+}
+
 @validateRpc()
 export class XAccountGatekeeperImpl extends DurableObject<Env, XGatekeeperProps>
-  implements Gatekeeper<any> {
+  implements Gatekeeper<XAccountSession> {
   #account(): DurableObjectStub<UserAccount> {
     return this.ctx.exports.UserAccount.get(
       this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId),
@@ -657,8 +847,8 @@ export class XAccountGatekeeperImpl extends DurableObject<Env, XGatekeeperProps>
     return [];
   }
 
-  async startSession(_approvalQueue: RpcStub<ApprovalQueue>): Promise<any> {
-    throw new Error("X account sessions are not available yet.");
+  async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<XAccountSession> {
+    return new XAccountSessionImpl(this.#account(), approvalQueue.dup());
   }
 
   async addObserver(_id: string, _user: Fetcher<GatekeeperUserVerifier>): Promise<void> {
