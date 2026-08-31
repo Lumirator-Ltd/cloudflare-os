@@ -295,4 +295,3 @@ export function refreshXAccessToken(
     refresh_token: input.refreshToken,
   }, input.clientId, input.clientSecret, options, input.refreshToken);
 }
-

@@ -288,6 +288,7 @@ type LegacyBlueprintBindingAnnotation = BlueprintBindingAnnotation & {
 };
 
 function defaultBlueprintBindingTitle(record: GatekeeperRecord, bindingName?: string): string {
+  if (record.ownerOnly) return bindingName || "Owner-only connection";
   return record.resourceTitle || bindingName || "Connection";
 }
 
@@ -5331,6 +5332,10 @@ class OverseerImpl implements AgentHooks {
         description: annotation?.description ?? "",
       };
       let suggestValue = annotation?.suggestValue ?? false;
+      if (gk.ownerOnly) {
+        base = { title: bindingName, description: "" };
+        suggestValue = false;
+      }
 
       if (spec.type === "gatekeeper") {
         bindings[bindingName] = {

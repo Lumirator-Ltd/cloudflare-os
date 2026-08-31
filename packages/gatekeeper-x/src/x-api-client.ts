@@ -232,12 +232,15 @@ function nextToken(value: unknown): string | undefined {
   return value.next_token;
 }
 
-function parsePostPage(value: JsonObject): XPostPage {
-  if (!Array.isArray(value.data)) throw invalidResponse("an invalid post page");
+function parsePostPage(value: JsonObject, limit: number): XPostPage {
+  if (!Array.isArray(value.data) || value.data.length > limit) {
+    throw invalidResponse("an invalid post page");
+  }
   const includes = value.includes;
   let users: XUser[] = [];
   if (includes !== undefined) {
-    if (!isObject(includes) || !Array.isArray(includes.users)) {
+    if (!isObject(includes) || !Array.isArray(includes.users) ||
+        includes.users.length > limit) {
       throw invalidResponse("invalid post expansions");
     }
     users = includes.users.map(parseUser);
@@ -250,8 +253,10 @@ function parsePostPage(value: JsonObject): XPostPage {
   };
 }
 
-function parseUserPage(value: JsonObject): XUserPage {
-  if (!Array.isArray(value.data)) throw invalidResponse("an invalid user page");
+function parseUserPage(value: JsonObject, limit: number): XUserPage {
+  if (!Array.isArray(value.data) || value.data.length > limit) {
+    throw invalidResponse("an invalid user page");
+  }
   const token = nextToken(value.meta);
   return {
     data: value.data.map(parseUser),
@@ -305,8 +310,10 @@ function appendUserFields(url: URL): void {
   url.searchParams.set("user.fields", USER_FIELDS);
 }
 
-function appendPage(url: URL, options: XPageOptions): void {
-  const page = pageOptions(options);
+function appendPage(
+  url: URL,
+  page: { maxResults: number; nextToken?: string },
+): void {
   url.searchParams.set("max_results", String(page.maxResults));
   if (page.nextToken) url.searchParams.set("pagination_token", page.nextToken);
 }
@@ -382,12 +389,17 @@ export class XApi {
     return parsePost(result.data);
   }
 
-  #postPage(path: string, options: XPageOptions = {}, query?: string): Promise<XPostPage> {
-    return this.#request(path, {}, url => {
+  async #postPage(
+    path: string,
+    options: XPageOptions = {},
+    query?: string,
+  ): Promise<XPostPage> {
+    const page = pageOptions(options);
+    return await this.#request(path, {}, url => {
       appendPostFields(url);
-      appendPage(url, options);
+      appendPage(url, page);
       if (query !== undefined) url.searchParams.set("query", requireSearchQuery(query));
-    }).then(parsePostPage);
+    }).then(value => parsePostPage(value, page.maxResults));
   }
 
   listMyPosts(options: XPageOptions = {}): Promise<XPostPage> {
@@ -418,11 +430,12 @@ export class XApi {
     return this.#postPage(`/2/users/${this.#actorId()}/bookmarks`, options);
   }
 
-  #userPage(path: string, options: XPageOptions = {}): Promise<XUserPage> {
-    return this.#request(path, {}, url => {
+  async #userPage(path: string, options: XPageOptions = {}): Promise<XUserPage> {
+    const page = pageOptions(options);
+    return await this.#request(path, {}, url => {
       appendUserFields(url);
-      appendPage(url, options);
-    }).then(parseUserPage);
+      appendPage(url, page);
+    }).then(value => parseUserPage(value, page.maxResults));
   }
 
   listFollowers(options: XPageOptions = {}): Promise<XUserPage> {

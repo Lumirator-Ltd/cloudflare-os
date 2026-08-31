@@ -163,6 +163,22 @@ function putOwnerOnlyGatekeeper(target: any, id = 1) {
   });
 }
 
+function putIdentityBearingAccount(target: any, id = 1) {
+  target.storage.gatekeepers.put({
+    id,
+    class: {},
+    ownerOnly: true,
+    resourceTitle: "Alice Example (@alice_secret)",
+    resourceUrl: "https://x.com/alice_secret",
+    creationSpec: {
+      type: "gatekeeper",
+      vendorId: "x",
+      resourceUrl: "https://x.com/alice_secret",
+      typeUrlPattern: "https://*",
+    },
+  });
+}
+
 describe("owner-only gatekeeper policy propagation", () => {
   it("propagates workspace access from the connected account's resolved resource", async () => {
     const account = {
@@ -334,6 +350,75 @@ describe("owner-only gatekeeper creation and sharing", () => {
     putOwnerOnlyGatekeeper(target);
 
     expect(target.getWebFetchEnv()).toMatchObject({ ai: { name: "ai" } });
+  });
+});
+
+describe("owner-only blueprint projection", () => {
+  it("exports an identity-free direct owner-only binding even when suggestions are enabled", () => {
+    const { target } = makeOverseer();
+    putIdentityBearingAccount(target);
+    target.storage.gadgets.put({
+      id: 2,
+      title: "App",
+      created: new Date(),
+      bindingName: "APP",
+      bindings: {
+        X_ACCOUNT: {
+          target: 1,
+          blueprintAnnotation: {
+            title: "Alice Example (@alice_secret)",
+            description: "Use https://x.com/alice_secret",
+            suggestValue: true,
+          },
+        },
+      },
+    });
+
+    const bindings = target.collectBindingMetadata(2);
+
+    expect(bindings).toEqual({
+      X_ACCOUNT: {
+        type: "gatekeeper",
+        title: "X_ACCOUNT",
+        description: "",
+        gatekeeperName: "x",
+        typeUrlPattern: "https://*",
+      },
+    });
+    expect(JSON.stringify(bindings)).not.toMatch(/Alice|alice_secret|x\.com/);
+  });
+
+  it("exports an identity-free synthesized spawner binding", () => {
+    const { target } = makeOverseer();
+    putIdentityBearingAccount(target);
+    target.storage.gatekeepers.put({
+      id: 3,
+      class: {},
+      resourceTitle: "Agent",
+      creationSpec: {
+        type: "agentSpawner",
+        config: { displayName: "Agent", modelId: null, env: { SOCIAL: 1 } },
+      },
+    });
+    target.storage.gadgets.put({
+      id: 2,
+      title: "App",
+      created: new Date(),
+      bindingName: "APP",
+      bindings: { AGENT: { target: 3 } },
+    });
+
+    const bindings = target.collectBindingMetadata(2);
+
+    expect(bindings.SOCIAL).toEqual({
+      type: "gatekeeper",
+      title: "SOCIAL",
+      description: "",
+      spawnerOnly: true,
+      gatekeeperName: "x",
+      typeUrlPattern: "https://*",
+    });
+    expect(JSON.stringify(bindings)).not.toMatch(/Alice|alice_secret|x\.com/);
   });
 });
 

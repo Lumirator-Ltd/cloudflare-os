@@ -179,6 +179,27 @@ describe("X action store", () => {
     expect(store.get(0)).toBeUndefined();
   });
 
+  it("bounds terminal retention without deleting active records", async () => {
+    const { kv } = storage();
+    const store = new XActionStore(kv, 3);
+    const pending = store.stage({ type: "like", postId: "1346889436626259968" }, 1);
+    store.markPending(pending);
+
+    const terminalIds: number[] = [];
+    for (let index = 0; index < 5; index++) {
+      const id = store.stage({ type: "deletePost", postId: String(100 + index) }, 1);
+      store.markPending(id);
+      await store.apply(id, async () => ({ status: "applied" }));
+      terminalIds.push(id);
+    }
+
+    expect(store.get(pending)).toMatchObject({ state: "pending" });
+    expect(store.get(terminalIds[0])).toBeUndefined();
+    expect(store.get(terminalIds[1])).toBeUndefined();
+    expect(terminalIds.slice(2).map(id => store.get(id)?.state))
+      .toEqual(["applied", "applied", "applied"]);
+  });
+
   it("never redispatches a terminal action", async () => {
     const { kv } = storage();
     const store = new XActionStore(kv);

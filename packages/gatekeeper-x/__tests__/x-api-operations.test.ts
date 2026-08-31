@@ -163,6 +163,39 @@ describe("X API reads", () => {
     await expect(operation()).rejects.toThrow(new RegExp(message, "i"));
   });
 
+  it("rejects provider pages and expansions larger than the requested bound", async () => {
+    const postOverflow = apiWith(jsonResponse({
+      data: Array.from({ length: 21 }, (_, index) => ({
+        ...POST,
+        id: String(1000000000000000000n + BigInt(index)),
+      })),
+      meta: {},
+    })).api.listMyPosts({ maxResults: 20 });
+    const expansionOverflow = apiWith(jsonResponse({
+      data: [POST],
+      includes: {
+        users: Array.from({ length: 21 }, (_, index) => ({
+          ...USER,
+          id: String(2000000000000000000n + BigInt(index)),
+          username: `user_${index}`,
+        })),
+      },
+      meta: {},
+    })).api.listMyPosts({ maxResults: 20 });
+    const userOverflow = apiWith(jsonResponse({
+      data: Array.from({ length: 11 }, (_, index) => ({
+        ...USER,
+        id: String(3000000000000000000n + BigInt(index)),
+        username: `follower_${index}`,
+      })),
+      meta: {},
+    })).api.listFollowers({ maxResults: 10 });
+
+    await expect(postOverflow).rejects.toMatchObject({ kind: "invalid-response" });
+    await expect(expansionOverflow).rejects.toMatchObject({ kind: "invalid-response" });
+    await expect(userOverflow).rejects.toMatchObject({ kind: "invalid-response" });
+  });
+
   it("rejects oversized and malformed success responses", async () => {
     const oversized = apiWith(new Response(JSON.stringify({ data: USER }), {
       headers: { "content-length": String(2 * 1024 * 1024) },

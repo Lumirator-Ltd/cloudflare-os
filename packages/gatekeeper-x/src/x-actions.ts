@@ -66,8 +66,14 @@ export async function queueXAction(
 
 export class XActionStore {
   readonly #active = new Set<number>();
+  readonly #terminalRetention: number;
 
-  constructor(private readonly kv: ActionKv) {}
+  constructor(private readonly kv: ActionKv, terminalRetention = 256) {
+    if (!Number.isSafeInteger(terminalRetention) || terminalRetention < 1) {
+      throw new TypeError("terminalRetention must be a positive integer.");
+    }
+    this.#terminalRetention = terminalRetention;
+  }
 
   get(id: number): XActionRecord | undefined {
     return this.kv.get<XActionRecord>(actionKey(id));
@@ -104,7 +110,7 @@ export class XActionStore {
     if (record.state !== "pending" && record.state !== "staged") {
       throw new Error(`X action ${id} is already ${record.state}.`);
     }
-    this.kv.put<XActionRecord>(actionKey(id), { id, state: "rejected" });
+    this.#putTerminal(id, "rejected");
   }
 
   async apply(
@@ -114,7 +120,7 @@ export class XActionStore {
     if (this.#active.has(id)) throw new Error(`X action ${id} is actively applying.`);
     const record = this.#require(id);
     if (record.state === "applying") {
-      this.kv.put<XActionRecord>(actionKey(id), { id, state: "outcome-unknown" });
+      this.#putTerminal(id, "outcome-unknown");
       throw new Error(`X action ${id} outcome is unknown and will not be retried.`);
     }
     if (record.state !== "pending") {
@@ -132,17 +138,17 @@ export class XActionStore {
           generation: applying.generation,
         });
       } catch (error) {
-        this.kv.put<XActionRecord>(actionKey(id), { id, state: "outcome-unknown" });
+        this.#putTerminal(id, "outcome-unknown");
         throw new Error(`X action ${id} outcome is unknown and will not be retried.`, {
           cause: error,
         });
       }
 
       if (result.status === "applied") {
-        this.kv.put<XActionRecord>(actionKey(id), { id, state: "applied" });
+        this.#putTerminal(id, "applied");
         return;
       }
-      this.kv.put<XActionRecord>(actionKey(id), { id, state: result.status });
+      this.#putTerminal(id, result.status);
       const message = result.status === "stale"
         ? `X action ${id} is stale because the connected Developer App changed.`
         : result.message;
@@ -150,6 +156,17 @@ export class XActionStore {
     } finally {
       this.#active.delete(id);
     }
+  }
+
+  #putTerminal(id: number, state: TerminalState): void {
+    this.kv.put<XActionRecord>(actionKey(id), { id, state });
+    const retained = (this.kv.get<number[]>("terminalActionIds") ?? [])
+      .filter(existing => existing !== id);
+    retained.push(id);
+    while (retained.length > this.#terminalRetention) {
+      this.kv.delete(actionKey(retained.shift()!));
+    }
+    this.kv.put("terminalActionIds", retained);
   }
 
   #require(id: number): XActionRecord {

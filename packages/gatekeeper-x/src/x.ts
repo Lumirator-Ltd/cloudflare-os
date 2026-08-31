@@ -101,6 +101,7 @@ const OAUTH_LIFETIME_MS = 10 * 60 * 1000;
 const ABANDONED_ACCOUNT_LIFETIME_MS = 60 * 60 * 1000;
 const ACCESS_TOKEN_SAFETY_MS = 60 * 1000;
 const MAX_AUTHORIZATION_CODE_LENGTH = 4096;
+const DEFINITE_WRITE_REJECTION_STATUSES = new Set([400, 401, 402, 403, 404, 409, 422, 429]);
 
 const ACCOUNT_RESOURCE: SupportedResource = {
   urlPattern: "https://*",
@@ -112,15 +113,21 @@ const ACCOUNT_RESOURCE: SupportedResource = {
 
 const SUPPORTED_RESOURCES = [ACCOUNT_RESOURCE];
 
-function getBaseUrl(env: Env): string {
-  const value = env.BASE_URL?.replace(/\/+$/, "");
-  if (!value) throw new Error("X gatekeeper BASE_URL is not configured.");
+export function normalizeXBaseUrl(input: string): string {
+  const value = input.replace(/\/+$/, "");
   const url = new URL(value);
-  if ((url.protocol !== "https:" && url.protocol !== "http:") ||
+  const loopback = url.hostname === "localhost" || url.hostname === "127.0.0.1" ||
+    url.hostname === "[::1]" || url.hostname === "::1";
+  if ((url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) ||
       url.username || url.password || url.search || url.hash) {
-    throw new Error("X gatekeeper BASE_URL is invalid.");
+    throw new Error("X gatekeeper BASE_URL must use HTTPS outside loopback development.");
   }
   return value;
+}
+
+function getBaseUrl(env: Env): string {
+  if (!env.BASE_URL) throw new Error("X gatekeeper BASE_URL is not configured.");
+  return normalizeXBaseUrl(env.BASE_URL);
 }
 
 function getBasePath(env: Env): string {
@@ -164,10 +171,44 @@ function safeErrorResponse(message: string, status = 400): Response {
   });
 }
 
-function completedResponse(): Response {
-  const body = "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Connected</title></head>" +
-    "<body><p>Connection complete. You can close this tab.</p></body></html>";
+const OAUTH_PAGE_COPY = {
+  en: {
+    completedTitle: "Connected",
+    completed: "Connection complete. You can close this tab.",
+    deniedTitle: "Authorization denied",
+    denied: "X authorization was denied. Start the connection again from Cloudflare OS.",
+    failedTitle: "Connection failed",
+    failed: "Could not finish connecting X. Start the connection again from Cloudflare OS.",
+  },
+  ja: {
+    completedTitle: "接続完了",
+    completed: "接続が完了しました。このタブを閉じることができます。",
+    deniedTitle: "認証が拒否されました",
+    denied: "X の認証が拒否されました。Cloudflare OS から接続をやり直してください。",
+    failedTitle: "接続できませんでした",
+    failed: "X への接続を完了できませんでした。Cloudflare OS から接続をやり直してください。",
+  },
+} satisfies Record<XConnectLanguage, Record<string, string>>;
+
+function oauthPage(
+  language: XConnectLanguage,
+  kind: "completed" | "denied" | "failed",
+): Response {
+  const copy = OAUTH_PAGE_COPY[language];
+  const title = kind === "completed"
+    ? copy.completedTitle
+    : kind === "denied"
+    ? copy.deniedTitle
+    : copy.failedTitle;
+  const message = kind === "completed"
+    ? copy.completed
+    : kind === "denied"
+    ? copy.denied
+    : copy.failed;
+  const body = `<!DOCTYPE html><html lang="${language}"><head><meta charset="utf-8">` +
+    `<title>${title}</title></head><body><p>${message}</p></body></html>`;
   return new Response(body, {
+    status: kind === "completed" ? 200 : 400,
     headers: {
       "Cache-Control": "no-store",
       "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'; base-uri 'none'",
@@ -248,22 +289,23 @@ export default {
         return safeErrorResponse("This authorization response is invalid or expired.");
       }
 
+      const flowLanguage = await account.readOAuthLanguage(match[2]) ?? "en";
       if (url.searchParams.has("error")) {
         await account.rejectOAuth(match[2]);
-        return safeErrorResponse("X authorization was denied. Start the connection again.");
+        return oauthPage(flowLanguage, "denied");
       }
       const code = url.searchParams.get("code");
       if (!code || code.length > MAX_AUTHORIZATION_CODE_LENGTH) {
         await account.rejectOAuth(match[2]);
-        return safeErrorResponse("This authorization response is invalid or expired.");
+        return oauthPage(flowLanguage, "failed");
       }
       try {
         if (!await account.acceptAuthCode(code, match[2])) {
-          return safeErrorResponse("This authorization response is invalid or expired.");
+          return oauthPage(flowLanguage, "failed");
         }
-        return completedResponse();
+        return oauthPage(flowLanguage, "completed");
       } catch {
-        return safeErrorResponse("Could not finish connecting X. Start the connection again.");
+        return oauthPage(flowLanguage, "failed");
       }
     }
 
@@ -363,12 +405,14 @@ export class UserAccount extends DurableObject<Env> {
   async prepareReconnect(nonce: string): Promise<XConnectLanguage> {
     const credentials = this.ctx.storage.kv.get<StoredCredentials>("credentials");
     if (!credentials) throw new Error("X credentials are unavailable. Reconnect the account.");
+    const expiresAt = Date.now() + CONNECTION_LIFETIME_MS;
     this.ctx.storage.kv.put<ConnectionAttempt>("connectionAttempt", {
       nonce,
-      expiresAt: Date.now() + CONNECTION_LIFETIME_MS,
+      expiresAt,
       reconnecting: true,
       language: credentials.language,
     });
+    await this.ctx.storage.setAlarm(expiresAt);
     return credentials.language;
   }
 
@@ -399,6 +443,7 @@ export class UserAccount extends DurableObject<Env> {
     };
     this.ctx.storage.kv.put("oauthAttempt", attempt);
     try {
+      await this.ctx.storage.setAlarm(attempt.expiresAt);
       const codeChallenge = await xPkceChallenge(verifier);
       const current = this.ctx.storage.kv.get<OAuthAttempt>("oauthAttempt");
       if (!current || !constantTimeEqual(current.nonce, nonce)) return null;
@@ -417,20 +462,24 @@ export class UserAccount extends DurableObject<Env> {
     }
   }
 
+  readOAuthLanguage(nonce: string): XConnectLanguage | null {
+    const attempt = this.ctx.storage.kv.get<OAuthAttempt>("oauthAttempt");
+    return attempt && constantTimeEqual(attempt.nonce, nonce) ? attempt.language : null;
+  }
+
   rejectOAuth(nonce: string): boolean {
     const attempt = this.ctx.storage.kv.get<OAuthAttempt>("oauthAttempt");
-    if (!attempt || Date.now() >= attempt.expiresAt ||
-        !constantTimeEqual(attempt.nonce, nonce)) return false;
+    if (!attempt || !constantTimeEqual(attempt.nonce, nonce)) return false;
     this.ctx.storage.kv.delete("oauthAttempt");
-    return true;
+    return Date.now() < attempt.expiresAt;
   }
 
   async acceptAuthCode(code: string, nonce: string): Promise<boolean> {
     return await this.#serialized(async () => {
       const attempt = this.ctx.storage.kv.get<OAuthAttempt>("oauthAttempt");
-      if (!attempt || Date.now() >= attempt.expiresAt ||
-          !constantTimeEqual(attempt.nonce, nonce)) return false;
+      if (!attempt || !constantTimeEqual(attempt.nonce, nonce)) return false;
       this.ctx.storage.kv.delete("oauthAttempt");
+      if (Date.now() >= attempt.expiresAt) return false;
 
       const previous = this.ctx.storage.kv.get<StoredCredentials>("credentials");
       if ((previous?.generation ?? 0) !== attempt.generation) {
@@ -483,7 +532,7 @@ export class UserAccount extends DurableObject<Env> {
         else this.ctx.storage.kv.delete("credentials");
         throw error;
       }
-      await this.ctx.storage.deleteAlarm();
+      await this.alarm();
       return true;
     });
   }
@@ -583,7 +632,7 @@ export class UserAccount extends DurableObject<Env> {
       if (error instanceof XApiError && error.kind === "credentials-expired") {
         await this.#noteCredentialsExpired();
       }
-      if (error instanceof XApiError && error.status >= 400 && error.status < 500) {
+      if (error instanceof XApiError && DEFINITE_WRITE_REJECTION_STATUSES.has(error.status)) {
         return {
           status: "failed",
           message: "X rejected the approved action. Review the account, permissions, and credits before trying a new action.",
@@ -642,8 +691,22 @@ export class UserAccount extends DurableObject<Env> {
   }
 
   async alarm(): Promise<void> {
-    if (!this.ctx.storage.kv.get<StoredCredentials>("credentials")) {
+    const now = Date.now();
+    const connection = this.ctx.storage.kv.get<ConnectionAttempt>("connectionAttempt");
+    const oauth = this.ctx.storage.kv.get<OAuthAttempt>("oauthAttempt");
+    if (connection && now >= connection.expiresAt) this.ctx.storage.kv.delete("connectionAttempt");
+    if (oauth && now >= oauth.expiresAt) this.ctx.storage.kv.delete("oauthAttempt");
+
+    const remaining = [
+      this.ctx.storage.kv.get<ConnectionAttempt>("connectionAttempt")?.expiresAt,
+      this.ctx.storage.kv.get<OAuthAttempt>("oauthAttempt")?.expiresAt,
+    ].filter((value): value is number => value !== undefined);
+    if (remaining.length > 0) {
+      await this.ctx.storage.setAlarm(Math.min(...remaining));
+    } else if (!this.ctx.storage.kv.get<StoredCredentials>("credentials")) {
       await this.ctx.storage.deleteAll();
+    } else {
+      await this.ctx.storage.deleteAlarm();
     }
   }
 }

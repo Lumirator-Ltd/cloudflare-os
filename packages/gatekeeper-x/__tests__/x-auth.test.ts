@@ -9,7 +9,7 @@ import {
 } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { X_OAUTH_SCOPES } from "../src/x-api";
-import { isConnectedAccountUrl } from "../src/x";
+import { isConnectedAccountUrl, normalizeXBaseUrl } from "../src/x";
 import type { XWriteOperation, XWriteResult } from "../src/x-actions";
 
 const BASE_URL = "https://workshop.example/gatekeeper/x";
@@ -172,6 +172,17 @@ afterEach(async () => {
 });
 
 describe("X connected account OAuth", () => {
+  it("requires HTTPS outside explicit loopback development hosts", () => {
+    expect(normalizeXBaseUrl("https://workshop.example/gatekeeper/x/"))
+      .toBe("https://workshop.example/gatekeeper/x");
+    expect(normalizeXBaseUrl("http://localhost:8787/gatekeeper/x"))
+      .toBe("http://localhost:8787/gatekeeper/x");
+    expect(normalizeXBaseUrl("http://127.0.0.1:8787/gatekeeper/x"))
+      .toBe("http://127.0.0.1:8787/gatekeeper/x");
+    expect(() => normalizeXBaseUrl("http://public.example/gatekeeper/x"))
+      .toThrow(/https/i);
+  });
+
   it("reports one owner-only whole-account resource and no deployment credential setup", async () => {
     await expect(vendor().describe()).resolves.toMatchObject({
       displayName: "X",
@@ -213,7 +224,7 @@ describe("X connected account OAuth", () => {
       SELF.fetch(credentialsRequest(start.url)),
       SELF.fetch(credentialsRequest(start.url)),
     ]);
-    const responses = [first, second].sort((a, b) => a.status - b.status);
+    const responses = [first, second].toSorted((a, b) => a.status - b.status);
 
     expect(responses.map(response => response.status)).toEqual([302, 400]);
     const location = responses[0].headers.get("location");
@@ -225,6 +236,28 @@ describe("X connected account OAuth", () => {
     expect(authorization.searchParams.get("code_challenge")).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(authorization.searchParams.get("scope")).toBe(X_OAUTH_SCOPES.join(" "));
     expect(location).not.toContain(CLIENT_SECRET);
+  });
+
+  it("localizes Japanese OAuth completion and denial pages", async () => {
+    vi.stubGlobal("fetch", oauthFetch());
+    const success = await beginFlow({ language: "ja" });
+    const completed = await SELF.fetch(
+      `${BASE_URL}/oauth?code=authorization-code&state=${encodeURIComponent(success.state)}`,
+    );
+    const completedHtml = await completed.text();
+    expect(completedHtml).toContain('<html lang="ja">');
+    expect(completedHtml).toContain("接続が完了しました");
+    expect(completedHtml).not.toContain("Connection complete");
+
+    const denied = await beginFlow({ language: "ja" });
+    const deniedResponse = await SELF.fetch(
+      `${BASE_URL}/oauth?error=access_denied&state=${encodeURIComponent(denied.state)}`,
+    );
+    const deniedHtml = await deniedResponse.text();
+    expect(deniedResponse.status).toBe(400);
+    expect(deniedHtml).toContain('<html lang="ja">');
+    expect(deniedHtml).toContain("X の認証が拒否されました");
+    expect(deniedHtml).not.toContain("X authorization was denied");
   });
 
   it("stores identity before completing, caches describe, and rejects callback replay", async () => {
@@ -311,6 +344,31 @@ describe("X connected account OAuth", () => {
     expect(reconnect.url).toContain("language=ja");
     expect(await SELF.fetch(reconnect.url).then(response => response.text()))
       .toContain("X Developer App を接続");
+  });
+
+  it("scrubs expired reconnect candidates without deleting active credentials", async () => {
+    const initial = await completeFlow();
+    const before = await storageValue<any>(initial.doId, "credentials");
+    const reconnect = await beginFlow({ reconnect: true });
+    await runInDurableObject(account(initial.doId), (_instance, state) => {
+      const attempt = state.storage.kv.get<Record<string, unknown>>("oauthAttempt")!;
+      state.storage.kv.put("oauthAttempt", { ...attempt, expiresAt: Date.now() - 1 });
+    });
+
+    expect((await SELF.fetch(
+      `${BASE_URL}/oauth?code=late-code&state=${encodeURIComponent(reconnect.state)}`,
+    )).status).toBe(400);
+    expect(await storageValue(initial.doId, "oauthAttempt")).toBeUndefined();
+    expect(await storageValue(initial.doId, "credentials")).toEqual(before);
+
+    const abandoned = await beginFlow({ reconnect: true });
+    await runInDurableObject(account(initial.doId), (_instance, state) => {
+      const attempt = state.storage.kv.get<Record<string, unknown>>("oauthAttempt")!;
+      state.storage.kv.put("oauthAttempt", { ...attempt, expiresAt: Date.now() - 1 });
+    });
+    await runDurableObjectAlarm(account(abandoned.doId));
+    expect(await storageValue(initial.doId, "oauthAttempt")).toBeUndefined();
+    expect(await storageValue(initial.doId, "credentials")).toEqual(before);
   });
 
   it("reconnects only to the same immutable X identity and advances generation", async () => {
@@ -465,6 +523,7 @@ describe("X user-funded write dispatch", () => {
   it.each([
     [400, { title: "Invalid Request" }, "failed"],
     [401, { title: "Unauthorized" }, "failed"],
+    [408, { title: "Request Timeout" }, "outcome-unknown"],
     [500, { title: "Provider unavailable" }, "outcome-unknown"],
     [200, { data: {} }, "outcome-unknown"],
   ])("classifies dispatched HTTP %s as %s without retry", async (status, body, expected) => {
