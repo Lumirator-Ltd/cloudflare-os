@@ -977,7 +977,7 @@
     },
     "gatekeeper-x": {
       "bindings": [],
-      "compatibilityDate": "2026-08-28",
+      "compatibilityDate": "2026-08-08",
       "compatibilityFlags": [
         "allow_irrevocable_stub_storage"
       ],
