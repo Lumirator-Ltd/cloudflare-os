@@ -1,4 +1,4 @@
-import { Autocomplete, Field, h, Section, type ConfiguratorUISpec } from "@gadgets/configurator-ui";
+import { localize, Autocomplete, Field, h, Section, type ConfiguratorUISpec } from "@gadgets/configurator-ui";
 import type {
   ConfluenceSpaceConfiguratorRpc,
   ConfluenceSpaceConfiguratorValues,
@@ -19,13 +19,13 @@ export default {
     return values.spaceUrl ?? "";
   },
 
-  render({ values, setValues, ui }) {
+  render({ values, setValues, ui, language }) {
     return <Section>
-      <Field label="Space" description="Search the spaces shared with this connection.">
+      <Field label={localize(language, { en: "Space", ja: "スペース" })} description={localize(language, { en: "Search the spaces shared with this connection.", ja: "この接続と共有されているスペースを検索します。" })}>
         <Autocomplete
           name="spaceUrl"
           value={values.spaceUrl}
-          placeholder="Search spaces..."
+          placeholder={localize(language, { en: "Search spaces...", ja: "スペースを検索..." })}
           loadOptions={query => ui.listSpaces(query)}
           onChange={spaceUrl => setValues({ spaceUrl })}
         />

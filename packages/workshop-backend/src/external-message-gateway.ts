@@ -6,10 +6,13 @@ import {
   type SubmitExternalMessageInput,
   type SubmitExternalMessageResult,
 } from "@gadgets/workshop-shared/external-message-gateway";
+import { assertAdminBootstrap } from "./admin-bootstrap-gate.js";
 
 @validateRpc()
 export class ExternalMessageGateway extends WorkerEntrypoint<Cloudflare.Env, ExternalMessageGatewayProps> implements ExternalMessageGatewayContract {
   async submitExternalMessage(input: SubmitExternalMessageInput): Promise<SubmitExternalMessageResult> {
+    await assertAdminBootstrap(this.env, this.ctx);
+
     let { source, identityMode } = this.ctx.props;
     if (!source) throw new Error("ExternalMessageGateway source prop is required.");
     if (identityMode !== "trustedEmail" && identityMode !== "linkedExternalSubject") {

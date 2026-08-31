@@ -1,0 +1,360 @@
+// @vitest-environment jsdom
+/* eslint-disable react/react-in-jsx-scope */
+
+import { act, type ComponentProps } from 'react'
+import { createRoot, type Root } from 'react-dom/client'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { RpcStub } from 'capnweb'
+import type {
+  AdminApi,
+  AdminConnectorConfiguration,
+  AuthenticatedApi,
+} from '@gadgets/workshop-shared/api'
+import { useAuthenticatedApi } from './AuthContext'
+import i18n from './i18n/config'
+
+(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
+
+const addToast = vi.fn<(toast: { title: string; variant: string }) => void>()
+
+vi.mock('@cloudflare/kumo', () => ({
+  Button: ({ children, loading: _loading, ...props }: ComponentProps<'button'> & { loading?: boolean }) => (
+    <button type="button" {...props}>{children}</button>
+  ),
+  Loader: () => <span>Loading</span>,
+  useKumoToastManager: () => ({ add: addToast }),
+}))
+vi.mock('./AuthContext', () => ({ useAuthenticatedApi: vi.fn<typeof useAuthenticatedApi>() }))
+vi.mock('./useDocumentTitle', () => ({ useDocumentTitle: () => {} }))
+
+import AdminConnectorsPage from './AdminConnectorsPage'
+
+const CONNECTORS: AdminConnectorConfiguration[] = [
+  {
+    id: 'github',
+    displayName: 'GitHub',
+    logo: { url: 'https://example.com/github.svg' },
+    configured: true,
+    callbackUrl: 'https://workshop.example/gatekeeper/github/callback',
+    setupGuideUrl: 'https://github.com/Lumirator-Ltd/cloudflare-os/tree/main/packages/gatekeeper-github#readme',
+    inputs: [
+      { name: 'CLIENT_ID', label: 'Client ID', secret: true },
+      { name: 'CLIENT_SECRET', label: 'Client Secret', secret: true },
+    ],
+    writeAvailable: true,
+  },
+  {
+    id: 'notion',
+    displayName: 'Notion',
+    configured: false,
+    callbackUrl: 'https://workshop.example/gatekeeper/notion/callback',
+    setupGuideUrl: 'https://github.com/Lumirator-Ltd/cloudflare-os/tree/main/packages/gatekeeper-notion#readme',
+    inputs: [
+      { name: 'CLIENT_ID', label: 'Client ID', secret: true },
+      { name: 'CLIENT_SECRET', label: 'Client Secret', secret: true },
+    ],
+    writeAvailable: true,
+  },
+  {
+    id: 'mcp_portal',
+    displayName: 'Cloudflare MCP Server Portal',
+    configured: false,
+    setupGuideUrl: 'https://developers.cloudflare.com/cloudflare-one/access-controls/ai-controls/mcp-portals/',
+    inputs: [
+      { name: 'MCP_PORTAL_URL', label: 'Portal URL', secret: false },
+    ],
+    writeAvailable: true,
+  },
+]
+
+function auth(admin: Partial<AdminApi> | null, isAdmin = true) {
+  const authenticatedApi = {
+    getAdminApi: vi.fn<() => Promise<RpcStub<AdminApi> | null>>(
+      async () => admin as RpcStub<AdminApi> | null,
+    ),
+  } as unknown as RpcStub<AuthenticatedApi>
+  vi.mocked(useAuthenticatedApi).mockReturnValue({
+    authenticatedApi,
+    isAdmin,
+  } as ReturnType<typeof useAuthenticatedApi>)
+  return authenticatedApi
+}
+
+function setInput(input: HTMLInputElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
+  setter?.call(input, value)
+  input.dispatchEvent(new Event('input', { bubbles: true }))
+}
+
+describe('/admin/connectors', () => {
+  let root: Root | undefined
+  let container: HTMLDivElement | undefined
+
+  afterEach(async () => {
+    act(() => root?.unmount())
+    container?.remove()
+    root = undefined
+    container = undefined
+    addToast.mockReset()
+    await i18n.changeLanguage('en')
+    vi.restoreAllMocks()
+  })
+
+  async function render() {
+    container = document.createElement('div')
+    document.body.append(container)
+    root = createRoot(container)
+    await act(async () => {
+      root!.render(<AdminConnectorsPage />)
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    return container
+  }
+
+  it('shows unauthorized without requesting an admin capability for non-admins', async () => {
+    const authenticatedApi = auth(null, false)
+    const rendered = await render()
+
+    expect(rendered.textContent).toContain("You don't have access to this page.")
+    expect(authenticatedApi.getAdminApi).not.toHaveBeenCalled()
+  })
+
+  it('loads the admin capability when admin status resolves after the initial render', async () => {
+    const listConnectorConfigurations =
+      vi.fn<() => Promise<AdminConnectorConfiguration[]>>(async () => [CONNECTORS[0]])
+    const admin = { listConnectorConfigurations }
+    auth(admin, false)
+    const rendered = await render()
+    expect(rendered.textContent).toContain("You don't have access to this page.")
+
+    auth(admin, true)
+    await act(async () => {
+      root!.render(<AdminConnectorsPage />)
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(rendered.textContent).toContain('GitHub')
+    expect(listConnectorConfigurations).toHaveBeenCalledOnce()
+  })
+
+  it('lists setup states, callback URLs, and empty write-only credential fields', async () => {
+    auth({
+      listConnectorConfigurations:
+        vi.fn<() => Promise<AdminConnectorConfiguration[]>>(async () => CONNECTORS),
+    })
+    const rendered = await render()
+
+    expect(rendered.textContent).toContain('GitHub')
+    expect(rendered.textContent).toContain('Configured')
+    expect(rendered.textContent).toContain('Notion')
+    expect(rendered.textContent).toContain('Needs setup')
+    expect(rendered.textContent).toContain(CONNECTORS[0].callbackUrl)
+    expect(rendered.textContent).toContain(CONNECTORS[1].callbackUrl)
+    expect(rendered.textContent).toContain('Follow the provider setup guide, register the callback URL above, then enter the credentials.')
+    const guides = [...rendered.querySelectorAll('a')].filter((link) => link.textContent === 'View setup guide')
+    expect(guides).toHaveLength(CONNECTORS.length)
+    expect(guides[0].getAttribute('href')).toBe(CONNECTORS[0].setupGuideUrl)
+    expect(guides.every((link) => link.getAttribute('target') === '_blank')).toBe(true)
+    expect(guides.every((link) => link.getAttribute('rel') === 'noreferrer')).toBe(true)
+    expect(rendered.querySelector('img')?.getAttribute('src')).toBe(CONNECTORS[0].logo?.url)
+
+    const inputs = [...rendered.querySelectorAll('input')] as HTMLInputElement[]
+    expect(inputs).toHaveLength(5)
+    for (const input of inputs.slice(0, 4)) {
+      expect(input.type).toBe('password')
+      expect(input.autocomplete).toBe('off')
+      expect(input.getAttribute('data-1p-ignore')).toBe('true')
+      expect(input.getAttribute('data-lpignore')).toBe('true')
+      expect(input.getAttribute('data-form-type')).toBe('other')
+      expect(input.value).toBe('')
+    }
+    expect(inputs[4].type).toBe('url')
+    expect(inputs[4].getAttribute('data-1p-ignore')).toBeNull()
+    expect(rendered.textContent).not.toContain('existing-client-id')
+    expect(rendered.textContent).toContain('Update configuration')
+    expect(rendered.textContent).toContain('Save configuration')
+  })
+
+  it('renders discovery-only MCP setup without OAuth callback instructions', async () => {
+    auth({
+      listConnectorConfigurations:
+        vi.fn<() => Promise<AdminConnectorConfiguration[]>>(async () => [CONNECTORS[2]]),
+    })
+    const rendered = await render()
+
+    expect(rendered.textContent).toContain('Connector configuration')
+    expect(rendered.textContent).toContain('Cloudflare MCP Server Portal')
+    expect(rendered.textContent).not.toContain('Callback URL')
+    expect(rendered.textContent).not.toContain('register the callback URL')
+    const guide = [...rendered.querySelectorAll('a')].find(
+      (link) => link.textContent === 'View setup guide',
+    )
+    expect(guide?.getAttribute('href')).toBe(CONNECTORS[2].setupGuideUrl)
+    const input = rendered.querySelector('input[name="mcp_portal-MCP_PORTAL_URL"]') as HTMLInputElement
+    expect(input.type).toBe('url')
+    expect(input.autocomplete).toBe('url')
+  })
+
+  it('reloads authoritative connector status after saving configuration', async () => {
+    const configureConnector = vi.fn<() => Promise<void>>(async () => {})
+    const listConnectorConfigurations = vi
+      .fn<() => Promise<AdminConnectorConfiguration[]>>()
+      .mockResolvedValueOnce([CONNECTORS[1]])
+      .mockResolvedValueOnce([{ ...CONNECTORS[1], configured: true }])
+    auth({ listConnectorConfigurations, configureConnector })
+    const rendered = await render()
+
+    const idInput = rendered.querySelector('input[name="notion-CLIENT_ID"]') as HTMLInputElement
+    const secretInput = rendered.querySelector('input[name="notion-CLIENT_SECRET"]') as HTMLInputElement
+    await act(async () => {
+      setInput(idInput, 'new-client-id')
+      setInput(secretInput, 'new-client-secret')
+    })
+    const save = [...rendered.querySelectorAll('button')].find((button) =>
+      button.textContent?.includes('Save configuration')) as HTMLButtonElement
+    await act(async () => {
+      save.click()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(configureConnector).toHaveBeenCalledWith('notion', {
+      CLIENT_ID: 'new-client-id',
+      CLIENT_SECRET: 'new-client-secret',
+    })
+    expect(idInput.value).toBe('')
+    expect(secretInput.value).toBe('')
+    expect(listConnectorConfigurations).toHaveBeenCalledTimes(2)
+    expect(rendered.textContent).toContain('Configured')
+    expect(rendered.textContent).toContain('Update configuration')
+    expect(addToast).toHaveBeenCalledWith({
+      title: 'Notion configuration saved. It may take a moment to become available.',
+      variant: 'success',
+    })
+  })
+
+  it('keeps a successful save successful when readiness cannot be reloaded', async () => {
+    const configureConnector = vi.fn<() => Promise<void>>(async () => {})
+    const listConnectorConfigurations = vi
+      .fn<() => Promise<AdminConnectorConfiguration[]>>()
+      .mockResolvedValueOnce([CONNECTORS[1]])
+      .mockRejectedValueOnce(new Error('readiness unavailable'))
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    auth({ listConnectorConfigurations, configureConnector })
+    const rendered = await render()
+
+    const idInput = rendered.querySelector('input[name="notion-CLIENT_ID"]') as HTMLInputElement
+    const secretInput = rendered.querySelector('input[name="notion-CLIENT_SECRET"]') as HTMLInputElement
+    await act(async () => {
+      setInput(idInput, 'new-client-id')
+      setInput(secretInput, 'new-client-secret')
+    })
+    const save = [...rendered.querySelectorAll('button')].find((button) =>
+      button.textContent?.includes('Save configuration')) as HTMLButtonElement
+    await act(async () => {
+      save.click()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(configureConnector).toHaveBeenCalledOnce()
+    expect(idInput.value).toBe('')
+    expect(secretInput.value).toBe('')
+    expect(rendered.textContent).toContain('Needs setup')
+    expect(addToast).toHaveBeenCalledWith({
+      title: 'Notion configuration saved, but status could not be refreshed. Reload this page to check availability.',
+      variant: 'success',
+    })
+    expect(addToast).not.toHaveBeenCalledWith(expect.objectContaining({ variant: 'error' }))
+    expect(consoleError).toHaveBeenCalledWith(
+      'Failed to reload connector configurations after saving:',
+      expect.any(Error),
+    )
+  })
+
+  it('submits the MCP portal URL and reloads readiness', async () => {
+    const configureConnector = vi.fn<() => Promise<void>>(async () => {})
+    const listConnectorConfigurations = vi
+      .fn<() => Promise<AdminConnectorConfiguration[]>>()
+      .mockResolvedValueOnce([CONNECTORS[2]])
+      .mockResolvedValueOnce([{ ...CONNECTORS[2], configured: true }])
+    auth({ listConnectorConfigurations, configureConnector })
+    const rendered = await render()
+
+    const urlInput = rendered.querySelector(
+      'input[name="mcp_portal-MCP_PORTAL_URL"]',
+    ) as HTMLInputElement
+    await act(async () => setInput(urlInput, 'https://portal.example.com/mcp'))
+    const save = [...rendered.querySelectorAll('button')].find((button) =>
+      button.textContent?.includes('Save configuration')) as HTMLButtonElement
+    await act(async () => {
+      save.click()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(configureConnector).toHaveBeenCalledWith('mcp_portal', {
+      MCP_PORTAL_URL: 'https://portal.example.com/mcp',
+    })
+    expect(listConnectorConfigurations).toHaveBeenCalledTimes(2)
+    expect(rendered.textContent).toContain('Configured')
+    expect(addToast).toHaveBeenCalledWith({
+      title: 'Cloudflare MCP Server Portal configuration saved. It may take a moment to become available.',
+      variant: 'success',
+    })
+  })
+
+  it('renders read-only fields and explanation when credential writes are unavailable', async () => {
+    const readOnly = CONNECTORS.map((connector) => ({ ...connector, writeAvailable: false }))
+    auth({
+      listConnectorConfigurations:
+        vi.fn<() => Promise<AdminConnectorConfiguration[]>>(async () => readOnly),
+    })
+    const rendered = await render()
+
+    expect(rendered.textContent).toContain('Connector configuration management is not enabled')
+    expect([...rendered.querySelectorAll('input')].every((input) => input.disabled)).toBe(true)
+    expect(rendered.textContent).not.toContain('Save configuration')
+    expect(rendered.textContent).not.toContain('Update configuration')
+  })
+
+  it('renders connector setup guidance and state in Japanese', async () => {
+    await i18n.changeLanguage('ja')
+    auth({
+      listConnectorConfigurations:
+        vi.fn<() => Promise<AdminConnectorConfiguration[]>>(async () => CONNECTORS),
+    })
+    const rendered = await render()
+
+    expect(rendered.textContent).toContain('コネクター設定')
+    expect(rendered.textContent).toContain('設定済み')
+    expect(rendered.textContent).toContain('設定が必要')
+    expect(rendered.textContent).toContain('コールバック URL')
+    expect(rendered.textContent).toContain('セットアップガイドを見る')
+    expect(rendered.textContent).toContain('設定を保存')
+  })
+
+  it('shows empty and failed list states', async () => {
+    auth({
+      listConnectorConfigurations:
+        vi.fn<() => Promise<AdminConnectorConfiguration[]>>(async () => []),
+    })
+    let rendered = await render()
+    expect(rendered.textContent).toContain('No credentialed connectors are installed')
+
+    act(() => root?.unmount())
+    container?.remove()
+    root = undefined
+    container = undefined
+    auth({
+      listConnectorConfigurations:
+        vi.fn<() => Promise<AdminConnectorConfiguration[]>>(async () => {
+          throw new Error('failed')
+        }),
+    })
+    rendered = await render()
+    expect(rendered.textContent).toContain('Something went wrong loading connector configurations.')
+  })
+})

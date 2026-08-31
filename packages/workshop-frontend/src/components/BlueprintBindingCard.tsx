@@ -1,8 +1,11 @@
 import { Checkbox } from '@cloudflare/kumo'
+import type { TFunction } from 'i18next'
+import { useTranslation } from 'react-i18next'
 import type { RpcStub } from 'capnweb'
 import { GatekeeperIcon } from './GatekeeperIcon'
 import { WorkshopInput, WorkshopInputArea } from './WorkshopControls'
 import type { BlueprintBindingAnnotation, GadgetClient, GatekeeperCreationSpec } from '@gadgets/workshop-shared/api'
+import i18n from '../i18n/config'
 
 export type BindingCardData = {
   bindingName: string
@@ -12,18 +15,22 @@ export type BindingCardData = {
   annotation: BlueprintBindingAnnotation
 }
 
-export function suggestValueLabel(spec: GatekeeperCreationSpec, title?: string): string {
+export function suggestValueLabel(
+  spec: GatekeeperCreationSpec,
+  title?: string,
+  t: TFunction = i18n.t,
+): string {
   const displayTitle = title?.trim()
+  if (displayTitle) return t('workspace.connections.blueprint.suggestNamed', { title: displayTitle })
   switch (spec.type) {
     case 'gatekeeper':
-      return displayTitle ? `Suggest "${displayTitle}" by default` : 'Suggest this resource by default'
+      return t('workspace.connections.blueprint.suggestResource')
     case 'aiModel':
-      return displayTitle ? `Suggest "${displayTitle}" by default` : 'Suggest this model by default'
+      return t('workspace.connections.blueprint.suggestModel')
     case 'agentSpawner':
-      return displayTitle ? `Suggest "${displayTitle}" by default` : 'Suggest this agent setup by default'
+      return t('workspace.connections.blueprint.suggestAgent')
     case 'ambient':
-      // Ambient resources are auto-provided and excluded from blueprints, so this never renders.
-      return 'Suggest this by default'
+      return t('workspace.connections.blueprint.suggestAmbient')
   }
 }
 
@@ -39,6 +46,7 @@ export function BlueprintBindingCard({
   /** When true, render without the outer card chrome (border, background, divider). */
   flat?: boolean
 }) {
+  const { t } = useTranslation()
   const { bindingName, resourceTitle, vendorId, creationSpec, annotation } = data
   const titleId = `blueprint-binding-title-${bindingName}`
   const descriptionId = `blueprint-binding-desc-${bindingName}`
@@ -60,17 +68,17 @@ export function BlueprintBindingCard({
       <div className={headerClass}>
         <GatekeeperIcon vendorId={vendorId} fallbackText={resourceTitle || bindingName} />
         <div className="min-w-0 flex-1">
-          <label htmlFor={titleId} className="sr-only">Connection name</label>
+          <label htmlFor={titleId} className="sr-only">{t('workspace.connections.blueprint.connectionName')}</label>
           <WorkshopInput
             id={titleId}
-            aria-label={`Name for ${bindingName}`}
+            aria-label={t('workspace.connections.blueprint.nameFor', { binding: bindingName })}
             value={annotation.title}
             onChange={(e) => onChange({ ...annotation, title: e.target.value })}
-            placeholder="Connection name"
+            placeholder={t('workspace.connections.blueprint.connectionName')}
             className="!h-8 w-full bg-kumo-base text-[13px] leading-5 font-medium tracking-[-0.25px]"
           />
           <p className="mt-1 text-[11px] leading-4 tracking-[-0.1px] text-kumo-inactive">
-            Referenced in code as: <span className="font-mono text-kumo-subtle">{bindingName}</span>
+            {t('workspace.connections.blueprint.referencedAs', { name: bindingName })}
           </p>
         </div>
       </div>
@@ -78,10 +86,10 @@ export function BlueprintBindingCard({
       <div className={descriptionWrapperClass}>
         <WorkshopInputArea
           id={descriptionId}
-          aria-label={`Help text for ${displayTitle}`}
+          aria-label={t('workspace.connections.blueprint.helpFor', { title: displayTitle })}
           value={annotation.description}
           onChange={(e) => onChange({ ...annotation, description: e.target.value })}
-          placeholder="What should people connect here?"
+          placeholder={t('workspace.connections.blueprint.helpPlaceholder')}
           rows={2}
           autoFocus={autoFocusDescription}
           className="w-full resize-none"
@@ -90,7 +98,7 @@ export function BlueprintBindingCard({
 
       <div className={footerClass}>
         <Checkbox
-          label={suggestValueLabel(creationSpec, resourceTitle)}
+          label={suggestValueLabel(creationSpec, resourceTitle, t)}
           checked={annotation.suggestValue ?? false}
           onCheckedChange={(checked) =>
             onChange({ ...annotation, suggestValue: checked === true })

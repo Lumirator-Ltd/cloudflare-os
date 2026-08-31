@@ -1,15 +1,7 @@
+import type { SupportedLanguage } from "@gadgets/workshop-shared/theme";
 import type { ManagementSchedule } from "../src/management-types";
-import type { ScheduleCadence, Weekday } from "../src/types";
-
-const WEEKDAYS: Record<Weekday, string> = {
-  SU: "Sun",
-  MO: "Mon",
-  TU: "Tue",
-  WE: "Wed",
-  TH: "Thu",
-  FR: "Fri",
-  SA: "Sat",
-};
+import type { ScheduleCadence } from "../src/types";
+import { translate } from "./i18n";
 
 export type ScheduleTiming = {
   relative: string;
@@ -17,9 +9,13 @@ export type ScheduleTiming = {
   diagnostic?: string;
 };
 
-export function formatCadence(cadence: ScheduleCadence, locale = "en-US"): string {
-  if (cadence.kind === "interval") return formatInterval(cadence.everyMs);
+export function formatCadence(
+  cadence: ScheduleCadence,
+  language: SupportedLanguage = "en",
+): string {
+  if (cadence.kind === "interval") return formatInterval(cadence.everyMs, language);
   if (cadence.kind === "once") {
+    const locale = localeFor(language);
     const date = new Intl.DateTimeFormat(locale, {
       timeZone: cadence.timeZone,
       year: "numeric",
@@ -31,85 +27,121 @@ export function formatCadence(cadence: ScheduleCadence, locale = "en-US"): strin
       hour: "numeric",
       minute: "2-digit",
     }).format(cadence.fireAt);
-    return `Once on ${date} at ${time}`;
+    return translate(language, "cadence.once", { date, time });
   }
 
   const { rule } = cadence;
   if (rule.freq === "hourly") {
-    const prefix = rule.interval === 1 ? "Hourly" : `Every ${rule.interval} hours`;
-    return `${prefix} at :${rule.minute.toString().padStart(2, "0")}`;
+    const frequency = translate(
+      language,
+      rule.interval === 1 ? "cadence.hourly" : "cadence.everyHours",
+      { count: rule.interval },
+    );
+    return translate(
+      language,
+      rule.interval === 1 ? "cadence.hourlyAt" : "cadence.everyHoursAt",
+      { frequency, minute: rule.minute.toString().padStart(2, "0") },
+    );
   }
-  const time = formatClock(rule.hour, rule.minute, locale);
+  const time = formatClock(rule.hour, rule.minute, language);
   if (rule.freq === "daily") {
-    return rule.interval === 1 ? `Daily at ${time}` : `Every ${rule.interval} days at ${time}`;
+    return translate(
+      language,
+      rule.interval === 1 ? "cadence.dailyAt" : "cadence.everyDaysAt",
+      { count: rule.interval, time },
+    );
   }
   if (rule.interval === 1 && rule.byDay.join(",") === "MO,TU,WE,TH,FR") {
-    return `Weekdays at ${time}`;
+    return translate(language, "cadence.weekdaysAt", { time });
   }
-  const days = new Intl.ListFormat(locale, { style: "short", type: "conjunction" }).format(
-    rule.byDay.map((day) => WEEKDAYS[day]),
+  const days = new Intl.ListFormat(localeFor(language), {
+    style: "short",
+    type: "conjunction",
+  }).format(rule.byDay.map((day) => translate(language, `weekdays.${day}`)));
+  return translate(
+    language,
+    rule.interval === 1 ? "cadence.weeklyOnAt" : "cadence.everyWeeksOnAt",
+    { count: rule.interval, days, time },
   );
-  const prefix = rule.interval === 1 ? "Weekly" : `Every ${rule.interval} weeks`;
-  return `${prefix} on ${days} at ${time}`;
 }
 
 /** Describes a finite recurrence bound and, for a counted bound, progress toward it. */
 export function formatOccurrences(
   schedule: ManagementSchedule,
-  locale = "en-US",
+  language: SupportedLanguage = "en",
 ): string | undefined {
   const bound = schedule.occurrences;
   if (!bound) return undefined;
   if ("count" in bound) {
-    const noun = bound.count === 1 ? "occurrence" : "occurrences";
-    return `${schedule.occurrenceCount ?? 0} of ${bound.count} ${noun}`;
+    return translate(language, "occurrences.progress", {
+      count: bound.count,
+      completed: schedule.occurrenceCount ?? 0,
+      total: bound.count,
+    });
   }
-  return `until ${formatAbsolute(bound.until, scheduleTimeZone(schedule), locale)}`;
+  return translate(language, "occurrences.until", {
+    date: formatAbsolute(bound.until, scheduleTimeZone(schedule), language),
+  });
 }
 
 export function formatTiming(
   schedule: ManagementSchedule,
   now = Date.now(),
-  locale = "en-US",
+  language: SupportedLanguage = "en",
 ): ScheduleTiming {
   const timestamp = scheduleTimestamp(schedule);
-  if (timestamp === undefined) return { relative: "Next run pending" };
-  const absolute = formatAbsolute(timestamp, scheduleTimeZone(schedule), locale);
+  if (timestamp === undefined) return { relative: translate(language, "timing.pending") };
+  const absolute = formatAbsolute(timestamp, scheduleTimeZone(schedule), language);
   if (schedule.status === "active") {
+    const relative = formatRelative(timestamp - now, language);
     return {
-      relative: `Next run ${formatRelative(timestamp - now, locale)}${schedule.retrying ? " (retry)" : ""}`,
+      relative: translate(language, schedule.retrying ? "timing.nextRetry" : "timing.next", {
+        relative,
+      }),
       absolute,
     };
   }
   if (schedule.status === "dead") {
     return {
-      relative: `Failed ${formatRelative(schedule.failedAt - now, locale)}`,
+      relative: translate(language, "timing.failed", {
+        relative: formatRelative(schedule.failedAt - now, language),
+      }),
       absolute,
-      diagnostic:
+      diagnostic: translate(
+        language,
         schedule.failureCode === "authorization_failed"
-          ? "Authorization failed after retries."
-          : "Task callback failed after retries.",
+          ? "diagnostics.authorizationFailed"
+          : "diagnostics.callbackFailed",
+      ),
     };
   }
   if (schedule.status === "completed") {
     return {
-      relative: `Completed ${formatRelative(schedule.completedAt - now, locale)}`,
+      relative: translate(language, "timing.completed", {
+        relative: formatRelative(schedule.completedAt - now, language),
+      }),
       absolute,
-      diagnostic: schedule.occurrences
-        ? "This recurring task used its last scheduled occurrence."
-        : "This one-time task completed.",
+      diagnostic: translate(
+        language,
+        schedule.occurrences ? "diagnostics.recurringCompleted" : "diagnostics.onceCompleted",
+      ),
     };
   }
   return {
-    relative: `Expired ${formatRelative(schedule.expiredAt - now, locale)}`,
+    relative: translate(language, "timing.expired", {
+      relative: formatRelative(schedule.expiredAt - now, language),
+    }),
     absolute,
-    diagnostic: schedule.cadence.kind === "once"
-      ? "This one-time task passed without delivery."
-      : "This recurring task's cutoff passed before its first occurrence.",
+    diagnostic: translate(
+      language,
+      schedule.cadence.kind === "once"
+        ? "diagnostics.onceExpired"
+        : "diagnostics.recurringExpired",
+    ),
   };
 }
 
-function formatInterval(milliseconds: number): string {
+function formatInterval(milliseconds: number, language: SupportedLanguage): string {
   const units = [
     [7 * 24 * 60 * 60_000, "week"],
     [24 * 60 * 60_000, "day"],
@@ -119,18 +151,18 @@ function formatInterval(milliseconds: number): string {
   ] as const;
   const [unitMs, unit] = units.find(([size]) => milliseconds % size === 0) ?? [1, "millisecond"];
   const count = milliseconds / unitMs;
-  return `Every ${count === 1 ? unit : `${count} ${unit}s`}`;
+  return translate(language, `interval.${unit}`, { count });
 }
 
-function formatClock(hour: number, minute: number, locale: string): string {
-  return new Intl.DateTimeFormat(locale, {
+function formatClock(hour: number, minute: number, language: SupportedLanguage): string {
+  return new Intl.DateTimeFormat(localeFor(language), {
     timeZone: "UTC",
     hour: "numeric",
     minute: "2-digit",
   }).format(Date.UTC(2020, 0, 1, hour, minute));
 }
 
-function formatRelative(milliseconds: number, locale: string): string {
+function formatRelative(milliseconds: number, language: SupportedLanguage): string {
   const absolute = Math.abs(milliseconds);
   const [size, unit] =
     absolute >= 24 * 60 * 60_000
@@ -141,11 +173,18 @@ function formatRelative(milliseconds: number, locale: string): string {
           ? ([60_000, "minute"] as const)
           : ([1_000, "second"] as const);
   const value = Math.round(milliseconds / size);
-  return new Intl.RelativeTimeFormat(locale, { numeric: "always" }).format(value, unit);
+  return new Intl.RelativeTimeFormat(localeFor(language), { numeric: "always" }).format(
+    value,
+    unit,
+  );
 }
 
-function formatAbsolute(timestamp: number, timeZone: string | undefined, locale: string): string {
-  return new Intl.DateTimeFormat(locale, {
+function formatAbsolute(
+  timestamp: number,
+  timeZone: string | undefined,
+  language: SupportedLanguage,
+): string {
+  return new Intl.DateTimeFormat(localeFor(language), {
     timeZone,
     year: "numeric",
     month: "short",
@@ -154,6 +193,10 @@ function formatAbsolute(timestamp: number, timeZone: string | undefined, locale:
     minute: "2-digit",
     timeZoneName: "short",
   }).format(timestamp);
+}
+
+function localeFor(language: SupportedLanguage): string {
+  return language === "ja" ? "ja-JP" : "en-US";
 }
 
 function scheduleTimestamp(schedule: ManagementSchedule): number | undefined {

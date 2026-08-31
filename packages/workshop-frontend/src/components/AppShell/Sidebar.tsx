@@ -15,23 +15,27 @@ import SiteLogo from '../SiteLogo'
 import { useGatekeeperApps } from '../../useGatekeeperApps'
 import { openCommandPalette } from './commandPaletteBus'
 import SidebarItem from './SidebarItem'
+import AdminSidebarSection from './AdminSidebarSection'
 import {
   SidebarWorkspacesProvider,
   SidebarWorkspacesTools,
   SidebarWorkspacesLists,
 } from './SidebarWorkspaces'
 import SidebarUtilityStrip from './SidebarUtilityStrip'
+import { useTranslation } from 'react-i18next'
 
-// The persistent left rail. Three pinned regions sandwich a single scrolling region of lists, so
-// the user can always reach Search, primary nav, and the bottom utility strip no matter how many
-// workspaces they have.
-//
-// Layout (top → bottom):
-//   • brand row                            pinned
-//   • primary nav (Home, Workspaces, …)    pinned
-//   • workspace tools (⌘K search)          pinned
-//   • Favorites / Recent workspaces        SCROLLS
-//   • utility strip (plug, avatar)         pinned
+/**
+ * The persistent left rail. Three pinned regions sandwich a single scrolling region of lists, so
+ * the user can always reach Search, primary nav, and the bottom utility strip no matter how many
+ * workspaces they have.
+ *
+ * Layout (top → bottom):
+ *   • brand row                            pinned
+ *   • primary nav (Home, Workspaces, …)    pinned
+ *   • workspace tools (⌘K search)          pinned
+ *   • Favorites / Recent workspaces        SCROLLS
+ *   • utility strip (plug, avatar)         pinned
+ */
 export default function Sidebar({
   collapsed,
   onToggleCollapsed,
@@ -40,6 +44,7 @@ export default function Sidebar({
   onToggleCollapsed: () => void
 }) {
   const siteName = useSiteName()
+  const { t } = useTranslation()
   // Gatekeeper-served management apps the user can reach now (one per gatekeeper that provides a UI
   // and is connected / enabled for everyone). Disabled or not-yet-connected ones aren't returned, so
   // they simply don't appear. The set is fully dynamic — no gatekeeper is hardcoded.
@@ -47,7 +52,7 @@ export default function Sidebar({
 
   return (
     <aside
-      aria-label="Primary"
+      aria-label={t('shell.navigation.primary')}
       className={[
         // Sidebar is the app chrome: a hair greyer than the (lighter) content canvas so the two
         // surfaces read as distinct without a heavy divider.
@@ -78,8 +83,8 @@ export default function Sidebar({
             <button
               type="button"
               onClick={() => openCommandPalette()}
-              aria-label="Search"
-              title="Search (⌘K)"
+              aria-label={t('shell.navigation.search')}
+              title={t('shell.navigation.searchShortcut')}
               className="press flex h-7 w-7 cursor-pointer items-center justify-center rounded-md text-kumo-inactive transition-colors hover:bg-kumo-tint hover:text-kumo-default"
             >
               <MagnifyingGlass size={15} />
@@ -87,8 +92,8 @@ export default function Sidebar({
             <button
               type="button"
               onClick={onToggleCollapsed}
-              aria-label="Collapse sidebar"
-              title="Collapse sidebar"
+              aria-label={t('shell.navigation.collapseSidebar')}
+              title={t('shell.navigation.collapseSidebar')}
               className="flex h-7 w-7 cursor-pointer items-center justify-center rounded-md text-kumo-inactive transition-colors hover:bg-kumo-tint hover:text-kumo-default"
             >
               <SidebarSimple size={15} />
@@ -102,8 +107,8 @@ export default function Sidebar({
         <button
           type="button"
           onClick={onToggleCollapsed}
-          aria-label="Expand sidebar"
-          title="Expand sidebar"
+          aria-label={t('shell.navigation.expandSidebar')}
+          title={t('shell.navigation.expandSidebar')}
           className="mx-auto mt-2 flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-md text-kumo-inactive transition-colors hover:bg-kumo-tint hover:text-kumo-default"
         >
           <SidebarSimple size={15} className="rotate-180" />
@@ -117,25 +122,25 @@ export default function Sidebar({
           <nav className="flex flex-col gap-0.5 px-2">
             <SidebarItem
               to="/"
-              label="Home"
+              label={t('shell.navigation.home')}
               icon={<House size={14} weight="regular" />}
               collapsed={collapsed}
             />
             <SidebarItem
               to="/workspaces"
-              label="Workspaces"
+              label={t('shell.navigation.workspaces')}
               icon={<SquaresFour size={14} weight="regular" />}
               collapsed={collapsed}
             />
             <SidebarItem
               to="/blueprints"
-              label="Blueprints"
+              label={t('shell.navigation.blueprints')}
               icon={<Blueprint size={14} weight="regular" />}
               collapsed={collapsed}
             />
             <SidebarItem
               to="/outputs"
-              label="Outputs"
+              label={t('shell.navigation.outputs')}
               icon={<Stack size={14} weight="regular" />}
               collapsed={collapsed}
             />
@@ -180,11 +185,13 @@ export default function Sidebar({
             })}
             <SidebarItem
               to="/explore"
-              label="Explore"
+              label={t('shell.navigation.explore')}
               icon={<Compass size={14} weight="regular" />}
               collapsed={collapsed}
             />
           </nav>
+
+          <AdminSidebarSection collapsed={collapsed} />
 
           {/* Workspace tools: search. Pinned so it's always reachable. */}
           <SidebarWorkspacesTools collapsed={collapsed} />

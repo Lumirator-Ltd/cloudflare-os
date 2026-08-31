@@ -4,13 +4,25 @@ import { Tooltip, useKumoToastManager } from '@cloudflare/kumo'
 import { Plus, CaretRight, Warning } from '@phosphor-icons/react'
 import { RpcStub } from 'capnweb'
 import { AuthenticatedApi } from '@gadgets/workshop-shared/api'
-import { AccountDescription, SupportedResource, VendorDescription } from '@gadgets/workshop-shared/gatekeeper'
+import {
+  AccountDescription,
+  SupportedResource,
+  VendorDescription,
+  resourceAllowsNewConnections,
+} from '@gadgets/workshop-shared/gatekeeper'
 import { extractHostname, extractBaseUrl, matchesResource, matchesResourceText, classifyMatch, getPlaceholderRanges } from './resourceMatching'
 import { GatekeeperIcon } from './components/GatekeeperIcon'
 import {
   PICKER_CAPTION, PICKER_EMPTY, PICKER_ROW, PICKER_ROW_ACTIVE, TabHint,
 } from './components/pickerRows'
+import {
+  connectorSetupGuidance,
+  connectionErrorMessage,
+  connectorIsConfigured,
+} from './connectorReadiness'
 import { AccountsSubscriberAdapter } from './accountsSubscriber'
+import { useTranslation } from 'react-i18next'
+import i18n from './i18n/config'
 
 export interface VendorOption {
   id: string
@@ -29,9 +41,12 @@ export type SelectableItem = {
   type: 'connect'
   vendorId: string
   vendorDescription: VendorDescription
-  // If the resource being connected is independently grantable, its `urlPattern`, so a new account
-  // requests just that resource's authorization. Undefined means request everything.
+  /**
+   * If the resource being connected is independently grantable, its `urlPattern`, so a new account
+   * requests just that resource's authorization. Undefined means request everything.
+   */
   resourceUrlPatterns?: string[]
+  disabled?: boolean
 } | {
   type: 'refine'
   resource: SupportedResource
@@ -51,12 +66,16 @@ export interface ResourcePickerProps {
     vendorDescription: VendorDescription,
   ) => void
   onRefine?: (newUrl: string, placeholderStart: number, placeholderEnd: number) => void
-  // Fires once the vendors and the connected accounts are both known. Until then the list grows a
-  // row at a time, so a floating caller should stay hidden rather than resize under the pointer.
+  /**
+   * Fires once the vendors and the connected accounts are both known. Until then the list grows a
+   * row at a time, so a floating caller should stay hidden rather than resize under the pointer.
+   */
   onReadyChange?: (ready: boolean) => void
   compact?: boolean
-  // Room the caller has measured for the list. Applied on top of the built-in cap, never instead of
-  // it: a caller with plenty of space should still get a modestly sized panel.
+  /**
+   * Room the caller has measured for the list. Applied on top of the built-in cap, never instead of
+   * it: a caller with plenty of space should still get a modestly sized panel.
+   */
   maxHeight?: number
   style?: React.CSSProperties
   activeIndex?: number
@@ -90,6 +109,7 @@ export default function ResourcePicker({
   authenticatedApi, searchText, onSelectAccount, onRefine, onReadyChange, compact,
   maxHeight: maxHeightOverride, style, activeIndex, onItems, activateRef,
 }: ResourcePickerProps) {
+  const { t } = useTranslation(undefined, { i18n })
   const toasts = useKumoToastManager()
 
   const buildRefineUrl = useCallback((suffix: string, replaceSearch?: boolean) => {
@@ -158,7 +178,7 @@ export default function ResourcePicker({
         const unavailable = vendorList.filter(v => v.unavailable)
         if (unavailable.length > 0) {
           toasts.add({
-            title: `Some services are temporarily unavailable: ${unavailable.map(v => v.id).join(', ')}`,
+            title: t('gatekeepers.common.unavailable', { services: unavailable.map(v => v.id).join(', ') }),
             variant: 'warning',
           })
         }
@@ -169,7 +189,7 @@ export default function ResourcePicker({
         })))
       } catch (error) {
         console.error('Failed to load vendors:', error)
-        toasts.add({ title: 'Failed to load available services', variant: 'error' })
+        toasts.add({ title: t('gatekeepers.common.loadServicesFailed'), variant: 'error' })
       } finally {
         setVendorsLoading(false)
       }
@@ -182,7 +202,9 @@ export default function ResourcePicker({
   const lowerSearch = searchText.toLowerCase().trim()
 
   const allResourceItems = allVendors.flatMap(v =>
-    v.supportedResources.map(r => ({ resource: r, vendor: v }))
+    v.supportedResources
+      .filter(resourceAllowsNewConnections)
+      .map(r => ({ resource: r, vendor: v }))
   )
 
   // Check if the search URL still contains placeholder tokens (:name or *).
@@ -325,6 +347,7 @@ export default function ResourcePicker({
           vendorId: vendor.id,
           vendorDescription: vendor.description,
           resourceUrlPatterns: resource.grantable ? [resource.urlPattern] : undefined,
+          disabled: !connectorIsConfigured(vendor.description),
         })
       }
     }
@@ -379,7 +402,7 @@ export default function ResourcePicker({
               onSelectAccount(item.accountId, item.vendorId, item.resource, item.accountDescription, item.vendorDescription)
             }
           }
-        } else {
+        } else if (!item.disabled) {
           handleConnectNew(item.vendorId, item.resourceUrlPatterns)
         }
       }
@@ -396,7 +419,10 @@ export default function ResourcePicker({
       window.open(result.url, '_blank', 'noopener,noreferrer')
     } catch (error) {
       console.error('Failed to initiate connection:', error)
-      toasts.add({ title: 'Failed to start connection flow', variant: 'error' })
+      toasts.add({
+        title: connectionErrorMessage(error, t('gatekeepers.common.connectionFailed')),
+        variant: 'error',
+      })
     } finally {
       setConnectingVendor(null)
     }
@@ -411,11 +437,11 @@ export default function ResourcePicker({
       const result = await authenticatedApi.ensureAccountResources(accountId, resourceUrlPatterns)
       if (result.url) {
         window.open(result.url, '_blank', 'noopener,noreferrer')
-        toasts.add({ title: 'Grant the additional access in the new tab.', variant: 'success' })
+        toasts.add({ title: t('gatekeepers.common.grantComplete'), variant: 'success' })
       }
     } catch (error) {
       console.error('Failed to request additional access:', error)
-      toasts.add({ title: 'Failed to request additional access', variant: 'error' })
+      toasts.add({ title: t('gatekeepers.common.grantFailed'), variant: 'error' })
     } finally {
       setGrantingAccount(current => current === accountId ? null : current)
     }
@@ -432,7 +458,7 @@ export default function ResourcePicker({
       // The reconnectingAccount state is cleared at that point.
     } catch (error) {
       console.error('Failed to initiate reconnection:', error)
-      toasts.add({ title: 'Failed to start re-authentication flow', variant: 'error' })
+      toasts.add({ title: t('gatekeepers.common.reconnectFailed'), variant: 'error' })
       setReconnectingAccount(null)
     }
   }, [authenticatedApi])
@@ -449,9 +475,9 @@ export default function ResourcePicker({
     <div style={style}>
       <div className="overflow-y-auto" style={{ maxHeight }}>
         {!ready ? (
-          <p className={PICKER_EMPTY}>Loading connections…</p>
+          <p className={PICKER_EMPTY}>{t('gatekeepers.picker.loading')}</p>
         ) : matchedResources.length === 0 ? (
-          <p className={PICKER_EMPTY}>No matching resources.</p>
+          <p className={PICKER_EMPTY}>{t('gatekeepers.picker.noMatch')}</p>
         ) : (() => {
           let itemIdx = 0
           return matchedResources.map(({ resource, vendor, classification, suffix, replaceSearch, accountsOnly }, i) => {
@@ -572,12 +598,12 @@ export default function ResourcePicker({
                       ) : isExpired ? (
                         <span className="flex flex-shrink-0 items-center gap-1">
                           <Warning size={12} className="text-kumo-warning" />
-                          <span className="text-[11.5px] leading-4 text-kumo-warning">Expired — click to re-authenticate</span>
+                          <span className="text-[11.5px] leading-4 text-kumo-warning">{t('gatekeepers.picker.expired')}</span>
                         </span>
                       ) : needsAccess ? (
                         <span className="flex flex-shrink-0 items-center gap-1">
                           <Warning size={12} className="text-kumo-warning" />
-                          <span className="text-[11.5px] leading-4 text-kumo-warning">Grant access</span>
+                          <span className="text-[11.5px] leading-4 text-kumo-warning">{t('gatekeepers.common.grantAccess')}</span>
                         </span>
                       ) : isActive && !searchHasPlaceholders ? (
                         <TabHint />
@@ -589,7 +615,7 @@ export default function ResourcePicker({
 
                   if (searchHasPlaceholders) {
                     return (
-                      <Tooltip key={account.id} content="Replace all placeholders in the URL before selecting an account" asChild>
+                      <Tooltip key={account.id} content={t('gatekeepers.picker.replacePlaceholders')} asChild>
                         {accountRow}
                       </Tooltip>
                     )
@@ -601,13 +627,16 @@ export default function ResourcePicker({
                 {(() => {
                   if (accountsOnly) return null
                   const isActive = itemIdx === activeIndex
+                  const configured = connectorIsConfigured(vendor.description)
                   itemIdx++
                   return (
                   <div
-                    onClick={() => !connectingVendor && handleConnectNew(vendor.id, resource.grantable ? [resource.urlPattern] : undefined)}
-                    className={`${PICKER_ROW} ${isActive ? PICKER_ROW_ACTIVE : ''}`}
+                    role="button"
+                    aria-disabled={!configured}
+                    onClick={() => configured && !connectingVendor && handleConnectNew(vendor.id, resource.grantable ? [resource.urlPattern] : undefined)}
+                    className={`${PICKER_ROW} ${isActive ? PICKER_ROW_ACTIVE : ''} ${configured ? '' : 'opacity-60'}`}
                     style={{
-                      cursor: connectingVendor === vendor.id ? 'wait' : 'pointer',
+                      cursor: !configured ? 'not-allowed' : connectingVendor === vendor.id ? 'wait' : 'pointer',
                     }}
                   >
                     <span className="grid h-6 w-6 flex-shrink-0 place-items-center rounded-md border border-dashed border-kumo-line text-kumo-inactive">
@@ -618,7 +647,11 @@ export default function ResourcePicker({
                       )}
                     </span>
                     <span className="flex-1 text-[13px] leading-[18px] tracking-[-0.25px] text-kumo-subtle">
-                      {connectingVendor === vendor.id ? 'Opening…' : 'Connect new account'}
+                      {!configured
+                        ? connectorSetupGuidance()
+                        : connectingVendor === vendor.id
+                          ? t('gatekeepers.common.opening')
+                          : t('gatekeepers.picker.connectNew')}
                     </span>
                     {isActive && <TabHint />}
                   </div>

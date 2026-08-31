@@ -1,0 +1,69 @@
+name: Policy
+
+on:
+  pull_request_target:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+      - edited
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  policy:
+    name: Policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: Check out trusted base
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+
+      - name: Validate event inputs
+        run: |
+          if ! [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
+            echo "Invalid pull request event" >&2
+            exit 1
+          fi
+          if ! [[ "$HEAD_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "Invalid pull request event" >&2
+            exit 1
+          fi
+
+      - name: Fetch candidate as Git data
+        run: |
+          if ! git fetch --no-tags origin "refs/pull/${PR_NUMBER}/head:refs/remotes/policy/pr-head" >/dev/null 2>&1; then
+            echo "Pull request head validation failed" >&2
+            exit 1
+          fi
+
+      - name: Bind candidate to event head
+        run: |
+          fetched_head="$(git rev-parse --verify 'refs/remotes/policy/pr-head^{commit}' 2>/dev/null)" || {
+            echo "Pull request head validation failed" >&2
+            exit 1
+          }
+          if [[ "$fetched_head" != "$HEAD_SHA" ]]; then
+            echo "Pull request head validation failed" >&2
+            exit 1
+          fi
+
+      - name: Test trusted policy
+        run: node --test scripts/fork-ci-policy.test.js
+
+      - name: Check candidate policy
+        run: node scripts/fork-ci-policy.mjs --revision "$HEAD_SHA" --base-revision HEAD

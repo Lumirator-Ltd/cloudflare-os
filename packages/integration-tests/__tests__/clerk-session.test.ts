@@ -74,7 +74,9 @@ async function signToken(options: {
     exp: Math.floor(expiresAt.getTime() / 1_000),
   });
   const unsigned = `${header}.${payload}`;
-  const signature = sign("RSA-SHA256", Buffer.from(unsigned), privateKey).toString("base64url");
+  const signature = Buffer.from(
+    sign("RSA-SHA256", Buffer.from(unsigned), privateKey),
+  ).toString("base64url");
   return { token: `${unsigned}.${signature}`, expiresAt };
 }
 

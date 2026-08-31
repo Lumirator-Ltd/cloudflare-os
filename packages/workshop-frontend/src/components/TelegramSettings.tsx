@@ -3,11 +3,13 @@ import { useKumoToastManager } from '@cloudflare/kumo'
 import { TelegramLogo } from '@phosphor-icons/react'
 import { useAuthenticatedApi } from '../AuthContext'
 import { useServerConfig } from '../ServerConfigContext'
+import { useTranslation } from 'react-i18next'
 
 const PRIMARY_BUTTON =
   'press inline-flex h-9 cursor-pointer items-center justify-center gap-1.5 rounded-lg bg-kumo-brand px-3.5 text-[13px] font-medium tracking-[-0.25px] text-white transition-colors hover:bg-kumo-brand-hover disabled:cursor-not-allowed disabled:opacity-60'
 
 export default function TelegramSettings() {
+  const { t } = useTranslation()
   const telegramEnabled = useServerConfig()?.telegramEnabled ?? false
   const { authenticatedApi } = useAuthenticatedApi()
   const toasts = useKumoToastManager()
@@ -33,10 +35,10 @@ export default function TelegramSettings() {
         if (!cancelled) setConnected(status.connected)
       })
       .catch(() => {
-        if (!cancelled) setStatusError('Could not load Telegram status. Try again.')
+        if (!cancelled) setStatusError(t('settings.telegram.statusLoadFailed'))
       })
     return () => { cancelled = true }
-  }, [authenticatedApi, telegramEnabled])
+  }, [authenticatedApi, telegramEnabled, t])
 
   const refreshStatus = async () => {
     if (statusInFlight.current) return
@@ -52,7 +54,7 @@ export default function TelegramSettings() {
         setActionError(null)
       }
     } catch {
-      setStatusError('Could not load Telegram status. Try again.')
+      setStatusError(t('settings.telegram.statusLoadFailed'))
     } finally {
       statusInFlight.current = false
       setRefreshing(false)
@@ -70,10 +72,10 @@ export default function TelegramSettings() {
       setConnected(false)
       setConfirmingUnlink(false)
       setLinkActive(false)
-      toasts.add({ title: 'Telegram unlinked.', variant: 'success' })
+      toasts.add({ title: t('settings.telegram.unlinked'), variant: 'success' })
     } catch {
-      setActionError('Could not unlink Telegram. Try again.')
-      toasts.add({ title: 'Could not unlink Telegram. Try again.', variant: 'error' })
+      setActionError(t('settings.telegram.unlinkFailed'))
+      toasts.add({ title: t('settings.telegram.unlinkFailed'), variant: 'error' })
     } finally {
       actionInFlight.current = false
       setUnlinking(false)
@@ -86,9 +88,9 @@ export default function TelegramSettings() {
     setActionError(null)
     const popup = window.open('', '_blank')
     if (!popup) {
-      setActionError('Allow pop-ups for this site, then try again.')
+      setActionError(t('settings.telegram.allowPopups'))
       toasts.add({
-        title: 'Telegram could not open. Allow pop-ups and try again.',
+        title: t('settings.telegram.openFailed'),
         variant: 'error',
       })
       return
@@ -102,14 +104,14 @@ export default function TelegramSettings() {
       popup.location.replace(link.url)
       setLinkActive(true)
       toasts.add({
-        title: 'Telegram opened. Finish linking there, then refresh your status.',
+        title: t('settings.telegram.opened'),
         variant: 'success',
       })
     } catch {
       popup.close()
-      setActionError('Could not start the Telegram connection. Try again.')
+      setActionError(t('settings.telegram.startFailed'))
       toasts.add({
-        title: 'Could not start the Telegram connection. Try again.',
+        title: t('settings.telegram.startFailed'),
         variant: 'error',
       })
     } finally {
@@ -123,7 +125,7 @@ export default function TelegramSettings() {
   return (
     <section className="flex flex-col gap-3">
       <h2 className="px-1 text-[12px] font-medium uppercase tracking-[0.08em] text-kumo-inactive">
-        Telegram
+        {t('settings.telegram.title')}
       </h2>
       <div className="rounded-xl border border-kumo-line bg-kumo-base p-5">
         <div className="flex items-start gap-4">
@@ -132,23 +134,29 @@ export default function TelegramSettings() {
           </div>
           <div className="min-w-0 flex-1">
             <p role="status" aria-live="polite" className="text-[14px] font-medium tracking-[-0.25px] text-kumo-default">
-              {statusError ? 'Status unavailable' : connected === null ? 'Checking status…' : connected ? 'Connected' : 'Not connected'}
+              {statusError
+                ? t('settings.telegram.statusUnavailable')
+                : connected === null
+                  ? t('settings.telegram.checking')
+                  : connected
+                    ? t('settings.telegram.connected')
+                    : t('settings.telegram.notConnected')}
             </p>
             <p className={`mt-1 text-[13px] leading-[18px] tracking-[-0.25px] ${actionError || statusError ? 'text-kumo-danger' : 'text-kumo-subtle'}`}>
               {actionError ?? statusError ?? (linkActive
-                ? 'Complete setup in Telegram, then refresh your status.'
-                : 'Send messages to your agents from Telegram.')}
+                ? t('settings.telegram.completeSetup')
+                : t('settings.telegram.description'))}
             </p>
             {connected === false ? (
               <div className="mt-4">
                 {linkActive ? (
                   <button type="button" onClick={refreshStatus} disabled={refreshing} className={PRIMARY_BUTTON}>
-                    {refreshing ? 'Refreshing…' : 'Refresh status'}
+                    {refreshing ? t('settings.telegram.refreshing') : t('settings.telegram.refreshStatus')}
                   </button>
                 ) : (
                   <button type="button" onClick={connect} disabled={connecting} className={PRIMARY_BUTTON}>
                     <TelegramLogo size={15} weight="fill" aria-hidden="true" />
-                    {connecting ? 'Connecting…' : 'Connect Telegram'}
+                    {connecting ? t('settings.telegram.connecting') : t('settings.telegram.connect')}
                   </button>
                 )}
               </div>
@@ -156,14 +164,14 @@ export default function TelegramSettings() {
               <div className="mt-4">
                 {confirmingUnlink ? (
                   <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-[12px] text-kumo-subtle">Stop receiving Telegram messages?</span>
+                    <span className="text-[12px] text-kumo-subtle">{t('settings.telegram.unlinkConfirm')}</span>
                     <button
                       type="button"
                       onClick={unlink}
                       disabled={unlinking}
                       className="press inline-flex h-8 cursor-pointer items-center rounded-lg px-2.5 text-[12px] font-medium text-kumo-danger transition-colors hover:bg-kumo-danger-tint disabled:cursor-not-allowed disabled:opacity-60"
                     >
-                      {unlinking ? 'Unlinking…' : 'Confirm unlink'}
+                      {unlinking ? t('settings.telegram.unlinking') : t('settings.telegram.confirmUnlink')}
                     </button>
                     <button
                       type="button"
@@ -171,7 +179,7 @@ export default function TelegramSettings() {
                       disabled={unlinking}
                       className="press inline-flex h-8 cursor-pointer items-center rounded-lg px-2.5 text-[12px] font-medium text-kumo-subtle transition-colors hover:bg-kumo-tint hover:text-kumo-default disabled:cursor-not-allowed disabled:opacity-60"
                     >
-                      Cancel
+                      {t('common.cancel')}
                     </button>
                   </div>
                 ) : (
@@ -180,14 +188,14 @@ export default function TelegramSettings() {
                     onClick={() => setConfirmingUnlink(true)}
                     className="press inline-flex h-9 cursor-pointer items-center justify-center rounded-lg px-3 text-[13px] font-medium text-kumo-danger transition-colors hover:bg-kumo-danger-tint"
                   >
-                    Unlink Telegram
+                    {t('settings.telegram.unlink')}
                   </button>
                 )}
               </div>
             ) : statusError ? (
               <div className="mt-4">
                 <button type="button" onClick={refreshStatus} disabled={refreshing} className={PRIMARY_BUTTON}>
-                  {refreshing ? 'Retrying…' : 'Retry status'}
+                  {refreshing ? t('settings.telegram.retrying') : t('settings.telegram.retryStatus')}
                 </button>
               </div>
             ) : null}

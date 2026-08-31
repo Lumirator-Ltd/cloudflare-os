@@ -13,15 +13,54 @@ const mocks = vi.hoisted(() => ({
   useAuthenticatedApi: vi.fn<() => { authenticatedApi: RpcStub<AuthenticatedApi> }>(),
   useServerConfig: vi.fn<() => ServerConfig | null>(),
   toastAdd: vi.fn<(toast: unknown) => void>(),
+  translations: {
+    'settings.telegram.title': 'Telegram',
+    'settings.telegram.statusLoadFailed': 'Could not load Telegram status. Try again.',
+    'settings.telegram.unlinked': 'Telegram unlinked.',
+    'settings.telegram.unlinkFailed': 'Could not unlink Telegram. Try again.',
+    'settings.telegram.allowPopups': 'Allow pop-ups for this site, then try again.',
+    'settings.telegram.openFailed': 'Telegram could not open. Allow pop-ups and try again.',
+    'settings.telegram.opened': 'Telegram opened. Finish linking there, then refresh your status.',
+    'settings.telegram.startFailed': 'Could not start the Telegram connection. Try again.',
+    'settings.telegram.statusUnavailable': 'Status unavailable',
+    'settings.telegram.checking': 'Checking status…',
+    'settings.telegram.connected': 'Connected',
+    'settings.telegram.notConnected': 'Not connected',
+    'settings.telegram.completeSetup': 'Complete setup in Telegram, then refresh your status.',
+    'settings.telegram.description': 'Send messages to your agents from Telegram.',
+    'settings.telegram.refreshing': 'Refreshing…',
+    'settings.telegram.refreshStatus': 'Refresh status',
+    'settings.telegram.connecting': 'Connecting…',
+    'settings.telegram.connect': 'Connect Telegram',
+    'settings.telegram.unlinkConfirm': 'Stop receiving Telegram messages?',
+    'settings.telegram.unlinking': 'Unlinking…',
+    'settings.telegram.confirmUnlink': 'Confirm unlink',
+    'settings.telegram.unlink': 'Unlink Telegram',
+    'settings.telegram.retrying': 'Retrying…',
+    'settings.telegram.retryStatus': 'Retry status',
+    'common.cancel': 'Cancel',
+  } as Record<string, string>,
 }))
 
 vi.mock('@cloudflare/kumo', () => ({
   useKumoToastManager: () => ({ add: mocks.toastAdd }),
 }));
+vi.mock('react-i18next', () => {
+  const t = (key: string) => mocks.translations[key] ?? key
+  return { useTranslation: () => ({ t }) }
+});
 vi.mock('../AuthContext', () => ({ useAuthenticatedApi: mocks.useAuthenticatedApi }));
 vi.mock('../ServerConfigContext', () => ({ useServerConfig: mocks.useServerConfig }));
 vi.mock('../useAvatar', () => ({ useAvatar: () => null, invalidateAvatarCache: vi.fn<() => void>() }));
 vi.mock('../useDocumentTitle', () => ({ useDocumentTitle: vi.fn<(title: string) => void>() }));
+vi.mock('../i18n/LanguageProvider', () => ({
+  useLanguage: () => ({
+    preference: 'auto',
+    deploymentDefault: 'en',
+    loading: false,
+    setPreference: vi.fn<(preference: string) => Promise<void>>(),
+  }),
+}));
 vi.mock('./billing/UsageSettings', () => ({ default: () => null }));
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true

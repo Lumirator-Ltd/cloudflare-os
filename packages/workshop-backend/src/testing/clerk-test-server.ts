@@ -30,8 +30,7 @@ function testDependencies(profiles: ClerkTestProfiles): ClerkAuthDependencies {
   };
 }
 
-// This entry is selected only by the Task5 integration harness. Production releases continue to
-// bundle src/server.ts, whose three-argument fetch path always uses the real Clerk Backend client.
+/** Clerk-verifier test entrypoint used only by the integration harness. */
 export default {
   fetch(request: Request, env: TestEnv, ctx: ExecutionContext) {
     return workshopServer.fetch(request, env, ctx, token =>

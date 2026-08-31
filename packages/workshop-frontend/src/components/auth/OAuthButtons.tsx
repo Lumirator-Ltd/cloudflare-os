@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import { RpcStub } from 'capnweb'
 import { PublicApi, AuthVendorInfo } from '@gadgets/workshop-shared/api'
 import { Button, Banner } from '@cloudflare/kumo'
+import { useTranslation } from 'react-i18next'
+import { CONNECTOR_SETUP_GUIDANCE } from '../../connectorReadiness'
 
 interface OAuthButtonsProps {
   rpcStub: RpcStub<PublicApi>
@@ -9,10 +11,13 @@ interface OAuthButtonsProps {
   onSuccess?: () => void
 }
 
-// Renders a sign-in button per auth-capable gatekeeper vendor. Clicking opens the gatekeeper's
-// OAuth popup (which self-closes) and waits for the result over RPC; on success the session token is
-// stored and the app re-authenticates.
+/**
+ * Renders a sign-in button per auth-capable gatekeeper vendor. Clicking opens the gatekeeper's
+ * OAuth popup (which self-closes) and waits for the result over RPC; on success the session token is
+ * stored and the app re-authenticates.
+ */
 export default function OAuthButtons({ rpcStub, vendors, onSuccess }: OAuthButtonsProps) {
+  const { t } = useTranslation()
   const [error, setError] = useState<string | null>(null)
   const [pending, setPending] = useState<string | null>(null)
 
@@ -77,7 +82,7 @@ export default function OAuthButtons({ rpcStub, vendors, onSuccess }: OAuthButto
           if (popup.closed) finish(() => reject(new Error('Sign-in was cancelled.')))
         }, 500)
         attempt.wait()
-          .then(t => finish(() => resolve(t)))
+          .then(sessionToken => finish(() => resolve(sessionToken)))
           .catch(e => finish(() => reject(e instanceof Error ? e : new Error('Could not sign in'))))
       })
       if (!mountedRef.current) return  // user navigated away mid-flow; drop the result
@@ -95,24 +100,30 @@ export default function OAuthButtons({ rpcStub, vendors, onSuccess }: OAuthButto
     <div className="space-y-3">
       {error && <Banner variant="error" title={error} />}
       {vendors.map((vendor) => (
-        <Button
-          key={vendor.vendorId}
-          variant="secondary"
-          onClick={() => start(vendor.vendorId)}
-          loading={pending === vendor.vendorId}
-          disabled={pending !== null}
-          className="w-full justify-center"
-        >
-          {vendor.logo && (
-            <img
-              src={vendor.logo.url}
-              alt=""
-              className="mr-1"
-              style={{ height: 18, width: 'auto' }}
-            />
+        <div key={vendor.vendorId}>
+          <Button
+            variant="secondary"
+            onClick={() => start(vendor.vendorId)}
+            loading={pending === vendor.vendorId}
+            disabled={pending !== null || !vendor.configured}
+            className="w-full justify-center"
+          >
+            {vendor.logo && (
+              <img
+                src={vendor.logo.url}
+                alt=""
+                className="mr-1"
+                style={{ height: 18, width: 'auto' }}
+              />
+            )}
+            {t('shell.auth.continueWith', { vendor: vendor.displayName })}
+          </Button>
+          {!vendor.configured && (
+            <p className="mt-1 text-xs text-kumo-subtle">
+              {CONNECTOR_SETUP_GUIDANCE}
+            </p>
           )}
-          Continue with {vendor.displayName}
-        </Button>
+        </div>
       ))}
     </div>
   )

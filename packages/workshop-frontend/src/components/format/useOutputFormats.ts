@@ -7,16 +7,17 @@ import { useKumoToastManager } from '@cloudflare/kumo'
 import type { RpcStub } from 'capnweb'
 import type { Overseer, OutputFormatOffer } from '@gadgets/workshop-shared/api'
 import { useAuthenticatedApi } from '../../AuthContext'
+import i18n from '../../i18n/config'
 
 type AuthenticatedApiStub = ReturnType<typeof useAuthenticatedApi>['authenticatedApi']
 type Navigate = ReturnType<typeof useNavigate>
 type Toasts = ReturnType<typeof useKumoToastManager>
 
 export type OutputFormats = {
-  // Empty until loaded, and on failure; callers render nothing rather than a spinner.
+  /** Empty until loaded, and on failure; callers render nothing rather than a spinner. */
   formats: OutputFormatOffer[]
 
-  // The blueprint id currently being instantiated, for a busy affordance.
+  /** The blueprint id currently being instantiated, for a busy affordance. */
   creating: string | null
 
   create: (format: OutputFormatOffer) => Promise<void>
@@ -44,9 +45,11 @@ function loadOutputFormats(api: AuthenticatedApiStub): Promise<OutputFormatOffer
   return loaded
 }
 
-// Instantiate a format, or route to its blueprint's landing page when it needs bindings wired up
-// first. Not a hook: the command palette calls this from its own command list, where a hook can't
-// go.
+/**
+ * Instantiate a format, or route to its blueprint's landing page when it needs bindings wired up
+ * first. Not a hook: the command palette calls this from its own command list, where a hook can't
+ * go.
+ */
 export async function createFromFormat(
   api: AuthenticatedApiStub,
   navigate: Navigate,
@@ -68,7 +71,7 @@ export async function createFromFormat(
     navigate({ to: '/workspace/$id', params: { id } })
   } catch (err) {
     console.error('Failed to create from format:', err)
-    toasts.add({ title: `Couldn't create a new ${format.output.noun}`, variant: 'error' })
+    toasts.add({ title: i18n.t('formats.createFailed', { noun: format.output.id === 'app' ? i18n.t('formats.app.noun') : format.output.noun }), variant: 'error' })
     throw err
   } finally {
     overseer?.[Symbol.dispose]()

@@ -7,6 +7,7 @@ import { useConnectionLost } from '../../RpcContext'
 import Sidebar from './Sidebar'
 import CommandPalette from './CommandPalette'
 import { OPEN_COMMAND_PALETTE_EVENT } from './commandPaletteBus'
+import { useTranslation } from 'react-i18next'
 
 const STORAGE_KEY_COLLAPSED = 'gadgets:sidebar-collapsed'
 
@@ -19,18 +20,21 @@ function readCollapsed(): boolean {
   }
 }
 
-// The authenticated, non-fullscreen application chrome: a persistent left rail + a thin top notice
-// strip + the routed content. Replaces the old <Header /> on these routes. Chat and Gadget editor
-// pages are still rendered fullscreen by __root.tsx without this shell.
-//
-// Mobile: below `md` the rail collapses to an overlay drawer triggered by a hamburger button in a
-// minimal top bar. We don't try to gracefully shrink the rail at narrow widths; the overlay model
-// is simpler and matches how the rest of the app handles small screens.
+/**
+ * The authenticated, non-fullscreen application chrome: a persistent left rail + a thin top notice
+ * strip + the routed content. Replaces the old <Header /> on these routes. Chat and Gadget editor
+ * pages are still rendered fullscreen by __root.tsx without this shell.
+ *
+ * Mobile: below `md` the rail collapses to an overlay drawer triggered by a hamburger button in a
+ * minimal top bar. We don't try to gracefully shrink the rail at narrow widths; the overlay model
+ * is simpler and matches how the rest of the app handles small screens.
+ */
 export default function AppShell({ children }: { children: React.ReactNode }) {
   const [collapsed, setCollapsed] = useState<boolean>(readCollapsed)
   const [mobileOpen, setMobileOpen] = useState(false)
   const [paletteOpen, setPaletteOpen] = useState(false)
   const connectionLost = useConnectionLost()
+  const { t } = useTranslation()
 
   const toggleCollapsed = useCallback(() => {
     setCollapsed((prev) => {
@@ -106,7 +110,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
           <button
             type="button"
             onClick={() => setMobileOpen((o) => !o)}
-            aria-label={mobileOpen ? 'Close menu' : 'Open menu'}
+            aria-label={mobileOpen ? t('shell.navigation.closeMenu') : t('shell.navigation.openMenu')}
             className="flex h-7 w-7 items-center justify-center rounded-md text-kumo-default transition-colors hover:bg-kumo-tint md:hidden"
           >
             {mobileOpen ? <X size={16} /> : <List size={16} />}

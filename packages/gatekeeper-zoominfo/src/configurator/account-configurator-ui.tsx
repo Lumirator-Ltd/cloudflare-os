@@ -1,4 +1,4 @@
-import { Field, h, Section, type ConfiguratorUISpec } from "@gadgets/configurator-ui";
+import { localize, Field, h, Section, type ConfiguratorUISpec } from "@gadgets/configurator-ui";
 import type {
   ZoomInfoAccountConfiguratorRpc,
   ZoomInfoAccountConfiguratorValues,
@@ -20,11 +20,11 @@ export default {
     return ui.resourceUrl();
   },
 
-  render() {
+  render({ language }) {
     return <Section>
       <Field
-        label="Whole-account access"
-        description="This binding grants access to the connected ZoomInfo account: lookup, company/contact/intent/scoop/news search, record enrichment (which consumes credits), recommendations, and account intelligence — all subject to the account's ZoomInfo entitlements.">
+        label={localize(language, { en: "Whole-account access", ja: "アカウント全体へのアクセス" })}
+        description={localize(language, { en: "This binding grants access to the connected ZoomInfo account: lookup, company/contact/intent/scoop/news search, record enrichment (which consumes credits), recommendations, and account intelligence — all subject to the account's ZoomInfo entitlements.", ja: "このバインディングは、接続された ZoomInfo アカウントの検索、会社／連絡先／インテント／スクープ／ニュース検索、レコード補完（クレジットを消費）、レコメンデーション、アカウントインテリジェンスへのアクセスを、ZoomInfo の契約権限の範囲内で許可します。" })}>
       </Field>
     </Section>;
   },

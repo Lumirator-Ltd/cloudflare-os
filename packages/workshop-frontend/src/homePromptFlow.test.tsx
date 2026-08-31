@@ -3,20 +3,43 @@
 
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import { I18nextProvider } from "react-i18next";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import i18n from "./i18n/config";
 
 const testState = vi.hoisted(() => {
+  const classifyRpcError = vi.fn<(error: unknown) => string | undefined>(() => undefined);
+  const logRpcFailure = vi.fn<(
+    message: string,
+    error: unknown,
+    options?: unknown,
+  ) => boolean>(() => false);
   const listModels = vi.fn<() => Promise<never[]>>(async () => []);
-  const newGadget = vi.fn<() => never>();
+  const addToast = vi.fn<(toast: unknown) => void>();
+  const setTitle = vi.fn<(title: string) => Promise<void>>(async () => {});
+  const newChat = vi.fn<() => Promise<number>>(async () => 0);
+  const getMetadata = vi.fn<() => Promise<{ id: string }>>(async () => ({ id: "workspace-1" }));
+  const dispose = vi.fn<() => void>();
+  const overseer = { setTitle, newChat, getMetadata, [Symbol.dispose]: dispose };
+  const newGadget = vi.fn<() => typeof overseer>(() => overseer);
   return {
-    addToast: vi.fn<(toast: unknown) => void>(),
+    addToast,
+    toastManager: { add: addToast },
+    useUnstableToastManager: false,
     authenticatedApi: { listModels, newGadget },
+    classifyRpcError,
     currentUser: { id: "user-a", name: "User A" },
     listModels,
+    logRpcFailure,
     navigate: vi.fn<(options: unknown) => void>(),
+    newChat,
     newGadget,
     seeds: [] as Array<{ text?: string; nonce?: number }>,
     draftStorageKeys: [] as Array<string | undefined>,
+    send: undefined as
+      | ((message: string, modelId: string | null) => Promise<void>)
+      | undefined,
+    setTitle,
   };
 });
 
@@ -26,7 +49,9 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
 }));
 
 vi.mock("@cloudflare/kumo", () => ({
-  useKumoToastManager: () => ({ add: testState.addToast }),
+  useKumoToastManager: () => testState.useUnstableToastManager
+    ? { add: testState.addToast }
+    : testState.toastManager,
 }));
 
 vi.mock("./AuthContext", () => ({
@@ -36,12 +61,19 @@ vi.mock("./AuthContext", () => ({
   }),
 }));
 
+vi.mock("./rpcErrors", () => ({
+  classifyRpcError: testState.classifyRpcError,
+  logRpcFailure: testState.logRpcFailure,
+}));
+
 vi.mock("./ChatInterface", () => ({
-  ChatInput: ({ seedText, seedNonce, draftStorageKey }: {
+  ChatInput: ({ onSend, seedText, seedNonce, draftStorageKey }: {
+    onSend: (message: string, modelId: string | null) => Promise<void>;
     seedText?: string;
     seedNonce?: number;
     draftStorageKey?: string;
   }) => {
+    testState.send = onSend;
     testState.seeds.push({ text: seedText, nonce: seedNonce });
     testState.draftStorageKeys.push(draftStorageKey);
     return <textarea aria-label="Prompt" readOnly value={seedText ?? ""} />;
@@ -66,14 +98,38 @@ describe("Home prompt route flow", () => {
     localStorage.clear();
     testState.seeds.length = 0;
     testState.draftStorageKeys.length = 0;
+    testState.send = undefined;
+    testState.useUnstableToastManager = false;
     vi.clearAllMocks();
+  });
+
+  it("loads models once when the toast manager changes between renders", async () => {
+    testState.useUnstableToastManager = true;
+    testState.listModels
+      .mockResolvedValueOnce([])
+      .mockRejectedValueOnce(new Error("unexpected repeated load"));
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+
+    await act(async () => root!.render(
+      <I18nextProvider i18n={i18n}>
+        <HomePageContent />
+      </I18nextProvider>,
+    ));
+
+    expect(testState.listModels).toHaveBeenCalledTimes(1);
   });
 
   it("seeds the composer once, clears route state, and does not create a workspace", async () => {
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
-    await act(async () => root!.render(<HomePageContent prompt="Create a daily brief." />));
+    await act(async () => root!.render(
+      <I18nextProvider i18n={i18n}>
+        <HomePageContent prompt="Create a daily brief." />
+      </I18nextProvider>,
+    ));
 
     expect(container.querySelector<HTMLTextAreaElement>('[aria-label="Prompt"]')?.value).toBe(
       "Create a daily brief.",
@@ -82,5 +138,50 @@ describe("Home prompt route flow", () => {
     expect(testState.navigate).toHaveBeenCalledWith({ to: "/", search: {}, replace: true });
     expect(testState.newGadget).not.toHaveBeenCalled();
     expect(testState.draftStorageKeys).toContain("gadgets:composer-draft:v1:user-a:home");
+  });
+
+  it("names a new workspace from the first home-page message", async () => {
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () => root!.render(
+      <I18nextProvider i18n={i18n}>
+        <HomePageContent />
+      </I18nextProvider>,
+    ));
+
+    await act(async () => testState.send!("Plan the Q3 launch", null));
+
+    expect(testState.setTitle).toHaveBeenCalledWith("Plan the Q3 launch");
+    expect(testState.navigate).toHaveBeenCalledWith({
+      to: "/workspace/$id",
+      params: { id: "workspace-1" },
+      search: { chat: 0 },
+    });
+  });
+
+  it("opens the workspace when setting its initial title fails", async () => {
+    testState.setTitle.mockRejectedValueOnce(new Error("rename failed"));
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () => root!.render(
+      <I18nextProvider i18n={i18n}>
+        <HomePageContent />
+      </I18nextProvider>,
+    ));
+
+    await act(async () => testState.send!("Plan the Q3 launch", null));
+
+    expect(testState.newChat).toHaveBeenCalledTimes(1);
+    expect(testState.navigate).toHaveBeenCalledWith({
+      to: "/workspace/$id",
+      params: { id: "workspace-1" },
+      search: { chat: 0 },
+    });
+    expect(testState.addToast).toHaveBeenCalledWith({
+      title: "Workspace created, but couldn't set its name",
+      variant: "error",
+    });
   });
 });

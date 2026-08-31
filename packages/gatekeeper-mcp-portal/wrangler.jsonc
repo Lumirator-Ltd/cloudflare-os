@@ -31,20 +31,18 @@
   // send their users' OAuth flows to whichever host it named.
   //
   // Unset, `readPortalConfig()` returns null, the connector advertises no resources, and the
-  // Workshop hides it. That is the intended state for a deployment that has no portal.
+  // Workshop hides it. That is the intended state for a deployment that has no portal. Removing or
+  // repointing the URL makes existing capabilities dormant until their users reconnect.
   //
   //   MCP_PORTAL_URL
   //     The portal's MCP endpoint (Streamable HTTP). The whole configuration of this connector:
-  //     users never type a URL. Typically a Cloudflare MCP server portal, so Access decides who may
-  //     connect and Cloudflare Gateway logs and inspects what crosses.
+  //     users never type a URL. The connector is OAuth-only. Typically a Cloudflare MCP server
+  //     portal, so Access decides who may connect and Cloudflare Gateway logs and inspects what
+  //     crosses.
   //
   //   MCP_PORTAL_NAME
   //     Display name in the connector list and every approval prompt. Defaults to
   //     "MCP Server Portal (<host>)".
-  //
-  //   MCP_PORTAL_AUTH
-  //     "oauth" (default), "none", or "token". For "token", the bearer is the MCP_PORTAL_TOKEN
-  //     secret.
   //
   //   MCP_PORTAL_TRUST_ANNOTATIONS
   //     "true" to let tool annotations from behind this portal drive auto-approval. Off by default:

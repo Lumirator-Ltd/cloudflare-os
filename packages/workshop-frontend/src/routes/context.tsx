@@ -3,10 +3,13 @@ import { BookOpen, Sparkle, type Icon as PhosphorIcon } from '@phosphor-icons/re
 import { useDocumentTitle } from '../useDocumentTitle'
 import ComingSoonPreview from '../components/ComingSoonPreview'
 import { useSiteName } from '../ServerConfigContext'
+import { useTranslation } from 'react-i18next'
 
-// Context & Skills. The knowledge/skills surface isn't built into the rail yet — agents read
-// curated collections of documents (context) and reusable skills. Until then this page shows a
-// frosted design mock so the nav entry has a stable, on-language target.
+/**
+ * Context & Skills. The knowledge/skills surface isn't built into the rail yet — agents read
+ * curated collections of documents (context) and reusable skills. Until then this page shows a
+ * frosted design mock so the nav entry has a stable, on-language target.
+ */
 export const Route = createFileRoute('/context')({
   component: ContextPage,
 })
@@ -21,56 +24,62 @@ interface ContextItem {
   updated: string
 }
 
-const TYPE_META: Record<Kind, { label: string; Icon: PhosphorIcon }> = {
-  collection: { label: 'Collection', Icon: BookOpen },
-  skill: { label: 'Skill', Icon: Sparkle },
+const TYPE_META: Record<Kind, { labelKey: string; Icon: PhosphorIcon }> = {
+  collection: { labelKey: 'context.collection', Icon: BookOpen },
+  skill: { labelKey: 'context.skill', Icon: Sparkle },
 }
 
 const MOCK_ITEMS: ContextItem[] = [
-  { id: '1', name: 'Company Handbook', kind: 'collection', detail: '12 documents', updated: '2d ago' },
-  { id: '2', name: 'Brand Voice & Style', kind: 'collection', detail: '5 documents', updated: '1w ago' },
-  { id: '3', name: 'API Reference', kind: 'collection', detail: '28 documents', updated: '1w ago' },
-  { id: '4', name: 'Summarize meeting notes', kind: 'skill', detail: 'Reusable skill', updated: '3d ago' },
-  { id: '5', name: 'Sales Playbook', kind: 'collection', detail: '9 documents', updated: '2w ago' },
-  { id: '6', name: 'Draft a customer email', kind: 'skill', detail: 'Reusable skill', updated: '2w ago' },
+  { id: '1', name: 'context.companyHandbook', kind: 'collection', detail: 'context.documents|12', updated: 'context.daysAgo|2' },
+  { id: '2', name: 'context.brandVoice', kind: 'collection', detail: 'context.documents|5', updated: 'context.weeksAgo|1' },
+  { id: '3', name: 'context.apiReference', kind: 'collection', detail: 'context.documents|28', updated: 'context.weeksAgo|1' },
+  { id: '4', name: 'context.summarizeMeetings', kind: 'skill', detail: 'context.reusableSkill', updated: 'context.daysAgo|3' },
+  { id: '5', name: 'context.salesPlaybook', kind: 'collection', detail: 'context.documents|9', updated: 'context.weeksAgo|2' },
+  { id: '6', name: 'context.draftEmail', kind: 'skill', detail: 'context.reusableSkill', updated: 'context.weeksAgo|2' },
 ]
 
 function ContextRow({ item }: { item: ContextItem }) {
-  const { label, Icon } = TYPE_META[item.kind]
+  const { t } = useTranslation()
+  const { labelKey, Icon } = TYPE_META[item.kind]
+  const localized = (value: string) => {
+    const [key, count] = value.split('|')
+    return t(key, count ? { count: Number(count) } : undefined)
+  }
   return (
     <div className="flex items-center gap-3 rounded-lg px-3 py-2.5">
       <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-kumo-fill text-kumo-subtle">
         <Icon size={16} />
       </div>
       <div className="min-w-0 flex-1">
-        <p className="truncate text-sm font-medium tracking-[-0.25px] text-kumo-default">{item.name}</p>
+        <p className="truncate text-sm font-medium tracking-[-0.25px] text-kumo-default">{localized(item.name)}</p>
         <p className="mt-0.5 truncate text-[12px] leading-4 tracking-[-0.2px] text-kumo-subtle">
-          {label} · {item.detail}
+          {t(labelKey)} · {localized(item.detail)}
         </p>
       </div>
       <span className="hidden shrink-0 text-xs tracking-[-0.1px] text-kumo-inactive lg:block">
-        {item.updated}
+        {localized(item.updated)}
       </span>
     </div>
   )
 }
 
 function ContextPage() {
-  useDocumentTitle('Context & Skills')
+  const { t } = useTranslation()
+  useDocumentTitle(t('context.title'))
   const siteName = useSiteName()
   return (
     <div className="mx-auto flex h-full w-full max-w-4xl flex-col px-6 sm:px-10">
       <header className="px-3 pb-4 pt-10">
-        <h1 className="text-2xl font-semibold tracking-tight text-kumo-default">Context &amp; Skills</h1>
+        <h1 className="text-2xl font-semibold tracking-tight text-kumo-default">{t('context.title')}</h1>
         <p className="mt-1 text-[13px] leading-[18px] tracking-[-0.25px] text-kumo-subtle">
-          Curated collections of knowledge your agents read, plus reusable skills they can apply.
+          {t('context.subtitle')}
         </p>
       </header>
 
       <ComingSoonPreview
         icon={BookOpen}
-        title={`Context & Skills are coming soon to ${siteName}`}
-        description="A preview of how you'll author knowledge collections and skills for your agents to draw on."
+        title={t('context.comingSoon', { siteName })}
+        description={t('context.preview')}
       >
         <div className="chat-panel min-h-0 flex-1 overflow-y-auto pb-8 pt-1">
           <div className="flex flex-col gap-0.5">

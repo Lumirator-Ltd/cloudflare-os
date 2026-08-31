@@ -1,5 +1,6 @@
 import { StrictMode, useState, useEffect } from 'react'
 import { createRoot } from 'react-dom/client'
+import { I18nextProvider } from 'react-i18next'
 import { RouterProvider } from '@tanstack/react-router'
 import { RpcStub, newWebSocketRpcSession } from 'capnweb'
 import { PublicApi, ServerConfig } from '@gadgets/workshop-shared/api'
@@ -7,12 +8,12 @@ import { RpcContext } from './RpcContext'
 import { ServerConfigContext, ServerConfigErrorContext } from './ServerConfigContext'
 import { ThemeProvider } from './ThemeContext'
 import { createRouter } from './router'
-import AnnouncementBanner from './components/AnnouncementBanner'
 import { applyAccentColor, applyStoredThemeMode } from './theme'
 import './styles.css'
 import FrontendErrorBoundary from './FrontendErrorBoundary'
 import { installWorkshopErrorReporting, reportIssue } from './errorReporting'
 import { applySiteFavicon, cacheBustSiteLogoUrl } from './siteLogoUtils'
+import i18n from './i18n/config'
 
 // ---------------------------------------------------------------------------
 // Dev auto-login: if VITE_DEV_AUTO_LOGIN=true, automatically create/login
@@ -106,7 +107,7 @@ async function handleBroken(error: any) {
 let notifyCurrentStubUpdated: Set<() => void> = new Set();
 let isConnectionLost = false;
 
-// Called externally (e.g., by auth) to indicate the connection is alive.
+/** Called externally (e.g., by auth) to indicate the connection is alive. */
 export function markConnectionRestored() {
   if (!isConnectionLost) return;
   isConnectionLost = false;
@@ -167,7 +168,6 @@ function AppWithConnection() {
       <RpcContext.Provider value={rpcState}>
         <ServerConfigErrorContext.Provider value={serverConfigError}>
           <ServerConfigContext.Provider value={serverConfig}>
-            <AnnouncementBanner />
             <RouterProvider router={router} />
           </ServerConfigContext.Provider>
         </ServerConfigErrorContext.Provider>
@@ -191,7 +191,9 @@ devAutoLogin(currentStub).catch(() => {})
 root.render(
   <StrictMode>
     <FrontendErrorBoundary>
-      <AppWithConnection />
+      <I18nextProvider i18n={i18n}>
+        <AppWithConnection />
+      </I18nextProvider>
     </FrontendErrorBoundary>
   </StrictMode>
 )

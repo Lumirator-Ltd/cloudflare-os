@@ -2,9 +2,13 @@ import { cloudflareTest } from "@cloudflare/vitest-pool-workers";
 import capnwebValidate from "capnweb-validate/vite";
 import { defineConfig } from "vitest/config";
 
-const EXPECTED_RPC_ERROR_CODES = new Set([
+const EXPECTED_OPEN_ERROR_CODES = new Set([
   "WORKSPACE_NOT_FOUND",
   "WORKSPACE_ACCESS_DENIED",
+]);
+const EXPECTED_ADMIN_BOUNDARY_ERRORS = new Set([
+  "'configureConnector' is not a function.",
+  "Connector configuration writes are not available on this deployment.",
 ]);
 const EXPECTED_PIPELINED_ERROR_MESSAGES = new Set([
   "Current identity authority is no longer valid.",
@@ -19,6 +23,11 @@ export default defineConfig({
     cloudflareTest({
       main: "./src/server.ts",
       remoteBindings: false,
+      miniflare: {
+        bindings: {
+          ADMINS: ["rpcadmin"],
+        },
+      },
       wrangler: {
         configPath: "./wrangler.jsonc",
       },
@@ -26,6 +35,8 @@ export default defineConfig({
   ],
   test: {
     include: ["__integration__/*.test.ts"],
+    // Asserts the pool actually started, rather than trusting a green run to mean workerd.
+    setupFiles: ["../../scripts/assert-workerd.ts"],
     // Whichever test runs first pays for workerd booting and instantiating the whole backend
     // bundle -- ~6s on a dev machine and roughly 3x that on a CI runner, while every subsequent
     // test in the file finishes in tens of milliseconds. The timeout has to clear that cold
@@ -35,7 +46,8 @@ export default defineConfig({
     // The tests assert these exact rejections; all unrelated unhandled errors remain fatal.
     onUnhandledError(error) {
       const code = "code" in error ? error.code : undefined;
-      if (typeof code === "string" && EXPECTED_RPC_ERROR_CODES.has(code)) return false;
+      if (typeof code === "string" && EXPECTED_OPEN_ERROR_CODES.has(code)) return false;
+      if (EXPECTED_ADMIN_BOUNDARY_ERRORS.has(error.message)) return false;
       if (EXPECTED_PIPELINED_ERROR_MESSAGES.has(error.message)) return false;
       // The reset-recovery tests abort every Durable Object mid-session; capabilities that were
       // held across the abort (e.g. the fire-and-forget AdminSettings install kicked off by the

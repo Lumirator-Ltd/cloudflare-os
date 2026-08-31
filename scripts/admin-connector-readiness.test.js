@@ -1,0 +1,66 @@
+import assert from "node:assert/strict";
+import { existsSync, readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import test from "node:test";
+
+const root = fileURLToPath(new URL("..", import.meta.url));
+const configurationSource = readFileSync(
+  `${root}/packages/workshop-backend/src/connector-configuration.ts`,
+  "utf8",
+);
+
+const connectors = [
+  ["cloudflare", "cloudflare.ts"],
+  ["confluence", "confluence.ts"],
+  ["github", "github.ts"],
+  ["google", "google.ts"],
+  ["hubspot", "hubspot.ts"],
+  ["linear", "linear.ts"],
+  ["notion", "notion.ts"],
+  ["slack", "slack.ts"],
+  ["spotify", "spotify.ts"],
+  ["supabase", "supabase.ts"],
+  ["zoominfo", "zoominfo.ts"],
+];
+
+function connectorDescriptorSource(vendorId) {
+  const start = configurationSource.indexOf(`  ${vendorId}: Object.freeze({`);
+  assert.notEqual(start, -1, `missing descriptor for ${vendorId}`);
+  const end = configurationSource.indexOf("\n  }),", start);
+  assert.notEqual(end, -1, `unterminated descriptor for ${vendorId}`);
+  return configurationSource.slice(start, end);
+}
+
+for (const [vendorId, fileName] of connectors) {
+  test(`${vendorId} has a local setup guide`, () => {
+    assert.equal(existsSync(`${root}/packages/gatekeeper-${vendorId}/README.md`), true);
+  });
+
+  test(`${vendorId} vendor description uses shared static OAuth readiness`, () => {
+    const source = readFileSync(
+      `${root}/packages/gatekeeper-${vendorId}/src/${fileName}`,
+      "utf8",
+    );
+
+    assert.match(source, /\bCLIENT_ID\b/);
+    assert.match(source, /\bCLIENT_SECRET\b/);
+    assert.match(source, /staticOauthConnectorConfiguration/);
+    assert.match(
+      source,
+      /configuration:\s*staticOauthConnectorConfiguration\((?:this\.)?env\)/,
+    );
+  });
+
+  test(`${vendorId} has a server-owned HTTPS setup guide`, () => {
+    const descriptor = connectorDescriptorSource(vendorId);
+    if (vendorId === "linear") {
+      assert.match(
+        descriptor,
+        /setupGuideUrl:\s*"https:\/\/linear\.app\/developers\/oauth-2-0-authentication"/,
+      );
+    } else {
+      const expected = `setupGuideUrl: \`\${README_BASE_URL}/gatekeeper-${vendorId}#readme\`,`;
+      assert.equal(descriptor.includes(expected), true);
+    }
+  });
+}

@@ -39,19 +39,21 @@ const EXPLICIT_LINK_REQUIRED =
 
 type PendingResult = { token: string } | { error: string };
 
-// Bridges a login result from the (separate) OAuth-callback invocation back to the waiting browser.
-//
-// This DO holds no durable storage: a login normally completes within seconds, and the in-flight
-// awaitResult() request keeps the DO alive so the in-memory waiter is reachable when deliver()/fail()
-// fire. If the attempt is abandoned, the client disposes the awaiting RPC (the `attempt` stub) and
-// the DO is simply evicted — no alarm or cleanup needed.
+/**
+ * Bridges a login result from the (separate) OAuth-callback invocation back to the waiting browser.
+ *
+ * This DO holds no durable storage: a login normally completes within seconds, and the in-flight
+ * awaitResult() request keeps the DO alive so the in-memory waiter is reachable when deliver()/fail()
+ * fire. If the attempt is abandoned, the client disposes the awaiting RPC (the `attempt` stub) and
+ * the DO is simply evicted — no alarm or cleanup needed.
+ */
 export class PendingLogin extends DurableObject<Cloudflare.Env> {
   // Awaiters from in-flight awaitResult() calls, resolved/rejected when the result arrives.
   #waiters: { resolve: (token: string) => void; reject: (err: Error) => void }[] = [];
   // Stash for the rare case deliver()/fail() arrives before awaitResult() registers a waiter.
   #result?: PendingResult;
 
-  // Block until the login completes (or fails).
+  /** Block until the login completes (or fails). */
   async awaitResult(): Promise<string> {
     if (this.#result) {
       const result = this.#result;
@@ -64,8 +66,10 @@ export class PendingLogin extends DurableObject<Cloudflare.Env> {
     });
   }
 
-  // Called by LoginConnectCallbackImpl on success: resolve the awaiter (or stash the token if none
-  // is waiting yet).
+  /**
+   * Called by LoginConnectCallbackImpl on success: resolve the awaiter (or stash the token if none
+   * is waiting yet).
+   */
   async deliver(token: string): Promise<void> {
     if (this.#waiters.length > 0) {
       for (const w of this.#waiters) w.resolve(token);
@@ -188,7 +192,9 @@ export class LoginConnectCallbackImpl
     }
   }
 
-  // No-ops: transient sign-in grants do not create connected-account credential state.
+  /** Transient sign-in grants do not retain credential state. */
   async credentialsExpired(): Promise<void> {}
+
+  /** Transient sign-in grants have no credential state to restore. */
   async credentialsRestored(_expiresAt?: Date): Promise<void> {}
 }

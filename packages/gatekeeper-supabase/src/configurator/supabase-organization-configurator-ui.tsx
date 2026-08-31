@@ -1,4 +1,4 @@
-import { Autocomplete, Field, h, Section, type ConfiguratorUISpec } from "@gadgets/configurator-ui";
+import { localize, Autocomplete, Field, h, Section, type ConfiguratorUISpec } from "@gadgets/configurator-ui";
 import type {
   SupabaseOrganizationConfiguratorRpc,
   SupabaseOrganizationConfiguratorValues,
@@ -15,13 +15,13 @@ export default {
     return `https://supabase.com/dashboard/org/${values.slug}`;
   },
 
-  render({ values, setValues, ui }) {
+  render({ values, setValues, ui, language }) {
     return <Section>
-      <Field label="Organization" description="Search the organizations in your connected Supabase account.">
+      <Field label={localize(language, { en: "Organization", ja: "組織" })} description={localize(language, { en: "Search the organizations in your connected Supabase account.", ja: "接続された Supabase アカウントの組織を検索します。" })}>
         <Autocomplete
           name="slug"
           value={values.slug}
-          placeholder="Search organizations..."
+          placeholder={localize(language, { en: "Search organizations...", ja: "組織を検索..." })}
           loadOptions={query => ui.listOrganizations(query)}
           onChange={slug => setValues({ slug })}
         />

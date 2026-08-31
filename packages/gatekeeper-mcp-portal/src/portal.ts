@@ -26,6 +26,7 @@ import {
 import type { ToolCatalog } from "@gadgets/mcp-shared/client";
 import {
   classifyTool,
+  MAX_TOOLS_PER_SERVER,
   type ServerTrust,
 } from "@gadgets/mcp-shared/tools";
 import { bindingNameFragment, hostOf } from "@gadgets/mcp-shared/util";
@@ -68,10 +69,9 @@ import {
   type McpGatekeeperUserProps,
 } from "@gadgets/mcp-shared/user";
 import {
-  portalAuthRequiresReconnect,
+  assertPortalServerAvailable,
   portalResource,
   portalServer,
-  portalTokenFor,
   portalTrust,
   readPortalConfig,
   requirePortalServerScope,
@@ -180,6 +180,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
       url: "https://developers.cloudflare.com/cloudflare-one/access-controls/ai-controls/mcp-portals/",
       logo: PORTAL_AVATAR,
       color: PORTAL_COLOR,
+      configuration: { configured: config !== null },
       tagline: config
         ? `Connect a server behind ${hostOf(config.endpoint)}`
         : "No MCP server portal is configured",
@@ -193,14 +194,19 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
     callback: Fetcher<GatekeeperConnectCallback>,
     _options?: GatekeeperConnectOptions,
   ): Promise<{ url: string }> {
+    if (!readPortalConfig(this.env)) {
+      throw new Error("No valid MCP server portal is configured for this deployment.");
+    }
     const accountId = this.ctx.exports.McpAccount.newUniqueId();
     const initiationNonce = generateNonce();
     await this.ctx.exports.McpAccount.get(accountId).setCallback(callback, initiationNonce);
     return { url: `${getBaseUrl(this.env)}/${accountId.toString()}/${initiationNonce}` };
   }
 
-  // The one resource this connector offers, or none when unconfigured. Returning nothing is how the
-  // connector hides itself: the Workshop drops a vendor that advertises no resources.
+  /**
+   * The one resource this connector offers, or none when unconfigured. Returning nothing is how the
+   * connector hides itself: the Workshop drops a vendor that advertises no resources.
+   */
   async getSupportedResources(): Promise<SupportedResource[]> {
     const config = readPortalConfig(this.env);
     return config ? [portalResource(config)] : [];
@@ -217,10 +223,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
 // ---------------------------------------------------------------------------
 // Account DO — owns the endpoint choice and every credential for it.
 
-// One connected portal, for one user. Nothing outside this object ever sees a credential.
-//
-// The endpoint is a deployment setting rather than user input, so the preissued token is the only
-// real addition: a portal may be fronted by one instead of using OAuth.
+/** One OAuth connection to the deployment-configured portal, for one user. */
 export class McpAccount extends McpAccountBase<Env> {
   protected baseUrl(): string {
     return getBaseUrl(this.env);
@@ -235,10 +238,8 @@ export class McpAccount extends McpAccountBase<Env> {
     return this.ctx.exports.GatekeeperUserImpl({ props });
   }
 
-  // Scoped to the endpoint this account is connected to, never merely to what configuration says
-  // today. The rule lives beside the configuration it guards, in `portalTokenFor`.
-  protected override staticToken(server: ConnectedServer): string | null {
-    return portalTokenFor(this.env, server.endpoint);
+  protected override assertServerAvailable(server: ConnectedServer): void {
+    assertPortalServerAvailable(readPortalConfig(this.env), server);
   }
 }
 
@@ -259,9 +260,11 @@ export class GatekeeperUserImpl
     return { account: this.#account(), avatar: PORTAL_AVATAR, baseUrl: getBaseUrl(this.env) };
   }
 
-  // The portal as currently configured, not as it was when this account connected. Repointing the
-  // deployment therefore surfaces as a reconnect, via `getGatekeeperClassFor` refusing the old
-  // endpoint, rather than as a Gadget quietly talking to a portal nobody chose.
+  /**
+   * The portal as currently configured, not as it was when this account connected. Repointing the
+   * deployment therefore surfaces as a reconnect, via `getGatekeeperClassFor` refusing the old
+   * endpoint, rather than as a Gadget quietly talking to a portal nobody chose.
+   */
   async getSupportedResources(): Promise<SupportedResource[]> {
     const config = readPortalConfig(this.env);
     return config ? [portalResource(config)] : [];
@@ -286,8 +289,8 @@ export class GatekeeperUserImpl
         `This connection is for ${hostOf(server.endpoint)}, but this deployment's portal is now ` +
         `${hostOf(config.endpoint)}. Reconnect the account.`);
     }
-    if (portalAuthRequiresReconnect(server.auth, config.auth)) {
-      throw new Error("This deployment's portal authentication changed. Reconnect the account.");
+    if (server.auth !== "oauth") {
+      throw new Error("This portal connection does not use OAuth. Reconnect the account.");
     }
 
     // The account holds credentials for one portal, so a resource URL naming any other endpoint is
@@ -389,7 +392,7 @@ class McpServerConfiguratorUI extends RpcTarget implements McpServerConfigurator
   // form treats both as having nothing to grant rather than telling them apart.
   async listServerOptions(): Promise<ConfiguratorUIOption[]> {
     const { tools, truncated } = await this.#tools();
-    if (!looksLikePortal(tools, truncated)) return [];
+    if (!looksLikePortal(tools, { truncated, cap: MAX_TOOLS_PER_SERVER })) return [];
 
     const servers = reconcilePortalServers(
       await this.#fetchPortalServers(), tools, truncated);
@@ -429,7 +432,7 @@ class McpServerConfiguratorUI extends RpcTarget implements McpServerConfigurator
     const { tools, truncated } = await this.#tools();
     requireCompleteCatalogForToolSelection(truncated);
     const scope: ToolScope = serverId ? { serverId } : {};
-    const isPortal = looksLikePortal(tools, truncated);
+    const isPortal = looksLikePortal(tools, { truncated, cap: MAX_TOOLS_PER_SERVER });
 
     return tools
       .filter(tool => scopeAllows(scope, tool.name, isPortal))
@@ -509,9 +512,9 @@ export class McpGatekeeperImpl
       ? `${scope.tools.length} named MCP tool${scope.tools.length === 1 ? "" : "s"} on ` +
         `${label} \u2014 ${counts}. Other tools are refused.`
       : scope.serverId
-      ? `All ${tools.length} MCP tool${plural} of the ` +
-        `${this.ctx.props.scopeServerName ?? scope.serverId} server on ` +
-        `${this.ctx.props.serverName} \u2014 ${counts}. Other servers on it are refused.`
+      ? `All tools of the ${this.ctx.props.scopeServerName ?? scope.serverId} server on ` +
+        `${this.ctx.props.serverName}; ${tools.length} definition${plural} shown here ` +
+        `(${counts}). Other servers on it are refused.`
       : `All ${tools.length} MCP tool${plural} on ${label} \u2014 ${counts}.`;
 
     return {
@@ -535,9 +538,11 @@ export class McpGatekeeperImpl
     return scope.serverId ? `${serverId}-${scope.serverId}` : serverId;
   }
 
-  // Namespaces persistent approval policy by both the readable binding shape and the exact portal
-  // endpoint. A deployment repoint must not carry an always-approve decision to a different system
-  // merely because both portals expose a tool with the same name.
+  /**
+   * Namespaces persistent approval policy by both the readable binding shape and the exact portal
+   * endpoint. A deployment repoint must not carry an always-approve decision to a different system
+   * merely because both portals expose a tool with the same name.
+   */
   protected get actionScopeTag(): string {
     return `mcp-portal:${endpointTag(this.ctx.props.endpoint)}:${this.#bindingId()}`;
   }
@@ -554,8 +559,10 @@ export class McpGatekeeperImpl
     });
   }
 
-  // The upstream server as the user should see it, not the portal's own name. The same label
-  // `describe()` shows, so an approval prompt names the system being written to.
+  /**
+   * The upstream server as the user should see it, not the portal's own name. The same label
+   * `describe()` shows, so an approval prompt names the system being written to.
+   */
   get serverName(): string {
     return this.#scopeLabel();
   }

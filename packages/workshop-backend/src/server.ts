@@ -1,9 +1,9 @@
 import { RpcStub, RpcTarget, newHttpBatchRpcResponse, newWebSocketRpcSession, RpcSessionOptions } from "capnweb";
 import { validateRpc } from "capnweb-validate";
-import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, ClerkAuthentication, TelegramLinkStatus, TelegramLinkStart, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, GATEKEEPER_SESSION_LOGOUT_PATH } from '@gadgets/workshop-shared/api';
+import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, LanguagePreference, ClerkAuthentication, TelegramLinkStatus, TelegramLinkStart, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, GATEKEEPER_SESSION_LOGOUT_PATH } from '@gadgets/workshop-shared/api';
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
-import { getServerConfig } from "./deployment-config.js";
-import { isPasswordAuthEnabled, getAuthGatekeeperAllowlist } from "./auth/config.js";
+import { getServerConfig, isPasswordAuthAvailable } from "./deployment-config.js";
+import { getAuthGatekeeperAllowlist } from "./auth/config.js";
 import { getAuthVendorBinding } from "./auth/auth-vendors.js";
 import { getUsageInfo } from "./ai-gateway-billing/limits/usage-checker.js";
 import { listConnectedAccounts, selectAccount } from "./ai-gateway-billing/cloudflare/connection-service.js";
@@ -20,10 +20,11 @@ import {
   startIdentityAuthorityWatchdog,
   type VerifiedAuthorityContext,
 } from "./identity-authority.js";
+import { assertAdminBootstrap } from "./admin-bootstrap-gate.js";
 
 // Re-export the optional-feature Durable Objects + entrypoints so they can be bound in wrangler.
 export { PendingLogin, LoginConnectCallbackImpl };
-import { GatekeeperUiFrame } from "@gadgets/workshop-shared/gatekeeper";
+import { assertConnectorConfigured, GatekeeperUiFrame } from "@gadgets/workshop-shared/gatekeeper";
 import { LanguageModelGatekeeper } from "./ai-models";
 import { getAiGatewayConfig } from "./ai-gateway.js";
 import { AdminSettings, AdminApiImpl } from "./admin-settings.js";
@@ -54,6 +55,12 @@ import { armAbsoluteDeadline, type AbsoluteDeadline } from "./absolute-deadline.
 import { handleGatekeeperSessionLogoutRequest } from "./gatekeeper-session-logout.js";
 
 const logger = createWorkshopLogger("workshop.server");
+function adminBootstrapMaintenanceResponse(): Response {
+  return new Response("Deployment initialization pending.\n", {
+    status: 503,
+    headers: {"content-type": "text/plain; charset=utf-8"},
+  });
+}
 
 type PublicApiCleanup = {
   run(): Promise<void>;
@@ -223,6 +230,12 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   setOwnDisplayName(name: string): Promise<void> {
     return this.#user.setOwnDisplayName(name);
   }
+  getLanguagePreference(): Promise<LanguagePreference> {
+    return this.#user.getLanguagePreference();
+  }
+  setLanguagePreference(preference: LanguagePreference): Promise<void> {
+    return this.#user.setLanguagePreference(preference);
+  }
   changePassword(oldHash: Uint8Array, newHash: Uint8Array): Promise<void> {
     return this.#user.changePassword(oldHash, newHash);
   }
@@ -298,6 +311,10 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
 
   listCloudflareAccounts(): Promise<CloudflareAccountOption[]> {
     return listConnectedAccounts(this.env, this.#user);
+  }
+
+  reconnectCloudflareBillingAccount(): Promise<{url: string}> {
+    return this.#user.reconnectCloudflareBillingAccount();
   }
 
   selectCloudflareAccount(accountId: string): Promise<void> {
@@ -698,8 +715,8 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     // appear in the nav even before the user opens a gadget — in a single round trip.
     let accounts = await this.#user.listProvidedAccounts();
     return accounts
-        .filter(account => account.description.providesUi)
-        .map(account => ({
+        .filter((account: (typeof accounts)[number]) => account.description.providesUi)
+        .map((account: (typeof accounts)[number]) => ({
           id: account.vendorId,
           title: account.description.providesUi!.title,
           icon: account.description.providesUi!.icon,
@@ -711,7 +728,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     // so a direct URL load of /gatekeepers/$id works without racing the Header's listGatekeeperApps.
     let user = this.#user;  // one stub for both calls
     let accounts = await user.listProvidedAccounts();
-    let app = accounts.find(account => account.vendorId === id && account.description.providesUi);
+    let app = accounts.find((account: (typeof accounts)[number]) => account.vendorId === id && account.description.providesUi);
     if (!app) return null;
     // Revalidate immediately before minting admin-bearing nested authority. A non-admin frame carries
     // no deployment authority and does not start the bounded privileged watchdog.
@@ -736,7 +753,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     //     system doesn't know this.
     return new AdminApiImpl(
       this.adminSettings.getByName(""), adminUserId,
-      () => this.#authorizeAdminOperation(),
+      () => this.#authorizeAdminOperation(), this.env,
     );
   }
 }
@@ -1010,6 +1027,7 @@ export class PublicApiImpl extends RpcTarget implements PublicApi {
     if (!vendor) throw new Error(`No such auth gatekeeper: ${vendorId}`);
     const desc = await vendor.describe();
     if (!desc.providesAuth) throw new Error(`"${vendorId}" does not provide authentication.`);
+    assertConnectorConfigured(desc);
 
     // The PendingLogin DO is the rendezvous between this request and the (separate) OAuth-callback
     // invocation. The client never sees its id — we hand back an `attempt` stub instead.
@@ -1017,8 +1035,8 @@ export class PublicApiImpl extends RpcTarget implements PublicApi {
     const pending = this.ctx.exports.PendingLogin.get(pendingId);
     const callback = this.ctx.exports.LoginConnectCallbackImpl(
         { props: { pendingId: pendingId.toString(), vendorId } });
-    // Sign-in needs only minimal scopes to verify the user's email. Capability scopes are requested
-    // later through the explicit connected-account flow.
+    // Sign-in needs only minimal scopes to verify the user's stable identity. Capability scopes and
+    // billing authority are requested later through the explicit connected-account flow.
     const { url } = await vendor.connectAccount(callback, { scopes: "auth" });
     // @ts-expect-error Cap'n Web RPC stubs and native RPC targets are compatible but the type
     //     system doesn't know this.
@@ -1256,7 +1274,7 @@ export class PublicApiImpl extends RpcTarget implements PublicApi {
     if (this.env.CF_ACCESS_AUD) {
       throw new Error("This deployment requires Cloudflare Access authentication.");
     }
-    if (!isPasswordAuthEnabled(this.env)) {
+    if (!(await isPasswordAuthAvailable(this.env))) {
       throw new Error("Password login is disabled on this deployment. Use a sign-in option.");
     }
 
@@ -1280,7 +1298,7 @@ export class PublicApiImpl extends RpcTarget implements PublicApi {
     if (this.env.CF_ACCESS_AUD) {
       throw new Error("This deployment requires Cloudflare Access authentication.");
     }
-    if (!isPasswordAuthEnabled(this.env)) {
+    if (!(await isPasswordAuthAvailable(this.env))) {
       throw new Error("Password signup is disabled on this deployment. Use a sign-in option.");
     }
     if (!(await readAdminConfig(this.env)).signupsEnabled) {
@@ -1331,6 +1349,12 @@ export default {
       env: Env,
       ctx: ExecutionContext,
       verifyClerk = (token: string) => verifyClerkIdentity(token, env)) {
+    try {
+      await assertAdminBootstrap(env, ctx);
+    } catch {
+      return adminBootstrapMaintenanceResponse();
+    }
+
     let url = new URL(req.url);
 
     if (url.pathname === SITE_LOGO_PATH) {

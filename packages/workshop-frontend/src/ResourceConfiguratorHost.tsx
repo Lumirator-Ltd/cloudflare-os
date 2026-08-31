@@ -1,7 +1,8 @@
 import { ResourceConfiguratorFrame } from '@gadgets/workshop-shared/gatekeeper'
 import SandboxedResourceConfigurator from './SandboxedResourceConfigurator'
+import { useTranslation } from 'react-i18next'
 
-// Renders the resource configurator slot inside the gatekeeper modal.
+/** Renders the resource configurator slot inside the gatekeeper modal. */
 export default function ResourceConfiguratorHost({
   frame,
   frameKey,
@@ -25,8 +26,9 @@ export default function ResourceConfiguratorHost({
   initialResourceUrl?: string
   resourceUrlPattern?: string
 }) {
-  if (disabled) return <Placeholder>Choose an account before selecting a resource.</Placeholder>
-  if (loading) return <Placeholder>Loading configurator...</Placeholder>
+  const { t } = useTranslation()
+  if (disabled) return <Placeholder>{t('gatekeepers.picker.chooseAccountFirst')}</Placeholder>
+  if (loading) return <Placeholder>{t('gatekeepers.picker.loadingConfigurator')}</Placeholder>
   if (error) return <Placeholder>{error}</Placeholder>
   if (!frame) return null
 

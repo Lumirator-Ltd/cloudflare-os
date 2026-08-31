@@ -2,6 +2,7 @@ import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import {
   ApprovalQueue,
+  staticOauthConnectorConfiguration,
   stripTrailingSlashes,
   type AccountDescription,
   type Gatekeeper,
@@ -334,6 +335,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
         "contacts, intent signals, scoops, and news, and enrich matched records into full detail. " +
         "Search is free; enrichment consumes ZoomInfo credits. Build agents that assemble target " +
         "account lists, research accounts, and prioritize outreach on buying signals.",
+      configuration: staticOauthConnectorConfiguration(this.env),
     };
   }
 
@@ -383,8 +385,10 @@ export class UserAccount extends DurableObject<Env> {
     });
   }
 
-  // Verify the initiation nonce, then mint the PKCE pair for the authorize redirect. The
-  // code_verifier is stored server-side (never leaves the DO) and consumed at token exchange.
+  /**
+   * Verify the initiation nonce, then mint the PKCE pair for the authorize redirect. The
+   * code_verifier is stored server-side (never leaves the DO) and consumed at token exchange.
+   */
   async beginOAuthFlow(
     initiationNonce: string,
   ): Promise<{ oauthNonce: string; codeChallenge: string } | null> {
@@ -540,7 +544,7 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
     };
   }
 
-  // ZoomInfo is not offered as a sign-in identity provider.
+  /** ZoomInfo is not offered as a sign-in identity provider. */
   async getAuthenticatedEmail(): Promise<string | null> {
     return null;
   }
@@ -581,8 +585,10 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
     return { url: `${getBaseUrl(this.env)}/${this.ctx.props.userObjectId}/${initiationNonce}` };
   }
 
-  // ZoomInfo uses the private-only observer strategy. The verifier is never consulted, but the
-  // overseer mints one on every collaborator open, so getVerifier must still return a valid stub.
+  /**
+   * ZoomInfo uses the private-only observer strategy. The verifier is never consulted, but the
+   * overseer mints one on every collaborator open, so getVerifier must still return a valid stub.
+   */
   @skipRpcValidation()
   async getVerifier(): Promise<Fetcher<GatekeeperUserVerifier>> {
     return this.ctx.exports.ZoomInfoVerifier({});
@@ -646,10 +652,12 @@ export class ZoomInfoGatekeeperImpl extends DurableObject<Env, ZoomInfoGatekeepe
       this.#userAccount(), approvalQueue.dup(), resolveOAuthConfig(this.env).apiBaseUrl, this.ctx.storage.kv);
   }
 
-  // Approved: replay the queued enrichment against ZoomInfo (spending credits) and store the result
-  // for the Gadget to read via getEnrichmentResult(). A ZoomInfo failure is recorded as a "failed"
-  // outcome rather than re-thrown: the action is considered resolved (we don't want the overseer to
-  // retry a paid operation that may have already charged credits), and the Gadget sees the failure.
+  /**
+   * Approved: replay the queued enrichment against ZoomInfo (spending credits) and store the result
+   * for the Gadget to read via getEnrichmentResult(). A ZoomInfo failure is recorded as a "failed"
+   * outcome rather than re-thrown: the action is considered resolved (we don't want the overseer to
+   * retry a paid operation that may have already charged credits), and the Gadget sees the failure.
+   */
   async applyAction(action: number): Promise<void> {
     const store = new EnrichmentStore(this.ctx.storage.kv);
     const pending = store.getPending(action);
@@ -669,15 +677,17 @@ export class ZoomInfoGatekeeperImpl extends DurableObject<Env, ZoomInfoGatekeepe
     store.removePending(action);
   }
 
-  // Rejected: discard the queued enrichment (no credits spent) and record the outcome.
+  /** Rejected: discard the queued enrichment (no credits spent) and record the outcome. */
   async rejectAction(action: number): Promise<void> {
     const store = new EnrichmentStore(this.ctx.storage.kv);
     store.removePending(action);
     store.putResult(action, { status: "rejected" });
   }
 
-  // Enrichment isn't revertable: spent credits can't be refunded. submitAction sets
-  // implementsRevert: false, so this is not normally reached; we drop the stored result defensively.
+  /**
+   * Enrichment isn't revertable: spent credits can't be refunded. submitAction sets
+   * implementsRevert: false, so this is not normally reached; we drop the stored result defensively.
+   */
   async revertAction(action: number): Promise<void | { message?: string; canRetry?: boolean }> {
     new EnrichmentStore(this.ctx.storage.kv).removeResult(action);
     return {
@@ -687,9 +697,11 @@ export class ZoomInfoGatekeeperImpl extends DurableObject<Env, ZoomInfoGatekeepe
     };
   }
 
-  // Observer tracking — strategy A (private-only). This whole-account binding exposes licensed,
-  // entitlement-dependent data and account-specific intelligence, and ZoomInfo provides no ACL
-  // oracle that can prove another account could read every historical result.
+  /**
+   * Observer tracking — strategy A (private-only). This whole-account binding exposes licensed,
+   * entitlement-dependent data and account-specific intelligence, and ZoomInfo provides no ACL
+   * oracle that can prove another account could read every historical result.
+   */
   async addObserver(_id: string, _user: Fetcher<GatekeeperUserVerifier>): Promise<void> {
     throw new Error(
       "ZoomInfo data cannot be shared with other users: this workspace's ZoomInfo account may only " +

@@ -22,6 +22,8 @@ import { useAuthenticatedApi } from '../../AuthContext'
 import { MENU_CONTENT } from '../menuStyles'
 import { FORMAT_ICONS, GENERIC_OUTPUT } from './formats'
 import { FormatGlyph, FormatPreview } from './FormatVisuals'
+import { useTranslation } from 'react-i18next'
+import i18n from '../../i18n/config'
 
 // A blueprint the admin could promote. `declared` is what it says it produces, when we know --
 // known for the deployment's featured blueprints, unknown for the admin's own published ones.
@@ -34,11 +36,14 @@ export default function AdminFormatsPanel({
 }: {
   admin: RpcStub<AdminApi>
   formats: AdminFormat[]
-  // Re-fetch after a mutation. Formats are edited rarely, so re-reading beats an optimistic local
-  // copy that could disagree about order.
+  /**
+   * Re-fetch after a mutation. Formats are edited rarely, so re-reading beats an optimistic local
+   * copy that could disagree about order.
+   */
   onChanged: () => Promise<void>
 }) {
   const { authenticatedApi } = useAuthenticatedApi()
+  const { t } = useTranslation(undefined, { i18n })
   const toasts = useKumoToastManager()
   const [busy, setBusy] = useState(false)
   const [expanded, setExpanded] = useState<string | null>(null)
@@ -78,7 +83,7 @@ export default function AdminFormatsPanel({
       await onChanged()
     } catch (err) {
       console.error('Format update failed:', err)
-      toasts.add({ title: "Couldn't update standard formats", variant: 'error' })
+      toasts.add({ title: t('formats.admin.updateFailed'), variant: 'error' })
     } finally {
       setBusy(false)
     }
@@ -94,10 +99,9 @@ export default function AdminFormatsPanel({
 
   return (
     <div className="rounded-xl border border-kumo-line bg-kumo-elevated p-6">
-      <h2 className="mb-1 text-lg font-semibold text-kumo-strong">Standard formats</h2>
+      <h2 className="mb-1 text-lg font-semibold text-kumo-strong">{t('formats.admin.title')}</h2>
       <p className="mb-5 text-sm text-kumo-subtle">
-        A promoted blueprint is offered by name (“New Doc”, “New Slides”) wherever people start
-        something, and the agent is told to prefer it over building the same thing from scratch.
+        {t('formats.panel.intro')}
       </p>
 
       <PreviewStrip formats={offered} />
@@ -130,13 +134,13 @@ export default function AdminFormatsPanel({
           render={
             <Button variant="secondary" disabled={busy || available.length === 0}>
               <Plus size={14} className="mr-1.5" />
-              Promote a blueprint
+              {t('formats.panel.promote')}
             </Button>
           }
         />
         <DropdownMenu.Content className={MENU_CONTENT}>
           <p className="px-2 pb-1.5 pt-1 text-[11px] font-medium uppercase tracking-[0.06em] text-kumo-inactive">
-            Offer as a standard format
+            {t('formats.panel.offer')}
           </p>
           {available.map((candidate) => (
             <DropdownMenu.Item
@@ -147,12 +151,12 @@ export default function AdminFormatsPanel({
               <FormatGlyph output={candidate.declared} size="lg" className="shrink-0 text-kumo-subtle" />
               <span className="min-w-0">
                 <span className="block truncate text-[13px] text-kumo-default">
-                  {candidate.title || 'Untitled blueprint'}
+                  {candidate.title || t('formats.admin.untitled')}
                 </span>
                 <span className="block truncate text-[11px] text-kumo-inactive">
                   {candidate.declared
-                    ? `Produces ${candidate.declared.plural}`
-                    : 'No declared format. You’ll name it.'}
+                    ? t('formats.admin.produces', { plural: candidate.declared.plural })
+                    : t('formats.admin.noDeclared')}
                 </span>
               </span>
             </DropdownMenu.Item>
@@ -168,11 +172,11 @@ function PreviewStrip({ formats }: { formats: AdminFormat[] }) {
   return (
     <div className="mb-5 rounded-lg border border-dashed border-kumo-line bg-kumo-tint/40 p-4">
       <p className="mb-2.5 text-[11px] font-medium uppercase tracking-[0.06em] text-kumo-inactive">
-        What people will see
+        {i18n.t('formats.panel.peopleSee')}
       </p>
       {formats.length === 0 ? (
         <p className="text-[13px] italic text-kumo-inactive">
-          Nothing yet. People will only see “New workspace”.
+          {i18n.t('formats.panel.nothingYet')}
         </p>
       ) : (
         <div className="flex flex-wrap items-center gap-2">
@@ -182,13 +186,13 @@ function PreviewStrip({ formats }: { formats: AdminFormat[] }) {
               className="flex items-center gap-2 rounded-full border border-kumo-line bg-kumo-base px-3.5 py-2 text-[13px] leading-[18px] tracking-[-0.25px] text-kumo-default"
             >
               <FormatGlyph output={format.output} size="md" className="text-kumo-subtle" />
-              New {format.output!.noun}
+              {i18n.t('formats.newOutput', { noun: format.output!.noun })}
             </span>
           ))}
         </div>
       )}
       <p className="mt-2.5 text-[12px] leading-4 text-kumo-subtle">
-        In the composer’s + menu, the command palette, and on an empty Outputs page, in this order.
+        {i18n.t('formats.panel.menuDescription')}
       </p>
     </div>
   )
@@ -197,10 +201,9 @@ function PreviewStrip({ formats }: { formats: AdminFormat[] }) {
 function EmptyState() {
   return (
     <div className="mb-5 rounded-lg border border-kumo-line bg-kumo-base px-4 py-5 text-center">
-      <p className="text-sm font-medium text-kumo-default">No standard formats yet</p>
+      <p className="text-sm font-medium text-kumo-default">{i18n.t('formats.admin.none')}</p>
       <p className="mx-auto mt-1 max-w-md text-[13px] leading-[18px] text-kumo-subtle">
-        Promote a blueprint to offer it by name wherever people start something, and to have the
-        agent prefer it over building the same thing from scratch.
+        {i18n.t('formats.panel.promoteDescription')}
       </p>
     </div>
   )
@@ -241,7 +244,7 @@ function FormatRow({
           {format.missing ? (
             <span
               className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-kumo-tint text-kumo-danger"
-              title="This blueprint no longer exists"
+              title={i18n.t('formats.admin.missingTitle')}
             >
               <Warning size={16} />
             </span>
@@ -254,18 +257,18 @@ function FormatRow({
           <span className="min-w-0 flex-1">
             <span className="flex items-center gap-2">
               <span className="truncate text-sm font-medium text-kumo-default">
-                {format.output ? `New ${format.output.noun}` : format.blueprintTitle || format.blueprintId}
+                {format.output ? i18n.t('formats.newOutput', { noun: format.output.noun }) : format.blueprintTitle || format.blueprintId}
               </span>
-              {format.bundled && <Badge>Bundled</Badge>}
-              {!format.enabled && !format.missing && <Badge>Off</Badge>}
-              {needsNaming && <Badge tone="warn">Needs a name</Badge>}
+              {format.bundled && <Badge>{i18n.t('formats.admin.bundled')}</Badge>}
+              {!format.enabled && !format.missing && <Badge>{i18n.t('formats.admin.off')}</Badge>}
+              {needsNaming && <Badge tone="warn">{i18n.t('formats.admin.needsName')}</Badge>}
             </span>
             <span className="mt-0.5 block truncate text-xs text-kumo-subtle">
               {format.missing
-                ? 'Blueprint deleted. Remove this entry.'
+                ? i18n.t('formats.admin.deleted')
                 : needsNaming
-                ? 'This blueprint doesn’t declare what it produces. Give it a name to offer it.'
-                : `${format.blueprintTitle} · shown under ${format.output!.plural} on Outputs`}
+                ? i18n.t('formats.admin.needsNaming')
+                : i18n.t('formats.panel.shownUnder', { title: format.blueprintTitle, plural: format.output!.plural })}
             </span>
           </span>
 
@@ -281,10 +284,10 @@ function FormatRow({
             open ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 focus-within:opacity-100'
           }`}
         >
-          <IconButton label="Move up" disabled={busy || isFirst} onClick={() => onMove(-1)}>
+          <IconButton label={i18n.t('formats.admin.moveUp')} disabled={busy || isFirst} onClick={() => onMove(-1)}>
             <ArrowUp size={13} />
           </IconButton>
-          <IconButton label="Move down" disabled={busy || isLast} onClick={() => onMove(1)}>
+          <IconButton label={i18n.t('formats.admin.moveDown')} disabled={busy || isLast} onClick={() => onMove(1)}>
             <ArrowDown size={13} />
           </IconButton>
         </div>
@@ -300,22 +303,15 @@ function FormatRow({
         <div className="flex flex-col gap-4 border-t border-kumo-line px-3 py-4">
           {format.missing ? (
             <p className="text-[13px] text-kumo-subtle">
-              The blueprint behind this format was deleted, so nobody is offered it. Remove the
-              entry.
+              {i18n.t('formats.panel.deletedDescription')}
             </p>
           ) : (
             <>
               <Fieldset
-                title="How it’s presented"
-                detail={
-                  'Leave a field empty to use the name the blueprint declares. ' +
-                  (format.bundled
-                    ? 'A bundled blueprint can change its declared names when this deployment ' +
-                      'updates; a value you type here stays as you set it. '
-                    : '') +
-                  'Applies to outputs made from now on — existing ones keep the name they were ' +
-                  'made with.'
-                }
+                title={i18n.t('formats.admin.presentationTitle')}
+                detail={i18n.t(format.bundled
+                  ? 'formats.panel.presentationBundledDetail'
+                  : 'formats.admin.presentationDetail')}
               >
                 <div className="flex items-center gap-4">
                   <div className="grid flex-1 gap-2 sm:grid-cols-[auto_1fr_1fr]">
@@ -331,14 +327,14 @@ function FormatRow({
                       onPick={(icon) => onPatch({ overrides: { icon } })}
                     />
                     <OverrideField
-                      label="Name"
+                      label={i18n.t('formats.admin.name')}
                       value={format.output?.noun ?? format.overrides?.noun ?? ''}
                       declared={format.declared?.noun}
                       disabled={busy}
                       onCommit={(noun) => onPatch({ overrides: { noun } })}
                     />
                     <OverrideField
-                      label="Plural"
+                      label={i18n.t('formats.admin.plural')}
                       value={format.output?.plural ?? format.overrides?.plural ?? ''}
                       declared={format.declared?.plural}
                       disabled={busy}
@@ -352,19 +348,19 @@ function FormatRow({
                   <figure className="hidden shrink-0 flex-col items-center gap-1.5 sm:flex">
                     <FormatPreview output={format.output} width={112} />
                     <figcaption className="text-[10px] uppercase tracking-[0.06em] text-kumo-inactive">
-                      On Outputs
+                      {i18n.t('formats.panel.outputs')}
                     </figcaption>
                   </figure>
                 </div>
               </Fieldset>
 
               <Fieldset
-                title="How the agent picks it"
-                detail="Standard formats are listed first in the agent’s catalog, as the entry below — the blueprint’s own description does most of the work. Add a hint only if the agent needs to know when to prefer this format over another one."
+                title={i18n.t('formats.admin.agentTitle')}
+                detail={i18n.t('formats.admin.agentDetail')}
               >
                 <OverrideField
-                  label="Hint"
-                  placeholder="e.g. prefer for customer-facing decks"
+                  label={i18n.t('formats.admin.hint')}
+                  placeholder={i18n.t('formats.admin.hintPlaceholder')}
                   value={format.agentHint}
                   disabled={busy}
                   onCommit={(agentHint) => onPatch({ agentHint: agentHint ?? '' })}
@@ -377,7 +373,7 @@ function FormatRow({
                     <Sparkle size={12} className="mt-0.5 shrink-0" />
                     <span className="min-w-0">
                       <span className="block">
-                        “{format.output.noun}” — a standard format on this deployment
+                        “{format.output.noun}” {i18n.t('formats.panel.catalogSuffix')}
                         {format.agentHint ? ` -- ${format.agentHint}` : ''}
                       </span>
                       {format.blueprintDescription && (
@@ -396,17 +392,14 @@ function FormatRow({
                   result. The backend refuses it too -- this is an RPC. */}
               <div className="flex items-end justify-between gap-4 border-t border-kumo-line pt-3">
                 <p className="text-[12px] leading-4 text-kumo-subtle">
-                  {(format.enabled
-                    ? 'Turning this off removes it from the menus above and from the agent’s catalog. Outputs already made from it keep working. '
-                    : 'Currently hidden from the menus above and from the agent’s catalog. ') +
-                    (format.bundled
-                      ? 'It ships with the deployment, so it stays in this list either way.'
-                      : '')}
+                  {i18n.t(format.enabled
+                    ? format.bundled ? 'formats.admin.disableBundled' : 'formats.admin.disable'
+                    : format.bundled ? 'formats.admin.disabledBundled' : 'formats.admin.disabled')}
                 </p>
                 {!format.bundled && (
                   <Button variant="secondary" disabled={busy} onClick={onRemove}>
                     <Trash size={13} className="mr-1.5" />
-                    Stop offering
+                    {i18n.t('formats.panel.stopOffering')}
                   </Button>
                 )}
               </div>
@@ -417,7 +410,7 @@ function FormatRow({
             <div className="flex justify-end">
               <Button variant="secondary" disabled={busy} onClick={onRemove}>
                 <Trash size={13} className="mr-1.5" />
-                Remove
+                {i18n.t('formats.panel.remove')}
               </Button>
             </div>
           )}
@@ -491,7 +484,7 @@ function OverrideField({
       <span className="text-[11px] font-medium uppercase tracking-[0.06em] text-kumo-inactive">
         {label}
         {overridden && (
-          <span className="ml-1 normal-case tracking-normal text-kumo-subtle">(overridden)</span>
+          <span className="ml-1 normal-case tracking-normal text-kumo-subtle">{i18n.t('formats.panel.overridden')}</span>
         )}
       </span>
       <Input
@@ -525,7 +518,7 @@ function IconPicker({
   return (
     <label className="flex flex-col gap-1">
       <span className="text-[11px] font-medium uppercase tracking-[0.06em] text-kumo-inactive">
-        Icon
+        {i18n.t('formats.panel.icon')}
       </span>
       <DropdownMenu>
         <DropdownMenu.Trigger
@@ -533,7 +526,7 @@ function IconPicker({
             <button
               type="button"
               disabled={disabled}
-              aria-label="Choose icon"
+              aria-label={i18n.t('formats.admin.chooseIcon')}
               className="grid h-9 w-9 cursor-pointer place-items-center rounded-lg border border-kumo-line bg-kumo-base text-kumo-subtle transition-colors hover:text-kumo-default disabled:cursor-default"
             >
               <FormatGlyph output={selected && { ...GENERIC_OUTPUT, icon: selected }} size="lg" />

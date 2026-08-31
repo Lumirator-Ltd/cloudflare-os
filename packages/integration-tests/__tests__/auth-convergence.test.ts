@@ -46,7 +46,9 @@ function encodeJwtPart(value: unknown): string {
 
 function signJwt(header: object, payload: object, privateKey: KeyObject): string {
   const unsigned = `${encodeJwtPart(header)}.${encodeJwtPart(payload)}`;
-  const signature = sign("RSA-SHA256", Buffer.from(unsigned), privateKey).toString("base64url");
+  const signature = Buffer.from(
+    sign("RSA-SHA256", Buffer.from(unsigned), privateKey),
+  ).toString("base64url");
   return `${unsigned}.${signature}`;
 }
 

@@ -725,7 +725,20 @@ describe("ScheduleDriver", () => {
       });
     });
 
-    await runDurableObjectAlarm(driver);
+    // Hold callbacks open until the driver fills its concurrency window. A short timer here was
+    // scheduler-dependent and sometimes observed only three concurrent callbacks on CI runners.
+    await testEnv.TEST_HOOKS.blockAt("callback");
+    const alarm = runDurableObjectAlarm(driver);
+    try {
+      await vi.waitFor(async () => {
+        const events = (await testEnv.TEST_HOOKS.read()).events;
+        expect(events.filter((event) => event.startsWith("callback:"))).toHaveLength(4);
+      });
+      expect((await testEnv.TEST_HOOKS.read()).maxActiveCallbacks).toBe(4);
+    } finally {
+      await testEnv.TEST_HOOKS.release();
+      await alarm;
+    }
     await vi.waitFor(async () => {
       const events = (await testEnv.TEST_HOOKS.read()).events;
       expect(events.filter((event) => event.startsWith("callback:"))).toHaveLength(21);
@@ -1182,20 +1195,25 @@ describe("ScheduleDriver", () => {
   it("permanently fences mutations and cleans revoked storage in bounded alarm passes", async () => {
     const driver = testEnv.SCHEDULE_DRIVER.getByName("revocation");
     const activationTime = Date.now();
-    for (let index = 0; index < 60; index++) {
-      await enableSchedule(
-        driver,
-        {
-          workspaceId: "workspace-a",
-          scheduleId: `schedule-${index}`,
-          spec: { kind: "interval", everyMs: 60_000, anchorMs: activationTime },
-          title: `Task ${index}`,
-          description: "Test revocation cleanup.",
-          gadgetId,
-        },
-        activationTime,
-      );
-    }
+    // Seeded through the real enable() path, so each schedule gets its capabilities row too, but
+    // in a single Durable Object invocation: this fixture has to exceed the cleanup batch size,
+    // and sixty separate round-trips spent most of the default test timeout on their own.
+    await runInDurableObject(driver, async (instance) => {
+      for (let index = 0; index < 60; index++) {
+        await instance.enable(
+          {
+            workspaceId: "workspace-a",
+            scheduleId: `schedule-${index}`,
+            spec: { kind: "interval", everyMs: 60_000, anchorMs: activationTime },
+            title: `Task ${index}`,
+            description: "Test revocation cleanup.",
+            gadgetId,
+          },
+          testInitiator(instance),
+          activationTime,
+        );
+      }
+    });
 
     await driver.revoke();
     await expect(driver.disable("workspace-a", "schedule-0")).resolves.toBeUndefined();

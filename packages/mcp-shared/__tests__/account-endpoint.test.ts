@@ -59,6 +59,20 @@ class ConfiguredTokenAccount extends McpAccountBase<AccountEnv> {
   protected override async probe(): Promise<never> { throw new Error("not probed"); }
 }
 
+class LivePolicyAccount extends McpAccountBase<AccountEnv> {
+  allowedEndpoint: string | null = "https://old.example/mcp";
+
+  protected baseUrl(): string { return "https://gatekeeper.example"; }
+  protected log(): never { return testLog as never; }
+  protected mintAccount(): never { throw new Error("not reached"); }
+  protected override assertServerAvailable(server: ConnectedServer): void {
+    if (this.allowedEndpoint !== server.endpoint) {
+      throw new Error("This MCP portal is no longer available. Reconnect the account.");
+    }
+  }
+  protected override async probe(): Promise<never> { throw new Error("not probed"); }
+}
+
 // Exercises the expiry latch. The callback is the Workshop, reached over RPC, so it can fail
 // transiently without anything being wrong with the account.
 class ExpiringAccount extends McpAccountBase<AccountEnv> {
@@ -92,6 +106,15 @@ class UnconfiguredTokenAccount extends McpAccountBase<AccountEnv> {
 
   isWaiting(nonce: string): boolean {
     return this.awaitingSelection(nonce);
+  }
+}
+
+class PublicProbeAccount extends McpAccountBase<AccountEnv> {
+  protected baseUrl(): string { return "https://gatekeeper.example"; }
+  protected log(): never { return testLog as never; }
+  protected mintAccount(): never { return {} as never; }
+  protected override async probe(): Promise<never> {
+    return { serverInfo: { name: "Public" } } as never;
   }
 }
 
@@ -144,6 +167,36 @@ describe("connect initiation nonce", () => {
     expect(account.isWaiting(nonce)).toBe(true);
   });
 
+  it.each([
+    ["removed", null],
+    ["repointed", "https://new.example/mcp"],
+  ])("refuses getConnection after the deployment endpoint is %s", async (_change, allowed) => {
+    const context = fakeContext();
+    const connected = { ...server("https://old.example/mcp"), auth: "none" as const };
+    context.storage.kv.put("server", connected);
+    const account = new LivePolicyAccount(context as never, {});
+
+    await expect(account.getConnection(connected.endpoint)).resolves.toMatchObject({
+      authorization: null,
+    });
+    account.allowedEndpoint = allowed;
+
+    await expect(account.getConnection(connected.endpoint)).rejects.toThrow(/Reconnect/);
+  });
+
+  it("refuses a captured connection after deployment policy changes", async () => {
+    const context = fakeContext();
+    const connected = { ...server("https://old.example/mcp"), auth: "none" as const };
+    context.storage.kv.put("server", connected);
+    const account = new LivePolicyAccount(context as never, {});
+    const connection = await account.getConnection(connected.endpoint);
+
+    account.allowedEndpoint = "https://new.example/mcp";
+
+    await expect(account.assertConnectionCurrent(connected.endpoint, connection.generation))
+      .rejects.toThrow(/Reconnect/);
+  });
+
   it("does not hand current credentials to a facet for the pre-repoint endpoint", async () => {
     const context = fakeContext();
     context.storage.kv.put("server", {
@@ -190,11 +243,30 @@ describe("connect initiation nonce", () => {
     const repoint = account.beginConnect(nonce, {
       ...server("https://new.example/mcp"), provenance: "deployment",
     });
-    await account.setMcpSessionId(old.endpoint, connection.generation, "old-session");
+    await account.setMcpSessionId(
+      old.endpoint, connection.generation, connection.sessionId, "old-session");
     expect(context.storage.kv.get("mcpSessionId")).toBeUndefined();
 
     account.failProbe();
     await expect(repoint).rejects.toThrow("stop test probe");
+  });
+
+  it("does not let concurrent initialization overwrite the first stored session", async () => {
+    const context = fakeContext();
+    const connected = { ...server("https://mcp.example/mcp"), auth: "none" as const };
+    context.storage.kv.put("server", connected);
+    const account = new InterleavingAccount(context as never, {});
+    const first = await account.getConnection(connected.endpoint);
+    const second = await account.getConnection(connected.endpoint);
+
+    await expect(account.setMcpSessionId(
+      connected.endpoint, first.generation, null, "first-session")).resolves.toBe(true);
+    await expect(account.setMcpSessionId(
+      connected.endpoint, second.generation, null, "first-session")).resolves.toBe(true);
+    await expect(account.setMcpSessionId(
+      connected.endpoint, second.generation, null, "second-session")).resolves.toBe(false);
+
+    expect(context.storage.kv.get("mcpSessionId")).toBe("first-session");
   });
 
   it("does not let an old in-flight refresh restore tokens after repoint", async () => {
@@ -350,6 +422,31 @@ describe("connect initiation nonce", () => {
     expect(context.storage.kv.get("server")).toBeUndefined();
     expect(context.storage.kv.get("connected")).toBeUndefined();
     expect(account.isWaiting(nonce)).toBe(true);
+  });
+
+  it("preserves anonymous user-supplied endpoints when OAuth is only the initial guess", async () => {
+    const context = fakeContext();
+    context.storage.kv.put("callback", { credentialsRestored: async () => undefined });
+    const account = new PublicProbeAccount(context as never, {});
+    const nonce = "6".repeat(64);
+    await account.prepareReconnect(nonce);
+
+    await expect(account.beginConnect(nonce, server("https://public.example/mcp")))
+      .resolves.toEqual({ kind: "done" });
+    expect(context.storage.kv.get<ConnectedServer>("server")?.auth).toBe("none");
+  });
+
+  it("refuses an OAuth-configured endpoint that answers without authorization", async () => {
+    const context = fakeContext();
+    context.storage.kv.put("callback", { credentialsRestored: async () => undefined });
+    const account = new PublicProbeAccount(context as never, {});
+    const nonce = "7".repeat(64);
+    await account.prepareReconnect(nonce);
+
+    await expect(account.beginConnect(nonce, {
+      ...server("https://portal.example/mcp"), auth: "oauth", provenance: "deployment",
+    })).rejects.toThrow(/must require OAuth/i);
+    expect(context.storage.kv.get("connected")).toBeUndefined();
   });
 
   it("adopts OAuth but refuses a private authorization redirect", async () => {

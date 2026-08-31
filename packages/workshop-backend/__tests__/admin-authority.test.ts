@@ -4,6 +4,8 @@ import { AdminApiImpl } from "../src/admin-settings.js";
 
 const calls: Record<string, unknown[]> = {
   getSettings: [],
+  listConnectorConfigurations: [],
+  configureConnector: ["github", { CLIENT_ID: "id", CLIENT_SECRET: "secret" }],
   setSignupsEnabled: [true],
   setSiteName: ["Workshop"],
   setSiteLogo: [null],

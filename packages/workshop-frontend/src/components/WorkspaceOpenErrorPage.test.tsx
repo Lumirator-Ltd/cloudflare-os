@@ -3,8 +3,10 @@
 
 import { act, type ReactNode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
+import { I18nextProvider } from 'react-i18next'
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
 import { createOpenGadgetError, OPEN_GADGET_ERROR_CODES } from '@gadgets/workshop-shared/api'
+import i18n from '../i18n/config'
 import WorkspaceOpenErrorPage, { classifyWorkspaceOpenFailure } from './WorkspaceOpenErrorPage'
 
 const testGlobal = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -25,11 +27,12 @@ describe('WorkspaceOpenErrorPage', () => {
   let root: Root | undefined
   let container: HTMLDivElement | undefined
 
-  afterEach(() => {
+  afterEach(async () => {
     act(() => root?.unmount())
     container?.remove()
     root = undefined
     container = undefined
+    await i18n.changeLanguage('en')
   })
 
   async function render(kind: 'access-denied' | 'not-found' | 'unexpected') {
@@ -39,11 +42,13 @@ describe('WorkspaceOpenErrorPage', () => {
     document.body.append(container)
     root = createRoot(container)
     await act(async () => root!.render(
-      <WorkspaceOpenErrorPage
-        kind={kind}
-        onRetry={onRetry}
-        onGoToWorkspaces={onGoToWorkspaces}
-      />,
+      <I18nextProvider i18n={i18n}>
+        <WorkspaceOpenErrorPage
+          kind={kind}
+          onRetry={onRetry}
+          onGoToWorkspaces={onGoToWorkspaces}
+        />
+      </I18nextProvider>,
     ))
     return { container, onGoToWorkspaces, onRetry }
   }
@@ -79,6 +84,18 @@ describe('WorkspaceOpenErrorPage', () => {
     expect(renderedContainer.textContent).toContain('Try again. If the problem continues, return to your workspaces.')
     expect([...renderedContainer.querySelectorAll('button')].map(button => button.textContent))
       .toEqual(['Go to workspaces', 'Try again'])
+  })
+
+  it('renders recovery guidance in Japanese', async () => {
+    await i18n.changeLanguage('ja')
+    const { container: renderedContainer } = await render('access-denied')
+
+    expect(renderedContainer.querySelector('h1')?.textContent)
+      .toBe('このワークスペースへのアクセス権がありません')
+    expect(renderedContainer.textContent)
+      .toContain('ワークスペースの所有者にアクセス権を付与してもらってから、もう一度お試しください。')
+    expect([...renderedContainer.querySelectorAll('button')].map(button => button.textContent))
+      .toEqual(['ワークスペース一覧へ', 'もう一度試す'])
   })
 
   it('classifies stable open error codes without treating unexpected errors as expected', () => {

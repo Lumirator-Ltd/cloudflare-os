@@ -2,7 +2,8 @@
 // AI Gateway billing (ai-gateway-billing/), and the admin-configured branding (admin-config.ts).
 // Contains no secrets.
 
-import { AuthVendorInfo, ServerConfig } from "@gadgets/workshop-shared/api";
+import { AuthVendorInfo, ServerConfig, SupportedLanguage } from "@gadgets/workshop-shared/api";
+import { connectorIsConfigured } from "@gadgets/workshop-shared/gatekeeper";
 import { createWorkshopLogger } from "./observability";
 import { getAuthGatekeeperAllowlist, isPasswordAuthEnabled } from "./auth/config.js";
 import { isCloudflareBillingEnabled } from "./ai-gateway-billing/config.js";
@@ -12,9 +13,11 @@ import { siteLogoImage } from "./site-logo.js";
 
 const logger = createWorkshopLogger("workshop.deployment.config");
 
-// Resolve the auth-capable, allowlisted gatekeeper vendors offered as sign-in methods, querying
-// each gatekeeper's describe() for display info. Skips vendors with no binding, that don't advertise
-// providesAuth, or that error.
+/**
+ * Resolve the auth-capable, allowlisted gatekeeper vendors offered as sign-in methods, querying
+ * each gatekeeper's describe() for display info. Skips vendors with no binding, that don't advertise
+ * providesAuth, or that error.
+ */
 export async function getAuthVendors(env: Cloudflare.Env): Promise<AuthVendorInfo[]> {
   // describe() is a cross-Worker RPC and getServerConfig() runs on every (re)connect, so query the
   // allowlisted vendors in parallel rather than serially. Order is preserved (Promise.all), so the
@@ -26,7 +29,13 @@ export async function getAuthVendors(env: Cloudflare.Env): Promise<AuthVendorInf
     try {
       const desc = await binding.describe();
       if (!desc.providesAuth) return null;
-      return { vendorId, displayName: desc.displayName, logo: desc.logo, color: desc.color };
+      return {
+        vendorId,
+        displayName: desc.displayName,
+        logo: desc.logo,
+        color: desc.color,
+        configured: connectorIsConfigured(desc),
+      };
     } catch (err) {
       logger.error("failed to describe auth gatekeeper", {
         event: "auth.gatekeeper.describe.failed", vendorId, error: err,
@@ -35,6 +44,29 @@ export async function getAuthVendors(env: Cloudflare.Env): Promise<AuthVendorInf
     }
   }));
   return results.filter((v): v is AuthVendorInfo => v !== null);
+}
+
+function passwordAuthEnabled(
+  env: Cloudflare.Env,
+  authVendors: AuthVendorInfo[],
+): boolean {
+  return isPasswordAuthEnabled(env) || !authVendors.some(vendor => vendor.configured);
+}
+
+function defaultLanguage(env: Cloudflare.Env): SupportedLanguage {
+  if (env.DEFAULT_LANGUAGE === undefined) return "en";
+  if (env.DEFAULT_LANGUAGE === "en" || env.DEFAULT_LANGUAGE === "ja") {
+    return env.DEFAULT_LANGUAGE;
+  }
+  throw new Error(
+    `Unsupported DEFAULT_LANGUAGE "${env.DEFAULT_LANGUAGE}"; expected "en" or "ja".`,
+  );
+}
+
+/** Resolves password availability without allowing unconfigured OAuth connectors to lock users out. */
+export async function isPasswordAuthAvailable(env: Cloudflare.Env): Promise<boolean> {
+  if (isPasswordAuthEnabled(env)) return true;
+  return passwordAuthEnabled(env, await getAuthVendors(env));
 }
 
 export async function getServerConfig(env: Cloudflare.Env): Promise<ServerConfig> {
@@ -47,8 +79,9 @@ export async function getServerConfig(env: Cloudflare.Env): Promise<ServerConfig
   ]);
   return {
     clerkPublishableKey: env.CF_ACCESS_AUD ? undefined : env.CLERK_PUBLISHABLE_KEY,
+    defaultLanguage: defaultLanguage(env),
     authVendors,
-    passwordAuthEnabled: isPasswordAuthEnabled(env),
+    passwordAuthEnabled: passwordAuthEnabled(env, authVendors),
     cloudflareLimitsEnabled: isCloudflareBillingEnabled(env),
     signupsEnabled: config.signupsEnabled,
     telegramEnabled: Boolean(env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_WEBHOOK_SECRET),

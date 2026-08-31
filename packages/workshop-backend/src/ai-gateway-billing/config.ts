@@ -10,13 +10,15 @@ function readNumber(raw: string | undefined, fallback: number): number {
   return parsed;
 }
 
-// Minimum connected-account balance (USD) required to proceed via BYOK.
+/** Minimum connected-account balance (USD) required to proceed via BYOK. */
 export function getMinimumCloudflareBalance(env: Cloudflare.Env): number {
   return readNumber(env.MINIMUM_CLOUDFLARE_BALANCE, MINIMUM_CLOUDFLARE_BALANCE);
 }
 
-// Whether the AI Gateway billing flow (free-tier limits + Cloudflare-connect top-up) is enabled.
-// Disabled by default; when off, usage is unlimited and no balance checks occur (self-hosted).
+/**
+ * Whether the AI Gateway billing flow (free-tier limits + Cloudflare-connect top-up) is enabled.
+ * Disabled by default; when off, usage is unlimited and no balance checks occur (self-hosted).
+ */
 export function isCloudflareLimitsEnabled(env: Cloudflare.Env): boolean {
   return env.ENABLE_CLOUDFLARE_LIMITS === "true";
 }

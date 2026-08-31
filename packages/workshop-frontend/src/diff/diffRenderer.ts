@@ -8,6 +8,7 @@ import {
   MAX_DELETED_ROWS,
   MAX_INLINE_DIFF_LINE_LENGTH,
 } from './diffModel'
+import i18n from '../i18n/config'
 
 /** Editor line height in px; matches CSS `.gadgets-deleted-num-row` height. */
 const LINE_HEIGHT_PX = 20
@@ -345,7 +346,7 @@ function createDeletionZoneNodes({
       button.type = 'button'
       button.className = 'gadgets-deleted-code-row gadgets-deleted-omitted-row'
       const hidden = total - 2 * DELETED_HEAD_TAIL
-      button.textContent = `Show ${hidden} hidden deleted line${hidden === 1 ? '' : 's'}`
+      button.textContent = i18n.t('workspace.diff.hiddenDeletedLines', { count: hidden })
       button.addEventListener("click", onExpand)
       code.append(button)
     }

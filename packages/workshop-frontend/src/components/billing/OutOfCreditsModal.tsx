@@ -5,21 +5,30 @@ import { CloudWarning, Lightning } from '@phosphor-icons/react'
 import { useOptionalAuthenticatedApi } from '../../AuthContext'
 import { buildAddCreditsUrl } from './creditsUrl'
 import ResetCountdown from './ResetCountdown'
+import { connectionErrorMessage } from '../../connectorReadiness'
+import { useTranslation } from 'react-i18next'
+import { useLanguage } from '../../i18n/LanguageProvider'
+import { formatNumber } from '../../i18n/format'
 
 interface OutOfCreditsModalProps {
   open: boolean
   onClose: () => void
 }
 
-// Modal shown when a user has exhausted their free daily allowance. Guides them to connect their
-// Cloudflare account (if not connected), pick which account to bill (if they have several), or top
-// up credits in the Cloudflare dashboard (if connected but low balance).
+/**
+ * Modal shown when a user has exhausted their free daily allowance. Guides them to connect their
+ * Cloudflare account (if not connected), pick which account to bill (if they have several), or top
+ * up credits in the Cloudflare dashboard (if connected but low balance).
+ */
 export default function OutOfCreditsModal({ open, onClose }: OutOfCreditsModalProps) {
   const auth = useOptionalAuthenticatedApi()
+  const { t } = useTranslation()
+  const { effectiveLanguage } = useLanguage()
   const toasts = useKumoToastManager()
   const [usage, setUsage] = useState<CloudflareUsageInfo | null>(null)
   const [connecting, setConnecting] = useState(false)
   const [accounts, setAccounts] = useState<CloudflareAccountOption[] | null>(null)
+  const [accountLoadFailed, setAccountLoadFailed] = useState(false)
   const [selecting, setSelecting] = useState<string | null>(null)
 
   const refresh = useCallback(() => {
@@ -33,11 +42,13 @@ export default function OutOfCreditsModal({ open, onClose }: OutOfCreditsModalPr
     if (!open || !auth) return
     setUsage(null)
     setAccounts(null)
+    setAccountLoadFailed(false)
     refresh()
     // Re-check when the tab regains focus, so returning from the "Connect Cloudflare" OAuth pop-up
     // updates the modal (connected state / balance / account list) without reopening it.
     const onFocus = () => {
       setAccounts(null)
+      setAccountLoadFailed(false)
       refresh()
     }
     window.addEventListener('focus', onFocus)
@@ -47,10 +58,17 @@ export default function OutOfCreditsModal({ open, onClose }: OutOfCreditsModalPr
   // Load the account list when the server says the user must pick one.
   useEffect(() => {
     if (!auth) return
-    if (usage?.connected && usage.needsAccountSelection && accounts === null) {
+    if (usage?.connected && usage.needsAccountSelection &&
+        !usage.accountDiscoveryFailed && accounts === null) {
       auth.authenticatedApi.listCloudflareAccounts()
-        .then((list: CloudflareAccountOption[]) => setAccounts(list))
-        .catch(() => setAccounts([]))
+        .then((list: CloudflareAccountOption[]) => {
+          setAccountLoadFailed(false)
+          setAccounts(list)
+        })
+        .catch(() => {
+          setAccountLoadFailed(true)
+          setAccounts([])
+        })
     }
   }, [auth, usage, accounts])
 
@@ -58,13 +76,40 @@ export default function OutOfCreditsModal({ open, onClose }: OutOfCreditsModalPr
     if (!auth) return
     setConnecting(true)
     try {
-      const { url } = await auth.authenticatedApi.connectAccount('cloudflare')
+      const { url } = await auth.authenticatedApi.connectAccount('cloudflare', [])
       window.open(url, '_blank', 'noopener,noreferrer')
-    } catch {
-      // ignore
+    } catch (error) {
+      toasts.add({
+        title: connectionErrorMessage(error, t('gatekeepers.common.connectionFailed')),
+        variant: 'error',
+      })
     } finally {
       setConnecting(false)
     }
+  }
+
+  const reconnect = async () => {
+    if (!auth) return
+    setConnecting(true)
+    try {
+      const { url } = await auth.authenticatedApi.reconnectCloudflareBillingAccount()
+      setAccounts(null)
+      setAccountLoadFailed(false)
+      window.open(url, '_blank', 'noopener,noreferrer')
+    } catch (error) {
+      toasts.add({
+        title: connectionErrorMessage(error, t('billing.common.reconnectFailed')),
+        variant: 'error',
+      })
+    } finally {
+      setConnecting(false)
+    }
+  }
+
+  const retryAccountDiscovery = () => {
+    setAccounts(null)
+    setAccountLoadFailed(false)
+    refresh()
   }
 
   const selectAccount = async (accountId: string) => {
@@ -75,7 +120,7 @@ export default function OutOfCreditsModal({ open, onClose }: OutOfCreditsModalPr
       setAccounts(null)
       refresh()
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Failed to select account'
+      const msg = err instanceof Error ? err.message : t('billing.common.selectFailed')
       toasts.add({ title: msg, variant: 'error' })
     } finally {
       setSelecting(null)
@@ -83,15 +128,17 @@ export default function OutOfCreditsModal({ open, onClose }: OutOfCreditsModalPr
   }
 
   const connected = usage?.connected ?? false
+  const needsReconnect = connected && (usage?.needsReconnect ?? false)
   const needsSelection = connected && (usage?.needsAccountSelection ?? false)
   const userFundingRequired = usage?.userFundingRequired ?? false
+  const accountDiscoveryFailed = usage?.accountDiscoveryFailed || accountLoadFailed
 
   return (
     <Dialog.Root open={open} onOpenChange={(o) => { if (!o) onClose() }}>
       <Dialog className="p-6 sm:w-[560px]" size="base">
         <Dialog.Title className="text-lg font-semibold mb-2 flex items-center gap-2">
           <CloudWarning size={22} weight="bold" className="text-kumo-warning" />
-          {userFundingRequired ? 'Connect a funded account to continue' : "You've reached your free usage limit"}
+          {userFundingRequired ? t('billing.outOfCredits.connectTitle') : t('billing.outOfCredits.limitTitle')}
         </Dialog.Title>
 
         {usage === null ? (
@@ -101,49 +148,51 @@ export default function OutOfCreditsModal({ open, onClose }: OutOfCreditsModalPr
             {!connected ? (
               <p className="text-sm text-kumo-subtle">
                 {userFundingRequired ? (
-                  'Connect your Cloudflare account and add AI Gateway credits to use AI models. All inference is billed directly to your account.'
+                  t('billing.outOfCredits.fundingDescription')
                 ) : (
                   <>
-                    You've used all {usage.dailyLimit} of your free {usage.dailyLimit === 1 ? 'request' : 'requests'} for
-                    today. Connect your Cloudflare account to keep building now — usage beyond the free
-                    tier is billed to your own Cloudflare AI Gateway credits
-                    {usage.resetAt ? (
-                      <>
-                        {' '}— or wait: your free {usage.dailyLimit === 1 ? 'request resets' : 'requests reset'} at
-                        00:00 UTC, in <ResetCountdown resetAt={usage.resetAt} onElapsed={refresh} />.
-                      </>
-                    ) : '.'}
+                    {t('billing.outOfCredits.freeLimit', { limit: usage.dailyLimit })}
+                    {usage.resetAt && (
+                      <> {t('billing.outOfCredits.waitForReset')} <ResetCountdown resetAt={usage.resetAt} onElapsed={refresh} /></>
+                    )}
                   </>
                 )}
+              </p>
+            ) : needsReconnect ? (
+              <p className="text-sm text-kumo-subtle">
+                {t('billing.usage.reauthDescription')}
               </p>
             ) : needsSelection ? (
               <p className="text-sm text-kumo-subtle">
-                Your Cloudflare connection has access to multiple accounts. Choose which one's AI
-                Gateway credits should be billed{userFundingRequired ? '.' : ' beyond the free tier.'}
+                {accountDiscoveryFailed
+                  ? t('billing.common.discoveryFailed')
+                  : accounts?.length === 0
+                    ? t('billing.common.noEligible')
+                    : t(userFundingRequired
+                      ? 'billing.outOfCredits.chooseAccountAll'
+                      : 'billing.outOfCredits.chooseAccountBeyond')}
               </p>
             ) : (
               <p className="text-sm text-kumo-subtle">
-                Your Cloudflare account is connected
-                {usage.balance !== null && (
-                  <> with a balance of <strong>${usage.balance.toFixed(2)}</strong></>
+                {t('billing.outOfCredits.connectedBalance', {
+                  amount: usage.balance === null
+                    ? t('billing.common.unknown')
+                    : formatNumber(usage.balance, effectiveLanguage, { style: 'currency', currency: 'USD' }),
+                })}
+                {usage.resetAt && (
+                  <> {t('billing.outOfCredits.waitForReset')} <ResetCountdown resetAt={usage.resetAt} onElapsed={refresh} /></>
                 )}
-                , but it's below the minimum needed to continue. Add credits to your AI Gateway to
-                keep building now
-                {usage.resetAt ? (
-                  <>
-                    {' '}or wait — your free {usage.dailyLimit === 1 ? 'request resets' : 'requests reset'} at
-                    00:00 UTC, in <ResetCountdown resetAt={usage.resetAt} onElapsed={refresh} />.
-                  </>
-                ) : '.'}
               </p>
             )}
 
             {needsSelection && (
               <div className="flex flex-col gap-2">
-                {accounts === null ? (
-                  <p className="text-sm text-kumo-subtle">Loading accounts…</p>
+                {accountDiscoveryFailed ? (
+                  <Button variant="secondary" onClick={retryAccountDiscovery}>{t('common.retry')}</Button>
+                ) : accounts === null ? (
+                  <p className="text-sm text-kumo-subtle">{t('billing.common.loadingAccounts')}</p>
                 ) : accounts.length === 0 ? (
-                  <p className="text-sm text-kumo-subtle">No accounts available on this connection.</p>
+                  <p className="text-sm text-kumo-subtle">{t('billing.common.noAccounts')}</p>
                 ) : (
                   accounts.map((a) => (
                     <Button
@@ -162,37 +211,51 @@ export default function OutOfCreditsModal({ open, onClose }: OutOfCreditsModalPr
             )}
 
             <p className="text-sm text-kumo-subtle">
-              Learn more about{' '}
               <a
                 href="https://developers.cloudflare.com/ai-gateway/features/unified-billing/"
                 target="_blank"
                 rel="noreferrer"
                 className="underline"
               >
-                AI Gateway unified billing
+                {t('billing.usage.learnMore')}
               </a>
-              .
             </p>
 
             <div className="flex items-center justify-end gap-2 pt-2">
               {!connected ? (
                 <>
-                  <Button variant="secondary" onClick={onClose}>Maybe later</Button>
+                  <Button variant="secondary" onClick={onClose}>{t('billing.outOfCredits.maybeLater')}</Button>
                   <Button variant="primary" onClick={connect} loading={connecting}>
                     <Lightning size={16} weight="bold" />
-                    Connect Cloudflare
+                    {t('billing.usage.connect')}
+                  </Button>
+                </>
+              ) : needsReconnect ? (
+                <>
+                  <Button variant="secondary" onClick={onClose}>{t('billing.common.close')}</Button>
+                  <Button variant="primary" onClick={reconnect} loading={connecting}>
+                    <Lightning size={16} weight="bold" />
+                    {t('billing.usage.reauthenticate')}
                   </Button>
                 </>
               ) : needsSelection ? (
-                <Button variant="secondary" onClick={onClose}>Close</Button>
+                <>
+                  <Button variant="secondary" onClick={onClose}>{t('billing.common.close')}</Button>
+                  {!accountDiscoveryFailed && accounts?.length === 0 && (
+                    <Button variant="primary" onClick={reconnect} loading={connecting}>
+                      <Lightning size={16} weight="bold" />
+                      {t('billing.usage.reauthenticate')}
+                    </Button>
+                  )}
+                </>
               ) : (
                 <>
-                  <Button variant="secondary" onClick={onClose}>Close</Button>
+                  <Button variant="secondary" onClick={onClose}>{t('billing.common.close')}</Button>
                   <Button
                     variant="primary"
                     onClick={() => window.open(buildAddCreditsUrl(usage.accountId), '_blank')}
                   >
-                    Add credits in Cloudflare
+                    {t('billing.outOfCredits.addCreditsCloudflare')}
                   </Button>
                 </>
               )}

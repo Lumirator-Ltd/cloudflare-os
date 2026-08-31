@@ -8,6 +8,10 @@ import {
   getUsageInfo,
 } from "../src/ai-gateway-billing/limits/usage-checker.js";
 import { getServerConfig } from "../src/deployment-config.js";
+import {
+  checkAgentUsageAndBalance,
+  rejectCallbacksOnUsageBlock,
+} from "../src/overseer.js";
 
 vi.mock("../src/ai-gateway-billing/cloudflare/connection-service.js", () => ({
   getConnectionStatus: vi.fn(),
@@ -56,6 +60,46 @@ describe("required user funding", () => {
     expect(result.userFundingRequired).toBe(true);
     expect(result.dailyLimit).toBe(0);
     expect(userStub.checkDailyLlmCount).not.toHaveBeenCalled();
+  });
+
+  it("checks funding against the agent initiator rather than the workspace owner", async () => {
+    const initiatorStub = {
+      checkDailyLlmCount: vi.fn(),
+      consumeDailyLlmCall: vi.fn(),
+    } as unknown as DurableObjectStub<import("../src/user.js").UserDurableObject>;
+    const users = {
+      idFromString: vi.fn().mockReturnValue("initiator-id"),
+      get: vi.fn().mockReturnValue(initiatorStub),
+    };
+    vi.mocked(resolveConnection).mockResolvedValue({
+      status: { connected: true, accountId: "account-id", balance: 10 },
+      accessToken: "user-token",
+      accountId: "account-id",
+    });
+
+    const result = await checkAgentUsageAndBalance(
+      requiredEnv,
+      users as unknown as DurableObjectNamespace<import("../src/user.js").UserDurableObject>,
+      "initiator-user-do-id",
+    );
+
+    expect(result.usage.allowed).toBe(true);
+    expect(users.idFromString).toHaveBeenCalledWith("initiator-user-do-id");
+    expect(users.get).toHaveBeenCalledWith("initiator-id");
+  });
+
+  it("rejects active callbacks when a continuation is blocked", () => {
+    const rejectAllAgentCallbacks = vi.fn();
+
+    rejectCallbacksOnUsageBlock(
+      true,
+      "Connect and fund your account.",
+      rejectAllAgentCallbacks,
+    );
+
+    expect(rejectAllAgentCallbacks).toHaveBeenCalledWith(
+      "Connect and fund your account.",
+    );
   });
 
   it("enables billing controls in the public server config", async () => {

@@ -156,8 +156,10 @@ export class GatekeeperVendor extends WorkerEntrypoint<Cloudflare.Env> {
     };
   }
 
-  // Reached via provisionAmbientAccount(). Each call mints a distinct account, so two users -- or two
-  // concurrent tests -- never share one.
+  /**
+   * Reached via provisionAmbientAccount(). Each call mints a distinct account, so two users -- or two
+   * concurrent tests -- never share one.
+   */
   async createAccount(): Promise<Fetcher<GatekeeperUser>> {
     const label = `test-${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}@${VENDOR_HOST}`;
     return this.ctx.exports.TestAccount({ props: { label } });
@@ -216,8 +218,10 @@ export class TestAccount
     return SUPPORTED_RESOURCES;
   }
 
-  // Bind a resource. The Workshop calls this when the owner pastes a URL; the returned class becomes
-  // a Gatekeeper facet under that gadget's Overseer.
+  /**
+   * Bind a resource. The Workshop calls this when the owner pastes a URL; the returned class becomes
+   * a Gatekeeper facet under that gadget's Overseer.
+   */
   async getGatekeeperClassFor(url: string): Promise<{
     class: DurableObjectClass<Gatekeeper<TestSession>>;
     resource: SupportedResource;
@@ -234,7 +238,7 @@ export class TestAccount
     };
   }
 
-  // The capability the overseer hands to addObserver() to say "this is the user asking".
+  /** The capability the overseer hands to addObserver() to say "this is the user asking". */
   async getVerifier(): Promise<Fetcher<GatekeeperUserVerifier>> {
     return this.ctx.exports.TestVerifier({ props: this.ctx.props });
   }

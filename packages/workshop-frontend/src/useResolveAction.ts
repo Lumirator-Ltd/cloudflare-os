@@ -1,7 +1,9 @@
 import { useCallback, useRef, type Dispatch, type SetStateAction } from 'react'
+import { useTranslation } from 'react-i18next'
 import { useKumoToastManager } from '@cloudflare/kumo'
 import type { RpcStub } from 'capnweb'
 import type { ActionState, Overseer } from '@gadgets/workshop-shared/api'
+import './i18n/config'
 
 type ActionDecision = 'approve' | 'deny'
 
@@ -10,6 +12,7 @@ export function useResolveAction(
   setProcessing: Dispatch<SetStateAction<Set<number>>>,
   onResolved?: (actionId: number, state: Extract<ActionState, 'approved' | 'rejected'>) => void,
 ) {
+  const { t } = useTranslation()
   const toasts = useKumoToastManager()
   const onResolvedRef = useRef(onResolved)
   onResolvedRef.current = onResolved
@@ -22,7 +25,12 @@ export function useResolveAction(
       onResolvedRef.current?.(actionId, decision === 'approve' ? 'approved' : 'rejected')
     } catch (error) {
       console.error(`Failed to ${decision} action:`, error)
-      toasts.add({ title: `Failed to ${decision} action`, variant: 'error' })
+      toasts.add({
+        title: t(decision === 'approve'
+          ? 'workspace.approval.resolveFailedApprove'
+          : 'workspace.approval.resolveFailedDeny'),
+        variant: 'error',
+      })
     } finally {
       setProcessing(previous => {
         const next = new Set(previous)
@@ -30,5 +38,5 @@ export function useResolveAction(
         return next
       })
     }
-  }, [overseer, setProcessing, toasts])
+  }, [overseer, setProcessing, toasts, t])
 }

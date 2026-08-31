@@ -16,6 +16,12 @@ describe("parseAdminConfig", () => {
     }
   });
 
+  it("defaults to approved MCP portals while preserving an explicit generic MCP opt-in", () => {
+    expect(DEFAULT_ADMIN_CONFIG.disabledGatekeepers).toContain("mcp");
+    expect(parseAdminConfig("{}").disabledGatekeepers).toContain("mcp");
+    expect(parseAdminConfig('{"disabledGatekeepers":[]}').disabledGatekeepers).toEqual([]);
+  });
+
   it("drops malformed format entries rather than the whole list", () => {
     let config = parseAdminConfig(JSON.stringify({
       formats: [

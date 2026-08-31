@@ -1,0 +1,237 @@
+import { describe, expect, it } from "vitest";
+import type { GatekeeperVendor } from "@gadgets/workshop-shared/gatekeeper";
+import { UserDurableObject } from "../src/user.js";
+
+const UNCONFIGURED_MESSAGE =
+  "This connector is not configured. Ask an administrator to configure it.";
+
+function connectedUser(newConnectionsAllowed: boolean | undefined = undefined) {
+  let ensureCalls = 0;
+  let reconnectCalls = 0;
+  let capabilityCalls = 0;
+  const account = {
+    async ensureResources() {
+      ensureCalls++;
+      return { url: "https://example.com/additional-scope" };
+    },
+    async reconnect() {
+      reconnectCalls++;
+      return { url: "https://example.com/reconnect" };
+    },
+    async getGatekeeperClassFor() {
+      capabilityCalls++;
+      return {
+        class: {},
+        resource: {
+          urlPattern: "https://github.com/:owner/:repo",
+          title: "GitHub repository",
+          description: "A repository",
+          newConnectionsAllowed,
+        },
+      };
+    },
+  };
+  const record = { id: 7, account, vendorId: "github", description: { avatar: { url: "" } } };
+  const vendor = {
+    async describe() {
+      return {
+        displayName: "GitHub",
+        url: "https://github.com",
+        configuration: { configured: false },
+      };
+    },
+  } as Service<GatekeeperVendor>;
+  const user = Object.create(UserDurableObject.prototype) as UserDurableObject;
+  Object.assign(user, {
+    vendors: new Map([["github", vendor]]),
+    env: { BLUEPRINTS: { get: async () => null } },
+    storage: { connectedAccounts: { get: (id: number) => id === 7 ? record : undefined } },
+  });
+  return {
+    user,
+    calls: () => ({ ensureCalls, reconnectCalls, capabilityCalls }),
+  };
+}
+
+function configuratorUser() {
+  let configuratorCalls = 0;
+  const resources = [
+    {
+      urlPattern: "https://github.com",
+      title: "GitHub account",
+      description: "An account",
+    },
+    {
+      urlPattern: "https://github.com/:owner/:repo",
+      title: "GitHub repository",
+      description: "A repository",
+      newConnectionsAllowed: false,
+    },
+    {
+      urlPattern: "https://github.com/:owner/:repo/issues/:number",
+      title: "GitHub issue",
+      description: "An issue",
+      newConnectionsAllowed: false,
+    },
+    {
+      urlPattern: "https://github.com/:owner/:repo/pull/:number",
+      title: "GitHub pull request",
+      description: "A pull request",
+      newConnectionsAllowed: false,
+    },
+  ];
+  const account = {
+    async getSupportedResources() { return resources; },
+    async startResourceConfigurator() {
+      configuratorCalls++;
+      return { url: "https://example.com/configurator" };
+    },
+  };
+  const record = { id: 7, account, vendorId: "github", description: { avatar: { url: "" } } };
+  const user = Object.create(UserDurableObject.prototype) as UserDurableObject;
+  Object.assign(user, {
+    storage: { connectedAccounts: { get: (id: number) => id === 7 ? record : undefined } },
+  });
+  return { user, calls: () => configuratorCalls };
+}
+
+describe("UserDurableObject connector readiness", () => {
+  it.each([
+    ["ja", undefined, "ja"],
+    ["auto", "ja", "ja"],
+    ["en", "ja", "en"],
+    ["auto", undefined, "en"],
+    ["auto", "invalid", "en"],
+  ] as const)(
+    "passes resolved language preference %s with DEFAULT_LANGUAGE=%s to the connector",
+    async (preference, defaultLanguage, expectedLanguage) => {
+      let receivedOptions: unknown;
+      const resourceUrlPatterns = ["https://example.com/:resource"];
+      const vendor = {
+        async describe() {
+          return { displayName: "Example", url: "https://example.com" };
+        },
+        async connectAccount(_callback: unknown, options: unknown) {
+          receivedOptions = options;
+          return { url: "https://example.com/connect" };
+        },
+      } as Service<GatekeeperVendor>;
+      const user = Object.create(UserDurableObject.prototype) as UserDurableObject;
+      Object.assign(user, {
+        vendors: new Map([["example", vendor]]),
+        env: {
+          BLUEPRINTS: { get: async () => null },
+          ...(defaultLanguage === undefined ? {} : { DEFAULT_LANGUAGE: defaultLanguage }),
+        },
+        storage: {
+          languagePreference: { get: () => preference },
+          nextAccountId: { get: () => 0, put: () => {} },
+        },
+        ctx: {
+          id: { toString: () => "user-id" },
+          exports: { GatekeeperConnectCallbackImpl: () => ({}) },
+        },
+      });
+
+      await user.connectAccount("example", resourceUrlPatterns);
+
+      expect(receivedOptions).toEqual({ resourceUrlPatterns, language: expectedLanguage });
+    },
+  );
+
+  it("rejects an unconfigured connector before allocating account state or connecting", async () => {
+    let nextAccountId = 12;
+    let callbackAllocations = 0;
+    let connectCalls = 0;
+    const vendor = {
+      async describe() {
+        return {
+          displayName: "GitHub",
+          url: "https://github.com",
+          configuration: { configured: false },
+        };
+      },
+      async connectAccount() {
+        connectCalls++;
+        return { url: "https://example.com/oauth" };
+      },
+    } as Service<GatekeeperVendor>;
+    const user = Object.create(UserDurableObject.prototype) as UserDurableObject;
+    Object.assign(user, {
+      vendors: new Map([["github", vendor]]),
+      env: { BLUEPRINTS: { get: async () => null } },
+      storage: {
+        nextAccountId: {
+          get: () => nextAccountId,
+          put: (value: number) => { nextAccountId = value; },
+        },
+      },
+      ctx: {
+        id: { toString: () => "user-id" },
+        exports: {
+          GatekeeperConnectCallbackImpl() {
+            callbackAllocations++;
+            return {};
+          },
+        },
+      },
+    });
+
+    await expect(user.connectAccount("github")).rejects.toThrow(UNCONFIGURED_MESSAGE);
+    expect(nextAccountId).toBe(12);
+    expect(callbackAllocations).toBe(0);
+    expect(connectCalls).toBe(0);
+  });
+
+  it("rejects additional-scope authorization for an unconfigured connector", async () => {
+    const { user, calls } = connectedUser();
+
+    await expect(user.ensureAccountResources(7, ["https://github.com/:owner/:repo"]))
+      .rejects.toThrow(UNCONFIGURED_MESSAGE);
+    expect(calls().ensureCalls).toBe(0);
+  });
+
+  it("rejects reconnect authorization for an unconfigured connector", async () => {
+    const { user, calls } = connectedUser();
+
+    await expect(user.reconnectAccount(7)).rejects.toThrow(UNCONFIGURED_MESSAGE);
+    expect(calls().reconnectCalls).toBe(0);
+  });
+
+  it("allows new capabilities when the resource uses the default policy", async () => {
+    const { user, calls } = connectedUser();
+
+    await expect(user.getGatekeeperClassFor(7, "https://github.com"))
+      .resolves.toMatchObject({
+        vendorId: "github",
+        typeUrlPattern: "https://github.com/:owner/:repo",
+      });
+    expect(calls().capabilityCalls).toBe(1);
+  });
+
+  it("rejects a direct bypass that tries to mint a blocked scoped capability", async () => {
+    const { user, calls } = connectedUser(false);
+
+    await expect(user.getGatekeeperClassFor(7, "https://github.com/cloudflare/workers-sdk"))
+      .rejects.toThrow("no longer available for new connections");
+    expect(calls().capabilityCalls).toBe(1);
+  });
+
+  it("starts only configurators that allow new connections", async () => {
+    const { user, calls } = configuratorUser();
+
+    await expect(user.startResourceConfigurator(7, "https://github.com"))
+      .resolves.toEqual({ url: "https://example.com/configurator" });
+    for (const pattern of [
+      "https://github.com/:owner/:repo",
+      "https://github.com/:owner/:repo/issues/:number",
+      "https://github.com/:owner/:repo/pull/:number",
+    ]) {
+      await expect(user.startResourceConfigurator(7, pattern))
+        .rejects.toThrow("no longer available for new connections");
+    }
+    await expect(user.startResourceConfigurator(7, "https://github.com/:unknown"))
+      .rejects.toThrow("Unsupported resource configurator");
+    expect(calls()).toBe(1);
+  });
+});

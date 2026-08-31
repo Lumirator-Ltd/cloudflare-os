@@ -1,5 +1,6 @@
 import { RpcStub } from "capnweb";
 import { createPortal } from "react-dom";
+import { useTranslation } from "react-i18next";
 import {
   useCallback, useEffect, useId, useLayoutEffect, useRef, useState,
   type RefObject, type SetStateAction,
@@ -65,10 +66,13 @@ export function useSlashCommandPicker({
   getOverseer: () => Promise<RpcStub<Overseer>> | RpcStub<Overseer>;
   onSelect: (choice: SlashCommandChoice, tokenStart: number, tokenEnd: number) => void;
 
-  // Whether the composer is attached to an existing chat. A built-in command acts on the chat it is
-  // sent to, so starting a new one with it would leave an empty thread and do nothing.
+  /**
+   * Whether the composer is attached to an existing chat. A built-in command acts on the chat it is
+   * sent to, so starting a new one with it would leave an empty thread and do nothing.
+   */
   chatExists: boolean;
 }) {
+  const { t } = useTranslation();
   const [choices, setChoices] = useState<SlashCommandChoice[]>([]);
   const [choicesQuery, setChoicesQuery] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -229,17 +233,19 @@ export function useSlashCommandPicker({
         maxHeight: layout.maxHeight,
       }}
     >
-      <p className={`m-0 shrink-0 px-3.5 pb-1 pt-2.5 ${PICKER_CAPTION}`}>Commands</p>
+      <p className={`m-0 shrink-0 px-3.5 pb-1 pt-2.5 ${PICKER_CAPTION}`}>
+        {t("workspace.chat.composer.commands")}
+      </p>
       <div
         ref={listRef}
         id={listboxId}
         role="listbox"
-        aria-label="Slash commands"
+        aria-label={t("workspace.chat.composer.slashCommands")}
         aria-busy={loading}
         className="sidebar-scroll min-h-0 flex-1 overflow-y-auto"
       >
         {loading && choices.length === 0 ? (
-          <p className={PICKER_EMPTY}>Loading commands…</p>
+          <p className={PICKER_EMPTY}>{t("workspace.chat.composer.loadingCommands")}</p>
         ) : choices.length > 0 ? (
           choices.map((choice, optionIndex) => (
             <button
@@ -272,10 +278,10 @@ export function useSlashCommandPicker({
         ) : (
           <p className={PICKER_EMPTY}>
             {error
-              ? `Couldn’t load commands. ${error}`
+              ? `${t("workspace.chat.composer.commandsLoadFailed")} ${error}`
               : query
-                ? "No commands match your search."
-                : "No commands are available."}
+                ? t("workspace.chat.composer.noMatchingCommands")
+                : t("workspace.chat.composer.noCommands")}
           </p>
         )}
       </div>

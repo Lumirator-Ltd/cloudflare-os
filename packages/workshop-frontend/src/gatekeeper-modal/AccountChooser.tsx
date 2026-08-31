@@ -1,9 +1,13 @@
 import { useState } from 'react'
 import { Check, Plus, UserCircle } from '@phosphor-icons/react'
 import { AccountDescription, SupportedResource, VendorDescription } from '@gadgets/workshop-shared/gatekeeper'
+import { useTranslation } from 'react-i18next'
+import i18n from '../i18n/config'
 
-// Account info as consumed by the chooser. Matches the shape used by GatekeeperModal and the
-// blueprint configure panel.
+/**
+ * Account info as consumed by the chooser. Matches the shape used by GatekeeperModal and the
+ * blueprint configure panel.
+ */
 export type AccountOption = {
   id: number
   description: AccountDescription
@@ -13,10 +17,12 @@ export type AccountOption = {
   credentialsValid: boolean
 }
 
-// Renders a connected-account avatar with graceful fallback. Some vendors (notably Google) hand
-// us short-lived signed CDN URLs for the user's profile photo that can stop working without the
-// credentials themselves expiring; on load failure we fall back to the vendor logo, then a
-// generic user icon.
+/**
+ * Renders a connected-account avatar with graceful fallback. Some vendors (notably Google) hand
+ * us short-lived signed CDN URLs for the user's profile photo that can stop working without the
+ * credentials themselves expiring; on load failure we fall back to the vendor logo, then a
+ * generic user icon.
+ */
 export function AccountAvatar({ avatarUrl, logoUrl }: { avatarUrl: string | undefined, logoUrl: string | undefined }) {
   const [failed, setFailed] = useState(false)
   if (avatarUrl && !failed) {
@@ -40,6 +46,7 @@ export function AccountChooser({
   onConnect,
   onReconnect,
   onGrantAccess,
+  connectDisabledMessage,
 }: {
   accounts: AccountOption[]
   selectedAccountId: number | null
@@ -54,23 +61,28 @@ export function AccountChooser({
   onConnect: () => void
   onReconnect: (id: number) => void
   onGrantAccess?: (id: number) => void
+  connectDisabledMessage?: string
 }) {
+  const { t } = useTranslation(undefined, { i18n })
   const isEmailMailbox = vendorId === 'email' && resourceTitle === 'Email Mailbox'
 
   return (
     <section className="overflow-hidden rounded-xl border border-kumo-line bg-kumo-base">
       <div className="border-b border-kumo-line px-3 py-2.5">
-        <p className="text-[12px] leading-4 font-medium tracking-[-0.2px] text-kumo-default">Account</p>
+        <p className="text-[12px] leading-4 font-medium tracking-[-0.2px] text-kumo-default">{t('gatekeepers.accountChooser.account')}</p>
         <p className="mt-0.5 text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
           {isEmailMailbox
-            ? 'Enable the Email receiver account, then choose the mailbox name below.'
-            : `Pick which ${vendorName} identity this ${resourceTitle ?? 'connection'} should use.`}
+            ? t('gatekeepers.accountChooser.emailHint')
+            : t('gatekeepers.accountChooser.pickIdentity', {
+                vendor: vendorName,
+                resource: resourceTitle ?? t('gatekeepers.accountChooser.connection'),
+              })}
         </p>
       </div>
       <div className="divide-y divide-kumo-line">
         {accounts.map(account => {
           const selected = selectedAccountId === account.id
-          const name = account.description.uniqueName || account.description.displayName || 'Connected account'
+          const name = account.description.uniqueName || account.description.displayName || t('gatekeepers.common.connectedAccount')
           const expired = !account.credentialsValid
           const reconnecting = reconnectingAccountId === account.id
           const granted = account.description.grantedResourceUrlPatterns
@@ -104,10 +116,12 @@ export function AccountChooser({
                   <p className="truncate text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default">{name}</p>
                   <p className={`truncate text-[12px] leading-4 font-normal tracking-[-0.2px] ${needsAccess ? 'text-kumo-brand' : 'text-kumo-subtle'}`}>
                     {expired
-                      ? 'Expired credentials'
+                      ? t('gatekeepers.accountChooser.expired')
                       : needsAccess
-                      ? 'Additional permission needed'
-                      : resourceTitle ? `Connected ${vendorName} account` : 'Connected'}
+                      ? t('gatekeepers.accountChooser.permission')
+                      : resourceTitle
+                        ? t('gatekeepers.accountChooser.connectedVendor', { vendor: vendorName })
+                        : t('gatekeepers.common.connected')}
                   </p>
                 </div>
               </button>
@@ -118,7 +132,7 @@ export function AccountChooser({
                   disabled={reconnecting}
                   className="shrink-0 cursor-pointer rounded-md border border-kumo-line px-2 py-1 text-[12px] leading-4 font-medium tracking-[-0.2px] text-kumo-default transition-colors hover:bg-kumo-elevated disabled:cursor-not-allowed disabled:opacity-60"
                 >
-                  {reconnecting ? 'Opening...' : 'Reconnect'}
+                  {reconnecting ? t('gatekeepers.common.opening') : t('gatekeepers.common.reconnect')}
                 </button>
               ) : needsAccess ? (
                 <button
@@ -127,7 +141,7 @@ export function AccountChooser({
                   disabled={granting}
                   className="shrink-0 cursor-pointer rounded-md border border-kumo-line px-2 py-1 text-[12px] leading-4 font-medium tracking-[-0.2px] text-kumo-default transition-colors hover:bg-kumo-elevated disabled:cursor-not-allowed disabled:opacity-60"
                 >
-                  {granting ? 'Opening...' : 'Grant access'}
+                  {granting ? t('gatekeepers.common.opening') : t('gatekeepers.common.grantAccess')}
                 </button>
               ) : null}
               {selected && <Check size={15} weight="bold" className="shrink-0 text-kumo-brand" />}
@@ -139,7 +153,7 @@ export function AccountChooser({
           <button
             type="button"
             onClick={onConnect}
-            disabled={connecting}
+            disabled={connecting || connectDisabledMessage !== undefined}
             className="flex w-full cursor-pointer items-center gap-2 px-3 py-2.5 text-left text-[12px] leading-4 font-medium tracking-[-0.2px] text-kumo-subtle transition-colors hover:bg-kumo-elevated hover:text-kumo-default disabled:cursor-not-allowed disabled:opacity-60"
           >
             {connecting ? (
@@ -147,9 +161,11 @@ export function AccountChooser({
             ) : (
               <Plus size={14} />
             )}
-            {isEmailMailbox
-              ? 'Enable Email mailboxes'
-              : accounts.length === 0 ? `Connect ${vendorName}` : `Use another ${vendorName} account`}
+            {connectDisabledMessage ?? (isEmailMailbox
+              ? t('gatekeepers.accountChooser.enableMailboxes')
+              : accounts.length === 0
+                ? t('gatekeepers.accountChooser.connectVendor', { vendor: vendorName })
+                : t('gatekeepers.accountChooser.anotherVendor', { vendor: vendorName }))}
           </button>
         )}
       </div>

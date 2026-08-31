@@ -1,4 +1,4 @@
-import { AdminApi, AdminFormat, AdminFormatPatch, AdminResourceVendor, AdminSettingsView, AmbientGatekeeperMode, BannerColor, BlueprintPublicInfo, MAX_ANNOUNCEMENT_LENGTH, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_SITE_NAME_LENGTH, isAmbientGatekeeperMode, isBannerColor, isHexColor } from '@gadgets/workshop-shared/api';
+import { AdminApi, AdminConnectorConfiguration, AdminConnectorConfigurationValues, AdminFormat, AdminFormatPatch, AdminResourceVendor, AdminSettingsView, AmbientGatekeeperMode, BannerColor, BlueprintPublicInfo, MAX_ANNOUNCEMENT_LENGTH, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_SITE_NAME_LENGTH, isAmbientGatekeeperMode, isBannerColor, isHexColor } from '@gadgets/workshop-shared/api';
 import { GatekeeperVendor } from '@gadgets/workshop-shared/gatekeeper';
 import { DurableObject } from 'cloudflare:workers';
 import { RpcTarget } from 'capnweb';
@@ -7,14 +7,23 @@ import { collection, createTypedStorage } from '@gadgets/typed-storage';
 import { createWorkshopLogger } from "./observability";
 import { ADMIN_CONFIG_KEY, FEATURED_BLUEPRINTS_KEY, isReservedBlueprintKey, parseBlueprintKvRecord, readBlueprintKvRecord, sanitizeBlueprintOutput, serializeFeaturedBlueprints } from './blueprint-archive.js';
 import { AdminConfig, DEFAULT_ADMIN_CONFIG, FormatCuration, MAX_AGENT_HINT, defaultOutputFormatId, listPromotedFormats, reorderFormats, sanitizeOutputOverrides, serializeAdminConfig } from './admin-config.js';
+import { adminConfigAdoptionDigest, initialAdminConfigDigest, parseInitialAdminConfig, toAdminConfigPatch } from './admin-bootstrap.js';
 import { SITE_LOGO_R2_KEY, siteLogoImage, validateSiteLogo } from './site-logo.js';
 import { ambientGatekeeperMode, DEFAULT_AMBIENT_GATEKEEPER_MODE } from './provisioning-policy.js';
 import { buildGatekeeperVendorMap } from './auth/auth-vendors.js';
 import { UserDurableObject } from './user.js';
 import { formatBlueprintsManifestVersion, installFormatBlueprints } from './format-blueprints.js';
 import { FORMAT_BLUEPRINTS } from './generated/format-blueprints.js';
+import { configureConnector, listConnectorConfigurations } from './connector-configuration.js';
 
 const logger = createWorkshopLogger("workshop.admin.settings");
+
+type AdminBootstrapMarker = {
+  tenantId: string;
+  schemaVersion: 1;
+  digest: string;
+  status: "pending" | "complete";
+};
 
 function makeAdminSettingsStorage(storage: DurableObjectStorage) {
   return createTypedStorage(storage, {
@@ -29,6 +38,7 @@ function makeAdminSettingsStorage(storage: DurableObjectStorage) {
       // Authoritative deployment admin config. Mirrored to BLUEPRINTS KV (ADMIN_CONFIG_KEY) so the
       // connect/login/agent hot paths can read it without touching this singleton DO.
       adminConfig: DEFAULT_ADMIN_CONFIG as AdminConfig,
+      adminBootstrapMarker: null as AdminBootstrapMarker | null,
 
       // Which set of bundled format blueprints has been installed (see
       // formatBlueprintsManifestVersion). Empty means none yet; a mismatch means the repo shipped
@@ -46,12 +56,14 @@ function makeAdminSettingsStorage(storage: DurableObjectStorage) {
 
 type AdminSettingsStorage = ReturnType<typeof makeAdminSettingsStorage>;
 
-// Deployment-wide admin settings singleton.
-//
-// This durable object is always addressed as `getByName("")`. It contains settings that only
-// admins may modify. Settings modified through this DO are published to KV so that user requests
-// do not have to access the AdminSettings DO directly (which they could otherwise overload), but
-// having a singleton DO writing to KV avoids race conditions when updating KV.
+/**
+ * Deployment-wide admin settings singleton.
+ *
+ * This durable object is always addressed as `getByName("")`. It contains settings that only
+ * admins may modify. Settings modified through this DO are published to KV so that user requests
+ * do not have to access the AdminSettings DO directly (which they could otherwise overload), but
+ * having a singleton DO writing to KV avoids race conditions when updating KV.
+ */
 export class AdminSettings extends DurableObject<Cloudflare.Env> {
   private storage: AdminSettingsStorage;
   private users: DurableObjectNamespace<UserDurableObject>;
@@ -73,15 +85,17 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
     this.vendors = buildGatekeeperVendorMap(env);
   }
 
-  // Install the format blueprints bundled with this deployment, if that hasn't already happened
-  // for this exact manifest. Idempotent and cheap: an up-to-date deployment does one string
-  // comparison and returns.
-  //
-  // Written straight into the featured mirror rather than through setBlueprintFeatured(), whose
-  // authoritative bit lives in the publishing user's DO -- these have no owning user.
-  //
-  // Callers are coalesced onto one run, or two isolates racing on a fresh deployment both promote
-  // the same blueprints, and a duplicated id makes setFormatOrder() reject every reordering.
+  /**
+   * Install the format blueprints bundled with this deployment, if that hasn't already happened
+   * for this exact manifest. Idempotent and cheap: an up-to-date deployment does one string
+   * comparison and returns.
+   *
+   * Written straight into the featured mirror rather than through setBlueprintFeatured(), whose
+   * authoritative bit lives in the publishing user's DO -- these have no owning user.
+   *
+   * Callers are coalesced onto one run, or two isolates racing on a fresh deployment both promote
+   * the same blueprints, and a duplicated id makes setFormatOrder() reject every reordering.
+   */
   ensureFormatBlueprintsInstalled(): Promise<boolean> {
     return this.#installInFlight ??= this.#installFormatBlueprints()
         .finally(() => { this.#installInFlight = undefined; });
@@ -266,12 +280,20 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
     return this.#config();
   }
 
-  async #mutateAdminConfig(mutate: (config: AdminConfig) => AdminConfig): Promise<void> {
+  async #serializeAdminConfigMutation<T>(operation: () => Promise<T>): Promise<T> {
     let previousMutation = this.adminConfigMutationTail;
     let release!: () => void;
     this.adminConfigMutationTail = new Promise<void>(resolve => { release = resolve; });
     await previousMutation;
     try {
+      return await operation();
+    } finally {
+      release();
+    }
+  }
+
+  #mutateAdminConfig(mutate: (config: AdminConfig) => AdminConfig): Promise<void> {
+    return this.#serializeAdminConfigMutation(async () => {
       let current = this.#config();
       let next = mutate(current);
       this.storage.adminConfig.put(next);
@@ -281,24 +303,116 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
         this.storage.adminConfig.put(current);
         throw error;
       }
-    } finally {
-      release();
-    }
+    });
   }
 
-  // Merge a partial update into the admin config and mirror it to KV. Callers (AdminApiImpl) validate
-  // scalar values; this just persists atomically.
+  async ensureInitialAdminConfig(value: unknown): Promise<void> {
+    let initial = parseInitialAdminConfig(value);
+    if (!initial) {
+      throw new Error("Invalid initial admin configuration.");
+    }
+    let digest = await initialAdminConfigDigest(initial);
+    let expectedConfig = {...DEFAULT_ADMIN_CONFIG, ...toAdminConfigPatch(initial)};
+    let expectedConfigSerialized = serializeAdminConfig(expectedConfig);
+
+    await this.#serializeAdminConfigMutation(async () => {
+      // Keep the raw persisted representation for legacy adoption: #config() fills fields added by
+      // newer releases, while the KV mirror contains the exact older serialized shape.
+      let persistedConfig = this.storage.adminConfig.get();
+      let priorConfig = {...DEFAULT_ADMIN_CONFIG, ...persistedConfig};
+      let priorMarker = this.storage.adminBootstrapMarker.get();
+      let pendingMarker: AdminBootstrapMarker = {
+        tenantId: initial.tenantId,
+        schemaVersion: initial.schemaVersion,
+        digest,
+        status: "pending",
+      };
+
+      if (priorMarker) {
+        if (priorMarker.tenantId !== initial.tenantId) {
+          throw new Error("Admin settings are already initialized for a different tenant.");
+        }
+        if (priorMarker.schemaVersion !== initial.schemaVersion || priorMarker.digest !== digest) {
+          throw new Error("Admin settings are already initialized with a different configuration.");
+        }
+        if (priorMarker.status === "complete") return;
+        if (priorMarker.status !== "pending"
+            || serializeAdminConfig(priorConfig) !== expectedConfigSerialized) {
+          throw new Error("Pending admin settings initialization is inconsistent.");
+        }
+      } else {
+        let persistedConfigSerialized = serializeAdminConfig(persistedConfig);
+        let priorConfigSerialized = serializeAdminConfig(priorConfig);
+        let defaultConfigSerialized = serializeAdminConfig(DEFAULT_ADMIN_CONFIG);
+        let adoptionDigest = initial.adoptExistingConfigDigest;
+
+        if (adoptionDigest !== undefined) {
+          let mirroredConfig = await this.env.BLUEPRINTS.get(ADMIN_CONFIG_KEY);
+          if (mirroredConfig === null || mirroredConfig !== persistedConfigSerialized ||
+              await adminConfigAdoptionDigest(initial.tenantId, mirroredConfig) !== adoptionDigest) {
+            throw new Error("Admin settings adoption proof does not match authoritative state.");
+          }
+          // A matching proof means preserve the approved legacy state exactly, including an exact
+          // default-valued state. Only the marker is new; neither authoritative nor mirrored config
+          // is rewritten.
+          this.storage.adminBootstrapMarker.put({...pendingMarker, status: "complete"});
+          return;
+        }
+
+        if (priorConfigSerialized !== defaultConfigSerialized) {
+          throw new Error("Admin settings contain unmarked non-default configuration.");
+        }
+
+        this.storage.transaction(() => {
+          this.storage.adminConfig.put(expectedConfig);
+          this.storage.adminBootstrapMarker.put(pendingMarker);
+        });
+      }
+
+      try {
+        await this.env.BLUEPRINTS.put(ADMIN_CONFIG_KEY, expectedConfigSerialized);
+      } catch (error) {
+        this.storage.transaction(() => {
+          // Preserve the exact persisted shape. A normalized replacement could no longer match an
+          // older KV mirror and would make a later proof-bound legacy adoption impossible.
+          this.storage.adminConfig.put(persistedConfig);
+          this.storage.adminBootstrapMarker.put(priorMarker);
+        });
+        throw error;
+      }
+
+      this.storage.transaction(() => {
+        let marker = this.storage.adminBootstrapMarker.get();
+        if (!marker
+            || marker.tenantId !== pendingMarker.tenantId
+            || marker.schemaVersion !== pendingMarker.schemaVersion
+            || marker.digest !== pendingMarker.digest
+            || marker.status !== "pending"
+            || serializeAdminConfig(this.#config()) !== expectedConfigSerialized) {
+          throw new Error("Pending admin settings initialization is inconsistent.");
+        }
+        this.storage.adminBootstrapMarker.put({...pendingMarker, status: "complete"});
+      });
+    });
+  }
+
+  /**
+   * Merge a partial update into the admin config and mirror it to KV. Callers (AdminApiImpl) validate
+   * scalar values; this just persists atomically.
+   */
   updateAdminConfig(patch: Partial<AdminConfig>): Promise<void> {
     return this.#mutateAdminConfig(config => ({ ...config, ...patch }));
   }
 
-  // Read all admin-managed settings for the admin UI in one call: the stored config plus the live
-  // resource catalog (every bound gatekeeper's resource types annotated with their enabled state).
-  //
-  // `adminUserId` is the requesting admin's deployment-local application identifier, forwarded to
-  // each gatekeeper's getSupportedResources(). Registry-backed auth supplies an opaque stable ID;
-  // the legacy password path supplies its local username. Gatekeepers may use it for deployment-
-  // scoped RBAC but must not interpret it as an email or external-provider identity.
+  /**
+   * Read all admin-managed settings for the admin UI in one call: the stored config plus the live
+   * resource catalog (every bound gatekeeper's resource types annotated with their enabled state).
+   *
+   * `adminUserId` is the requesting admin's deployment-local application identifier, forwarded to
+   * each gatekeeper's getSupportedResources(). Registry-backed auth supplies an opaque stable ID;
+   * the legacy password path supplies its local username. Gatekeepers may use it for deployment-
+   * scoped RBAC but must not interpret it as an email or external-provider identity.
+   */
   async getSettings(adminUserId: string): Promise<AdminSettingsView> {
     let config = this.#config();
     return {
@@ -413,7 +527,7 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
     await this.#mutateFormats(formats => reorderFormats(formats, blueprintIds));
   }
 
-  // Enable/disable a single gatekeeper resource type atomically (read-modify-write within the DO).
+  /** Enable/disable a single gatekeeper resource type atomically (read-modify-write within the DO). */
   async setResourceEnabled(vendorId: string, urlPattern: string, enabled: boolean): Promise<void> {
     vendorId = vendorId.toLowerCase();
     await this.#mutateAdminConfig(config => {
@@ -456,10 +570,12 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
     }
   }
 
-  // Set a gatekeeper's availability atomically (read-modify-write within the DO). Routes by kind: an
-  // auto-provisioning ("ambient") gatekeeper stores its three-state mode in ambientGatekeeperModes
-  // (default stored as absence); an ordinary gatekeeper stores a binary enabled/disabled in
-  // disabledGatekeepers and rejects the ambient-only 'optional'.
+  /**
+   * Set a gatekeeper's availability atomically (read-modify-write within the DO). Routes by kind: an
+   * auto-provisioning ("ambient") gatekeeper stores its three-state mode in ambientGatekeeperModes
+   * (default stored as absence); an ordinary gatekeeper stores a binary enabled/disabled in
+   * disabledGatekeepers and rejects the ambient-only 'optional'.
+   */
   async setGatekeeperMode(vendorId: string, mode: AmbientGatekeeperMode): Promise<void> {
     vendorId = vendorId.toLowerCase();
     let vendor = this.vendors.get(vendorId);
@@ -551,24 +667,56 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
 // signups, and gatekeeper connector/resource availability; authentication config stays env-var driven.
 @validateRpc()
 export class AdminApiImpl extends RpcTarget implements AdminApi {
-  // `adminUserId` is the requesting admin's stable identity, forwarded to gatekeepers when listing
-  // the resource catalog (some are RBAC-gated per user). `authorize` is local to this Worker target
-  // and is awaited immediately before every operation reaches deployment state.
+  /**
+   * `adminUserId` is the requesting admin's stable identity, forwarded to gatekeepers when listing
+   * the resource catalog. `authorize` is awaited immediately before every operation reaches
+   * deployment state.
+   */
+  private admin: DurableObjectStub<AdminSettings>;
+  private adminUserId: string;
+  private authorize: () => Promise<void>;
+  private env: Cloudflare.Env;
+  private fetchImpl: typeof fetch;
+
   constructor(
-    private admin: DurableObjectStub<AdminSettings>,
-    private adminUserId: string,
-    private authorize: () => Promise<void>,
+    admin: DurableObjectStub<AdminSettings>,
+    adminUserId: string,
+    authorizeOrEnv: (() => Promise<void>) | Cloudflare.Env,
+    envOrFetch: Cloudflare.Env | typeof fetch = fetch,
+    fetchImpl: typeof fetch = fetch,
   ) {
     super();
+    this.admin = admin;
+    this.adminUserId = adminUserId;
+    if (typeof authorizeOrEnv === "function") {
+      this.authorize = authorizeOrEnv;
+      this.env = typeof envOrFetch === "function" ? {} as Cloudflare.Env : envOrFetch;
+      this.fetchImpl = fetchImpl;
+    } else {
+      this.authorize = async () => {};
+      this.env = authorizeOrEnv;
+      this.fetchImpl = typeof envOrFetch === "function" ? envOrFetch : fetch;
+    }
   }
 
   async #authorized<T>(operation: () => Promise<T>): Promise<T> {
     await this.authorize();
-    return operation();
+    return await operation();
   }
 
   getSettings(): Promise<AdminSettingsView> {
     return this.#authorized(() => this.admin.getSettings(this.adminUserId));
+  }
+
+  listConnectorConfigurations(): Promise<AdminConnectorConfiguration[]> {
+    return this.#authorized(() => listConnectorConfigurations(this.env));
+  }
+
+  configureConnector(
+    vendorId: string,
+    values: AdminConnectorConfigurationValues,
+  ): Promise<void> {
+    return this.#authorized(() => configureConnector(this.env, vendorId, values, this.fetchImpl));
   }
 
   setSignupsEnabled(enabled: boolean): Promise<void> {

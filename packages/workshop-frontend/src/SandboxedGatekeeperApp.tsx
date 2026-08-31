@@ -13,6 +13,8 @@ import { useTheme } from './ThemeContext'
 import { useServerConfig } from './ServerConfigContext'
 import { forwardTrustedFrameError } from './errorReporting'
 import { useAuthenticatedApi } from './AuthContext'
+import { useTranslation } from 'react-i18next'
+import { useLanguage } from './i18n/LanguageProvider'
 import {
   normalizeGatekeeperAppPrompt,
   parseGatekeeperAppWorkspaceTarget,
@@ -208,14 +210,18 @@ class GatekeeperAppHostImpl extends RpcTarget {
   }
 }
 
-// Hosts a gatekeeper's full-page management SPA in a sandboxed, network-isolated iframe. The app
-// talks to the gatekeeper only through the `ui` capability carried over the MessagePort RPC session.
-// The iframe fills its parent container.
+/**
+ * Hosts a gatekeeper's full-page management SPA in a sandboxed, network-isolated iframe. The app
+ * talks to the gatekeeper only through the `ui` capability carried over the MessagePort RPC session.
+ * The iframe fills its parent container.
+ */
 export default function SandboxedGatekeeperApp({ frame, gatekeeperVendorId }: {
   frame: GatekeeperUiFrame,
   gatekeeperVendorId: string,
 }) {
   const navigate = useNavigate()
+  const { t } = useTranslation()
+  const { effectiveLanguage } = useLanguage()
   const { authenticatedApi } = useAuthenticatedApi()
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const sessionRef = useRef<{ [Symbol.dispose]?(): void } | null>(null)
@@ -224,17 +230,25 @@ export default function SandboxedGatekeeperApp({ frame, gatekeeperVendorId }: {
   const invalidatedRef = useRef(false)
   const [overlay, setOverlay] = useState<OverlayState>(null)
   const overlayRef = useRef<OverlayState>(null)
-  // Push the Workshop's resolved light/dark mode and deployment accent whenever either changes.
+  // Push Workshop presentation state whenever it changes.
   const { resolvedThemeMode } = useTheme()
   const configuredAccentColor = useServerConfig()?.accentColor
   const accentColor = configuredAccentColor && isHexColor(configuredAccentColor)
     ? configuredAccentColor
     : null
-  const themeRef = useRef<GatekeeperAppTheme>({ mode: resolvedThemeMode, accentColor })
-  themeRef.current = { mode: resolvedThemeMode, accentColor }
+  const themeRef = useRef<GatekeeperAppTheme>({
+    mode: resolvedThemeMode,
+    accentColor,
+    language: effectiveLanguage,
+  })
+  themeRef.current = { mode: resolvedThemeMode, accentColor, language: effectiveLanguage }
   useEffect(() => {
-    hostRef.current?.updateTheme({ mode: resolvedThemeMode, accentColor })
-  }, [resolvedThemeMode, accentColor])
+    hostRef.current?.updateTheme({
+      mode: resolvedThemeMode,
+      accentColor,
+      language: effectiveLanguage,
+    })
+  }, [resolvedThemeMode, accentColor, effectiveLanguage])
 
   const setOverlayPhase = useCallback((next: OverlayState) => {
     if (overlayRef.current === next) return
@@ -363,7 +377,7 @@ export default function SandboxedGatekeeperApp({ frame, gatekeeperVendorId }: {
       // allow-same-origin (the frame stays an opaque origin), and the app's CSP keeps connect-src 'none'.
       sandbox="allow-scripts allow-modals"
       allow="clipboard-write"
-      title="Gatekeeper app"
+      title={t('sandbox.gatekeeperAppTitle')}
       style={iframeStyleForOverlay(overlay)}
     />
   )
