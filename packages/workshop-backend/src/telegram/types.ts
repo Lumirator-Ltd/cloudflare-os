@@ -3,6 +3,13 @@ export type TelegramBotIdentity = {
   username: string;
 };
 
+export type TelegramStartUpdate = {
+  updateId: string;
+  userId: string;
+  chatId: string;
+  token: string;
+};
+
 export type NormalizedTelegramMessage = {
   kind: "message";
   updateId: string;
@@ -14,17 +21,10 @@ export type NormalizedTelegramMessage = {
   title: "Telegram chat" | "Telegram group";
   threadId?: number;
   photo?: { fileId: string };
+  rejection?: "photoTooLarge";
 };
 
-export type NormalizedTelegramLink = {
-  kind: "link";
-  updateId: string;
-  userId: string;
-  chatId: string;
-  token: string;
-};
-
-export type NormalizedTelegramUpdate = NormalizedTelegramMessage | NormalizedTelegramLink;
+export type NormalizedTelegramUpdate = NormalizedTelegramMessage;
 
 export type TelegramStoredResponse = {
   text: string;
@@ -36,15 +36,13 @@ export type TelegramUpdateStatus =
   | "processing"
   | "placeholder"
   | "submitted"
-  | "responseReady"
-  | "delivered"
-  | "terminal";
+  | "responseReady";
 
 export type TelegramUpdateRecord = {
   status: TelegramUpdateStatus;
   update: NormalizedTelegramUpdate;
   placeholderMessageId?: number;
   response?: TelegramStoredResponse;
-  linkResult?: string;
   nextAttemptAt?: number;
+  dueKey?: string;
 };

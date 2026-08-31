@@ -90,10 +90,12 @@ The managed deployment derives the bot ID and username with Telegram's `getMe`, 
 webhook secret, stores the token and webhook secret as Worker secrets, and registers
 `${PUBLIC_BASE_URL}/api/telegram/webhook` for message updates. It then verifies Telegram's recorded
 webhook URL and delivery status before reporting success. The deployment primitive is
-`pnpm telegram:configure`; its non-interactive CLI expects `TELEGRAM_BOT_TOKEN`,
-`TELEGRAM_WEBHOOK_SECRET`, and `PUBLIC_BASE_URL` to have already been injected by the orchestrator.
-It does not generate or print a secret because secret generation and persistence belong to the
-managed deployment boundary.
+`pnpm telegram:configure`. Its only customer-supplied secret is `TELEGRAM_BOT_TOKEN`;
+`PUBLIC_BASE_URL` and the absolute `TELEGRAM_WRANGLER_CONFIG` path come from the deployment
+context. The CLI generates the webhook secret, writes both Worker secrets through the repo-pinned
+Wrangler using stdin, then registers and verifies the webhook without printing either secret.
+Run `pnpm telegram:configure -- --uninstall` with the same deployment context to delete the webhook
+and remove both Worker secrets.
 
 After setup, each user opens **Profile > Connect**, selects Telegram, and presses **Start** to link
 their Telegram account. For a group conversation, add the bot to the group and address it by

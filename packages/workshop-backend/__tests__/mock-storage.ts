@@ -10,6 +10,8 @@ export function makeMockStorage(): DurableObjectStorage {
   let currentList: object | undefined;
 
   return <DurableObjectStorage>{
+    setAlarm: async () => undefined,
+    deleteAlarm: async () => undefined,
     transactionSync<T>(f: () => T): T {
       let oldMap = structuredClone(map);
       try {

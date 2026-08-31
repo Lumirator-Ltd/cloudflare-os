@@ -53,15 +53,27 @@ describe("TelegramBotApi", () => {
       const url = String(input);
       calls.push(url);
       if (url.endsWith("/getFile")) return json({ ok: true, result: { file_path: "photos/file_1.jpg" } });
-      return new Response(new Uint8Array([1, 2, 3]));
+      return new Response(new Uint8Array([0xff, 0xd8, 0xff]));
     });
     const api = new TelegramBotApi(TOKEN, { fetch });
 
-    await expect(api.downloadPhoto("photo-id")).resolves.toEqual(new Uint8Array([1, 2, 3]));
+    await expect(api.downloadPhoto("photo-id")).resolves.toEqual(new Uint8Array([0xff, 0xd8, 0xff]));
     expect(calls[1]).toBe(`https://api.telegram.org/file/bot${TOKEN}/photos/file_1.jpg`);
 
     fetch.mockResolvedValueOnce(json({ ok: true, result: { file_path: "../escape" } }));
     await expect(api.downloadPhoto("photo-id")).rejects.toThrow("Telegram file metadata was invalid");
+  });
+
+  it("rejects a downloaded file without a JPEG signature", async () => {
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(json({ ok: true, result: { file_path: "photos/not-jpeg.jpg" } }))
+      .mockResolvedValueOnce(new Response(new Uint8Array([0x89, 0x50, 0x4e, 0x47])));
+    const api = new TelegramBotApi(TOKEN, { fetch });
+
+    await expect(api.downloadPhoto("photo-id")).rejects.toMatchObject({
+      message: "Telegram photo is not a valid JPEG.",
+      retryable: false,
+    });
   });
 
   it("hard-caps streamed photos even without a Content-Length header", async () => {

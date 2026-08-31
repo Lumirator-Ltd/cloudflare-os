@@ -44,6 +44,8 @@ Telegram lives inside `workshop-backend` for the MVP. The public router already 
 
 Authenticated link methods derive the user from `AuthenticatedApiImpl.#userId`, revalidate current registry authority, and use the literal source `telegram`. Starting a link invalidates the previous token. Completion atomically checks digest, expiry, latest token, active identity/version, and reverse uniqueness before consuming the token and replacing that user's previous Telegram link. Unlink removes the mapping and pending token. A Telegram identity already linked to another user fails closed.
 
+Telegram completion is idempotent by source and `update_id`: the registry retains a token-digest-bound, external-subject-bound result receipt for 24 hours, so a lost RPC acknowledgement can replay the original success without consuming the token again. Receipts never contain the raw token and expire through bounded alarm cleanup.
+
 Legacy password identities without an active registry record cannot link Telegram. This preserves the stable-identity boundary.
 
 ### Backend API
@@ -67,20 +69,20 @@ Overseer revalidates that identity as active, applies existing owner/build-colla
 1. requires exact `X-Telegram-Bot-Api-Secret-Token` equality;
 2. rejects bodies over 256 KiB before parsing;
 3. parses a bounded ordinary `message` update;
-4. durably inserts a normalized queued record by `update_id` in the singleton `TelegramChannel` Durable Object;
-5. returns 200 only after insertion.
+4. handles a private `/start` synchronously through the identity registry without writing its bearer token to channel storage, or durably inserts a normalized message record by `update_id`;
+5. returns 200 only after synchronous link handling or message insertion.
 
-The DO processes records serially and resumes queued work from an alarm. Per-update records, rather than a highest-seen counter, tolerate duplicate and out-of-order retries.
+The DO processes records serially and resumes queued work from an alarm. Pending records use a due index separate from 24-hour update-ID tombstones. Delivered, ignored, and terminal records delete prompts, file IDs, responses, and other payload before retaining a tombstone. Alarm cleanup and draining operate in bounded batches.
 
 For an agent message it sends one `Thinking…` placeholder, persists its Telegram message ID, and submits with `messageKey = update_id`. A restart-safe exported response target stores the completed response in the Telegram DO before acknowledging the backend. The Telegram DO edits the placeholder; repeated identical edits and Telegram's `message is not modified` response are successful. Rate limits and transient failures retry; permanent delivery failures become terminal so backend alarms do not loop forever.
 
 ### Photos
 
-The parser selects the largest declared `PhotoSize` at or below 1 MiB. `getFile` and download use fixed Telegram origins only. Downloads are streamed with a hard `1 MiB + 1` cutoff even when size headers are absent. Telegram photo bytes are submitted as `image/jpeg`; backend size and JPEG signature validation remains authoritative. A photo without caption uses `Please analyze this image.`.
+The parser selects the largest declared `PhotoSize` at or below 1 MiB and turns an otherwise oversized photo into a terminal user rejection. `getFile` and download use fixed Telegram origins only. Downloads are streamed with a hard `1 MiB + 1` cutoff even when size headers are absent, and the channel validates the JPEG signature before gateway submission. Backend size and signature validation remains authoritative. A photo without caption uses `Please analyze this image.`.
 
 ## Security and privacy
 
-- Bot token and webhook secret are secret bindings and never enter source, admin config, logs, errors, traces, URLs shown to users, or persisted update records.
+- Bot token, webhook secret, and raw link bearer are never written to channel durable storage or included in logs, errors, traces, or user-visible URLs beyond the one intended Telegram deep link.
 - Prompt text, image bytes, Telegram request bodies, Telegram profiles, and token-bearing Bot API URLs are not logged.
 - Link tokens use 32 random bytes, are stored only by digest, expire after ten minutes, are latest-only and single-use, and are invalidated by link/unlink.
 - Telegram IDs and chat/topic IDs are treated as identifiers, not authorization. Authorization always resolves the linked stable Workshop identity and then uses existing workspace ACLs.

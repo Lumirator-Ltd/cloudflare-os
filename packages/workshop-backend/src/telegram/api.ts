@@ -28,6 +28,15 @@ export class TelegramApiError extends Error {
   }
 }
 
+export class TelegramInputError extends Error {
+  readonly retryable = false;
+
+  constructor(message: string, readonly code: "photoTooLarge" | "invalidJpeg") {
+    super(message);
+    this.name = "TelegramInputError";
+  }
+}
+
 function object(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -37,7 +46,7 @@ function object(value: unknown): Record<string, unknown> | null {
 async function boundedBytes(response: Response, limit: number, errorMessage: string): Promise<Uint8Array> {
   const declared = Number(response.headers.get("content-length"));
   if (Number.isFinite(declared) && declared > limit) {
-    throw new TelegramApiError(errorMessage, false);
+    throw new TelegramInputError(errorMessage, "photoTooLarge");
   }
   if (!response.body) return new Uint8Array();
   const reader = response.body.getReader();
@@ -48,7 +57,7 @@ async function boundedBytes(response: Response, limit: number, errorMessage: str
       const { done, value } = await reader.read();
       if (done) break;
       total += value.byteLength;
-      if (total > limit) throw new TelegramApiError(errorMessage, false);
+      if (total > limit) throw new TelegramInputError(errorMessage, "photoTooLarge");
       chunks.push(value);
     }
   } finally {
@@ -120,11 +129,15 @@ export class TelegramBotApi {
     if (!response.ok) {
       throw new TelegramApiError("Telegram file download failed.", response.status >= 500);
     }
-    return await boundedBytes(
+    const bytes = await boundedBytes(
       response,
       MAX_TELEGRAM_PHOTO_BYTES,
       "Telegram photo exceeds the size limit.",
     );
+    if (bytes.length < 3 || bytes[0] !== 0xff || bytes[1] !== 0xd8 || bytes[2] !== 0xff) {
+      throw new TelegramInputError("Telegram photo is not a valid JPEG.", "invalidJpeg");
+    }
+    return bytes;
   }
 
   async #call(method: string, body: Record<string, unknown>, allowNotModified = false): Promise<unknown> {

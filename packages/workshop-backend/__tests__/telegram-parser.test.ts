@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseTelegramUpdate } from "../src/telegram/parser.js";
+import { parseTelegramStartUpdate, parseTelegramUpdate } from "../src/telegram/parser.js";
 
 const bot = { id: 42, username: "verified_bot" };
 
@@ -28,22 +28,25 @@ describe("parseTelegramUpdate", () => {
   });
 
   it("accepts private /start only when the chat and sender IDs match", () => {
-    expect(parseTelegramUpdate({
+    const privateStart = {
       update_id: 102,
       message: message({ text: "/start opaque-token", entities: [{ type: "bot_command", offset: 0, length: 6 }] }),
-    }, bot)).toEqual({ kind: "link", updateId: "102", userId: "7", chatId: "7", token: "opaque-token" });
+    };
+    expect(parseTelegramStartUpdate(privateStart))
+      .toEqual({ updateId: "102", userId: "7", chatId: "7", token: "opaque-token" });
+    expect(parseTelegramUpdate(privateStart, bot)).toBeNull();
 
-    expect(parseTelegramUpdate({
+    expect(parseTelegramStartUpdate({
       update_id: 103,
       message: message({ chat: { id: -1, type: "group" }, text: "/start opaque-token" }),
-    }, bot)).toBeNull();
-    expect(parseTelegramUpdate({
+    })).toBeNull();
+    expect(parseTelegramStartUpdate({
       update_id: 115,
       message: message({
         text: "/start@verified_bot opaque-token",
         entities: [{ type: "bot_command", offset: 0, length: 19 }],
       }),
-    }, bot)).toBeNull();
+    })).toBeNull();
   });
 
   it("requires verified Telegram entities for group activation", () => {
@@ -96,12 +99,25 @@ describe("parseTelegramUpdate", () => {
         photo: [
           { file_id: "small", width: 10, height: 10, file_size: 100 },
           { file_id: "best", width: 100, height: 100, file_size: 1_048_576 },
-          { file_id: "too-big", width: 200, height: 200, file_size: 1_048_577 },
         ],
       }),
     }, bot)).toMatchObject({
       prompt: "Please analyze this image.",
       photo: { fileId: "best" },
+    });
+  });
+
+  it("normalizes a declared oversized photo into a terminal rejection", () => {
+    expect(parseTelegramUpdate({
+      update_id: 116,
+      message: message({
+        text: undefined,
+        photo: [{ file_id: "too-big", width: 200, height: 200, file_size: 1_048_577 }],
+      }),
+    }, bot)).toMatchObject({
+      kind: "message",
+      updateId: "116",
+      rejection: "photoTooLarge",
     });
   });
 

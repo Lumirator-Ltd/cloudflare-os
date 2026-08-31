@@ -2,12 +2,24 @@ import type {
   NormalizedTelegramMessage,
   NormalizedTelegramUpdate,
   TelegramBotIdentity,
+  TelegramStartUpdate,
 } from "./types.js";
 
 const MAX_PHOTO_BYTES = 1024 * 1024;
 
 type JsonObject = Record<string, unknown>;
 type Entity = { type: string; offset: number; length: number };
+type MessageEnvelope = {
+  updateId: number;
+  message: JsonObject;
+  userId: number;
+  chatId: number;
+  chatType: string;
+};
+type PhotoSelection =
+  | { status: "selected"; fileId: string }
+  | { status: "oversized" }
+  | null;
 
 function object(value: unknown): JsonObject | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -17,6 +29,26 @@ function object(value: unknown): JsonObject | null {
 
 function integer(value: unknown): number | null {
   return typeof value === "number" && Number.isSafeInteger(value) ? value : null;
+}
+
+function messageEnvelope(value: unknown): MessageEnvelope | null {
+  const update = object(value);
+  const updateId = integer(update?.update_id);
+  const message = object(update?.message);
+  if (!update || updateId === null || updateId < 0 || !message ||
+      update.edited_message !== undefined || update.channel_post !== undefined ||
+      update.edited_channel_post !== undefined || update.business_message !== undefined ||
+      update.edited_business_message !== undefined) return null;
+
+  const from = object(message.from);
+  const chat = object(message.chat);
+  const userId = integer(from?.id);
+  const chatId = integer(chat?.id);
+  if (!from || !chat || userId === null || userId <= 0 || chatId === null || chatId === 0 ||
+      from.is_bot === true || message.sender_chat !== undefined || typeof chat.type !== "string") {
+    return null;
+  }
+  return { updateId, message, userId, chatId, chatType: chat.type };
 }
 
 function validBoundary(text: string, offset: number): boolean {
@@ -58,14 +90,19 @@ function stripRange(text: string, offset: number, length: number): string {
   return `${text.slice(0, offset)}${text.slice(offset + length)}`.trim();
 }
 
-function selectedPhoto(value: unknown): { fileId: string } | null {
+function selectedPhoto(value: unknown): PhotoSelection {
   if (!Array.isArray(value) || value.length === 0) return null;
   const candidates: Array<{ fileId: string; size?: number; area: number }> = [];
+  let hasOversizedCandidate = false;
   for (const item of value) {
     const photo = object(item);
     if (!photo || typeof photo.file_id !== "string" || photo.file_id.length === 0) continue;
     const size = integer(photo.file_size) ?? undefined;
-    if (size !== undefined && (size < 0 || size > MAX_PHOTO_BYTES)) continue;
+    if (size !== undefined && size < 0) continue;
+    if (size !== undefined && size > MAX_PHOTO_BYTES) {
+      hasOversizedCandidate = true;
+      continue;
+    }
     const width = integer(photo.width) ?? 0;
     const height = integer(photo.height) ?? 0;
     candidates.push({ fileId: photo.file_id, size, area: width * height });
@@ -73,7 +110,8 @@ function selectedPhoto(value: unknown): { fileId: string } | null {
   const declared = candidates.filter(candidate => candidate.size !== undefined);
   const pool = declared.length > 0 ? declared : candidates;
   pool.sort((left, right) => (right.size ?? right.area) - (left.size ?? left.area));
-  return pool[0] ? { fileId: pool[0].fileId } : null;
+  if (pool[0]) return { status: "selected", fileId: pool[0].fileId };
+  return hasOversizedCandidate ? { status: "oversized" } : null;
 }
 
 function parseGroupActivation(
@@ -98,24 +136,36 @@ function parseGroupActivation(
   return integer(replyFrom?.id) === bot.id ? text.trim() : null;
 }
 
+export function parseTelegramStartUpdate(value: unknown): TelegramStartUpdate | null {
+  const envelope = messageEnvelope(value);
+  if (!envelope || envelope.chatType !== "private" || envelope.chatId !== envelope.userId) return null;
+  const text = typeof envelope.message.text === "string" ? envelope.message.text : "";
+  const entities = parseEntities(envelope.message.entities, text);
+  if (!entities) return null;
+  const command = commandAtStart(text, entities);
+  if (command?.toLowerCase() !== "/start") return null;
+  const token = text.slice(command.length).trim();
+  if (!/^[A-Za-z0-9_-]+$/.test(token)) return null;
+  return {
+    updateId: String(envelope.updateId),
+    userId: String(envelope.userId),
+    chatId: String(envelope.chatId),
+    token,
+  };
+}
+
+export function telegramUpdateId(value: unknown): string | null {
+  const updateId = integer(object(value)?.update_id);
+  return updateId !== null && updateId >= 0 ? String(updateId) : null;
+}
+
 export function parseTelegramUpdate(
   value: unknown,
   bot: TelegramBotIdentity,
 ): NormalizedTelegramUpdate | null {
-  const update = object(value);
-  const updateId = integer(update?.update_id);
-  const message = object(update?.message);
-  if (!update || updateId === null || updateId < 0 || !message ||
-      update.edited_message !== undefined || update.channel_post !== undefined ||
-      update.edited_channel_post !== undefined || update.business_message !== undefined ||
-      update.edited_business_message !== undefined) return null;
-
-  const from = object(message.from);
-  const chat = object(message.chat);
-  const userId = integer(from?.id);
-  const chatId = integer(chat?.id);
-  if (!from || !chat || userId === null || userId <= 0 || chatId === null || chatId === 0 || from.is_bot === true ||
-      message.sender_chat !== undefined || typeof chat.type !== "string") return null;
+  const envelope = messageEnvelope(value);
+  if (!envelope) return null;
+  const { updateId, message, userId, chatId, chatType } = envelope;
   if (message.media_group_id !== undefined || [
     "animation", "audio", "contact", "dice", "document", "game", "location", "poll",
     "sticker", "venue", "video", "video_note", "voice",
@@ -130,31 +180,27 @@ export function parseTelegramUpdate(
   );
   if (!entities) return null;
 
-  const isPrivate = chat.type === "private";
-  const isGroup = chat.type === "group" || chat.type === "supergroup";
+  const isPrivate = chatType === "private";
+  const isGroup = chatType === "group" || chatType === "supergroup";
   if (!isPrivate && !isGroup) return null;
 
   const command = commandAtStart(text, entities);
-  if (isPrivate && chatId === userId && command?.toLowerCase() === "/start") {
-    const token = text.slice(command.length).trim();
-    if (/^[A-Za-z0-9_-]+$/.test(token)) {
-      return { kind: "link", updateId: String(updateId), userId: String(userId), chatId: String(chatId), token };
-    }
-    return null;
-  }
+  if (isPrivate && command?.toLowerCase() === "/start") return null;
   if (isPrivate && command?.toLowerCase().startsWith("/start@")) return null;
   if (isGroup && command && ownCommand(command, "start", bot.username)) return null;
 
-  const photo = selectedPhoto(message.photo);
-  if (message.photo !== undefined && !photo) return null;
+  const selection = selectedPhoto(message.photo);
+  if (message.photo !== undefined && !selection) return null;
   let prompt = text.trim();
   if (isGroup) {
     const activated = parseGroupActivation(text, entities, message, bot);
     if (activated === null) return null;
     prompt = activated;
   }
+  const photo = selection?.status === "selected" ? { fileId: selection.fileId } : undefined;
+  const rejection = selection?.status === "oversized" ? "photoTooLarge" as const : undefined;
   if (!prompt && photo) prompt = "Please analyze this image.";
-  if (!prompt && !photo) return null;
+  if (!prompt && !photo && !rejection) return null;
 
   const threadId = integer(message.message_thread_id) ?? undefined;
   const result: NormalizedTelegramMessage = {
@@ -169,5 +215,6 @@ export function parseTelegramUpdate(
   };
   if (threadId !== undefined) result.threadId = threadId;
   if (photo) result.photo = photo;
+  if (rejection) result.rejection = rejection;
   return result;
 }

@@ -1,4 +1,6 @@
+import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { isAbsolute } from "node:path";
 import { pathToFileURL } from "node:url";
 
 class TelegramSetupError extends Error {}
@@ -45,7 +47,8 @@ export async function configureTelegram({ token, publicBaseUrl, webhookSecret, f
   const identity = await requestTelegram(fetch, token, "getMe");
   if (identity === null || typeof identity !== "object" ||
       !Number.isSafeInteger(identity.id) || identity.id <= 0 ||
-      typeof identity.username !== "string" || identity.username.trim() === "") {
+      typeof identity.username !== "string" ||
+      !/^[A-Za-z0-9_]{5,32}$/.test(identity.username)) {
     throw new TelegramSetupError("Telegram getMe returned an invalid bot identity.");
   }
 
@@ -81,22 +84,122 @@ function requireEnv(env, name) {
   return env[name];
 }
 
-/**
- * Runs non-interactive Telegram setup using injected deployment secrets.
- * Returns an exit code and writes only sanitized status messages to the supplied channels.
- */
+async function defaultCommandRunner(command, args, { stdin } = {}) {
+  await new Promise((resolve, reject) => {
+    const child = spawn(command, args, { stdio: ["pipe", "ignore", "ignore"] });
+    child.once("error", reject);
+    child.once("exit", code => {
+      if (code === 0) resolve();
+      else reject(new Error("Deployment command failed."));
+    });
+    child.stdin.end(stdin);
+  });
+}
+
+function wranglerArgs(action, name, config) {
+  return ["exec", "wrangler", "secret", action, name, "--config", config];
+}
+
+async function putWorkerSecret(commandRunner, config, name, value) {
+  try {
+    await commandRunner("pnpm", wranglerArgs("put", name, config), { stdin: `${value}\n` });
+  } catch {
+    throw new TelegramSetupError("Worker secret installation failed.");
+  }
+}
+
+async function deleteWorkerSecret(commandRunner, config, name) {
+  try {
+    await commandRunner("pnpm", wranglerArgs("delete", name, config), { stdin: "y\n" });
+  } catch {
+    throw new TelegramSetupError("Worker secret removal failed.");
+  }
+}
+
+async function deleteWebhook(fetch, token) {
+  const result = await requestTelegram(fetch, token, "deleteWebhook", {
+    drop_pending_updates: false,
+  });
+  if (result !== true) throw new TelegramSetupError("Telegram deleteWebhook did not confirm removal.");
+}
+
+async function rollbackInstalledSecrets(commandRunner, config, installed) {
+  for (const name of installed.toReversed()) {
+    try {
+      await deleteWorkerSecret(commandRunner, config, name);
+    } catch {
+      // Rollback is best effort; the original sanitized failure remains authoritative.
+    }
+  }
+}
+
+async function installTelegram({ token, publicBaseUrl, config, fetch, commandRunner }) {
+  const webhookSecret = randomBytes(32).toString("base64url");
+  const installed = [];
+  let vendorStarted = false;
+  try {
+    await putWorkerSecret(commandRunner, config, "TELEGRAM_BOT_TOKEN", token);
+    installed.push("TELEGRAM_BOT_TOKEN");
+    await putWorkerSecret(commandRunner, config, "TELEGRAM_WEBHOOK_SECRET", webhookSecret);
+    installed.push("TELEGRAM_WEBHOOK_SECRET");
+    vendorStarted = true;
+    return await configureTelegram({ token, publicBaseUrl, webhookSecret, fetch });
+  } catch (error) {
+    if (vendorStarted) {
+      try {
+        await deleteWebhook(fetch, token);
+      } catch {
+        // Secret rollback must continue even if Telegram cleanup fails.
+      }
+    }
+    await rollbackInstalledSecrets(commandRunner, config, installed);
+    if (error instanceof TelegramSetupError) throw error;
+    throw new TelegramSetupError("Unexpected setup failure.");
+  }
+}
+
+async function uninstallTelegram({ token, config, fetch, commandRunner }) {
+  let failed = false;
+  try {
+    await deleteWebhook(fetch, token);
+  } catch {
+    failed = true;
+  }
+  for (const name of ["TELEGRAM_WEBHOOK_SECRET", "TELEGRAM_BOT_TOKEN"]) {
+    try {
+      await deleteWorkerSecret(commandRunner, config, name);
+    } catch {
+      failed = true;
+    }
+  }
+  if (failed) throw new TelegramSetupError("Telegram uninstall did not complete.");
+}
+
+/** Runs complete non-interactive Telegram installation or removal with sanitized output. */
 export async function runConfigureTelegramCli({
+  argv = process.argv.slice(2),
   env = process.env,
   fetch = globalThis.fetch,
+  commandRunner = defaultCommandRunner,
   stdout = (value) => process.stdout.write(value),
   stderr = (value) => process.stderr.write(value),
 } = {}) {
   try {
     const token = requireEnv(env, "TELEGRAM_BOT_TOKEN");
     const publicBaseUrl = requireEnv(env, "PUBLIC_BASE_URL");
-    const webhookSecret = requireEnv(env, "TELEGRAM_WEBHOOK_SECRET");
-    const result = await configureTelegram({ token, publicBaseUrl, webhookSecret, fetch });
+    const config = requireEnv(env, "TELEGRAM_WRANGLER_CONFIG");
+    if (!isAbsolute(config)) {
+      throw new TelegramSetupError("TELEGRAM_WRANGLER_CONFIG must be absolute.");
+    }
 
+    if (argv.length === 1 && argv[0] === "--uninstall") {
+      await uninstallTelegram({ token, config, fetch, commandRunner });
+      stdout("Telegram integration uninstalled.\n");
+      return 0;
+    }
+    if (argv.length > 0) throw new TelegramSetupError("Unknown Telegram setup option.");
+
+    const result = await installTelegram({ token, publicBaseUrl, config, fetch, commandRunner });
     stdout(`Verified Telegram bot: @${result.botUsername}\n`);
     stdout(`Verified Telegram webhook: ${result.webhookUrl}\n`);
     return 0;

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { TelegramUpdateStore } from "../src/telegram/channel.js";
 import type { NormalizedTelegramUpdate } from "../src/telegram/types.js";
 import { makeMockStorage } from "./mock-storage.js";
@@ -13,6 +13,10 @@ const update: NormalizedTelegramUpdate = {
   prompt: "hello",
   title: "Telegram chat",
 };
+
+function storageText(storage: DurableObjectStorage): string {
+  return JSON.stringify([...storage.kv.list()]);
+}
 
 describe("TelegramUpdateStore", () => {
   it("durably ignores duplicates while accepting out-of-order update IDs", () => {
@@ -40,15 +44,65 @@ describe("TelegramUpdateStore", () => {
     });
   });
 
-  it("durably records link completion before Telegram delivery", () => {
-    const store = new TelegramUpdateStore(makeMockStorage());
-    store.enqueue({ kind: "link", updateId: "501", userId: "7", chatId: "7", token: "secret" });
-    store.setLinkResult("501", "Telegram connected.");
-    expect(store.get("501")).toMatchObject({
-      status: "processing",
-      linkResult: "Telegram connected.",
-      update: { token: "" },
-    });
+  it("redacts delivered and terminal payloads into minimal tombstones", () => {
+    const storage = makeMockStorage();
+    const store = new TelegramUpdateStore(storage);
+    store.enqueue({ ...update, prompt: "sensitive prompt" });
+    store.setPlaceholder("500", 91);
+    store.storeResponse("500", { text: "sensitive response", chatPath: "/sensitive" });
+    store.markDelivered("500");
+
+    store.enqueue({ ...update, updateId: "501", prompt: "other sensitive prompt" });
+    store.markTerminal("501");
+    store.markIgnored("502");
+
+    const serialized = storageText(storage);
+    expect(serialized).not.toContain("sensitive prompt");
+    expect(serialized).not.toContain("sensitive response");
+    expect(serialized).not.toContain("other sensitive prompt");
+    expect(store.get("500")).toBeUndefined();
+    expect(store.get("501")).toBeUndefined();
+    expect(store.enqueue(update)).toBe(false);
+    expect(store.enqueue({ ...update, updateId: "501" })).toBe(false);
+    expect(store.enqueue({ ...update, updateId: "502" })).toBe(false);
+  });
+
+  it("expires tombstones after the 24-hour dedupe horizon", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-04-01T12:00:00Z"));
+    try {
+      const storage = makeMockStorage();
+      const store = new TelegramUpdateStore(storage);
+      store.enqueue(update);
+      store.markDelivered("500");
+      expect(store.enqueue(update)).toBe(false);
+
+      vi.advanceTimersByTime(24 * 60 * 60_000 + 1);
+
+      expect(store.enqueue(update)).toBe(true);
+      expect(storageText(storage)).not.toContain("telegram:tombstone:expiry:");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("claims current work without scanning completed tombstones", () => {
+    const storage = makeMockStorage();
+    const store = new TelegramUpdateStore(storage);
+    for (let index = 0; index < 2_000; index++) {
+      const updateId = String(10_000 + index);
+      store.enqueue({ ...update, updateId, prompt: `history-${index}` });
+      store.markDelivered(updateId);
+    }
+    store.enqueue(update);
+    const list = vi.spyOn(storage.kv, "list");
+
+    expect(store.claimNext()).toMatchObject({ update: { updateId: "500" } });
+
+    expect(list.mock.calls.length).toBeGreaterThan(0);
+    expect(list.mock.calls.every(([options]) =>
+      (options as DurableObjectListOptions | undefined)?.prefix === "telegram:pending:due:"
+    )).toBe(true);
   });
 
   it("resets interrupted processing without resubmitting submitted turns", () => {

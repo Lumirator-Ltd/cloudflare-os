@@ -1,8 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("cloudflare:workers", () => ({
-  // oxlint-disable-next-line typescript/no-extraneous-class -- Test replacement for the platform base.
-  DurableObject: class {},
+  DurableObject: class {
+    protected ctx: DurableObjectState;
+    protected env: Cloudflare.Env;
+
+    constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
+      this.ctx = ctx;
+      this.env = env;
+    }
+  },
 }));
 
 import { IdentityRegistry, canonicalizeVerifiedEmail } from "../src/identity-registry.js";
@@ -196,6 +203,80 @@ describe("external identity links", () => {
       started.token,
       "telegram-single-use",
     )).rejects.toThrow();
+  });
+
+  it("replays a source-scoped completion after commit without consuming the token again", async () => {
+    const { registry, deletes, writes } = makeRegistry();
+    const identity = await createIdentity(registry, "idempotent-link-user");
+    const started = await registry.startExternalLink(
+      identity.internalUserId,
+      identity.identityVersion,
+      TELEGRAM,
+    );
+
+    await expect(registry.completeExternalLink(
+      TELEGRAM,
+      started.token,
+      "telegram-idempotent",
+      "update-42",
+    )).resolves.toBe(identity.internalUserId);
+    const tokenDeletes = () => deletes.mock.calls.filter(
+      ([key]) => typeof key === "string" && key.startsWith("externalLinkTokens:"),
+    );
+    expect(tokenDeletes()).toHaveLength(1);
+
+    await expect(registry.completeExternalLink(
+      TELEGRAM,
+      started.token,
+      "telegram-idempotent",
+      "update-42",
+    )).resolves.toBe(identity.internalUserId);
+    expect(tokenDeletes()).toHaveLength(1);
+    expect(JSON.stringify(writes.mock.calls)).not.toContain(started.token);
+
+    await expect(registry.completeExternalLink(
+      TELEGRAM,
+      started.token,
+      "different-subject",
+      "update-42",
+    )).resolves.toBeNull();
+    await expect(registry.completeExternalLink(
+      "different-source",
+      started.token,
+      "telegram-idempotent",
+      "update-42",
+    )).resolves.toBeNull();
+  });
+
+  it("expires completion receipts after the 24-hour replay horizon", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-04-01T12:00:00Z"));
+    try {
+      const { registry } = makeRegistry();
+      const identity = await createIdentity(registry, "receipt-expiry-user");
+      const started = await registry.startExternalLink(
+        identity.internalUserId,
+        identity.identityVersion,
+        TELEGRAM,
+      );
+      await registry.completeExternalLink(
+        TELEGRAM,
+        started.token,
+        "telegram-receipt-expiry",
+        "update-expiry",
+      );
+
+      await vi.advanceTimersByTimeAsync(24 * 60 * 60_000 + 1);
+
+      await expect(registry.completeExternalLink(
+        TELEGRAM,
+        started.token,
+        "telegram-receipt-expiry",
+        "update-expiry",
+      )).resolves.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("fails closed when an external subject belongs to another internal user", async () => {

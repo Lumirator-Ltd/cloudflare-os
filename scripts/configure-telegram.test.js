@@ -156,55 +156,182 @@ function assertDoesNotLeak(output, values) {
 describe("runConfigureTelegramCli", () => {
   const env = {
     TELEGRAM_BOT_TOKEN: "987654321:cli-token-secret",
-    TELEGRAM_WEBHOOK_SECRET: "cli-webhook-secret",
     PUBLIC_BASE_URL: "https://cli-workshop.example/",
+    TELEGRAM_WRANGLER_CONFIG: "/deploy/workshop-backend/wrangler.jsonc",
   };
 
-  it("prints only verified public setup details on success", async () => {
+  it("installs both Worker secrets before registering the webhook", async () => {
+    const commands = [];
+    const vendorCalls = [];
+    const commandRunner = async (command, args, options) => {
+      commands.push({ command, args, stdin: options.stdin });
+    };
+    const fetch = async (url, init) => {
+      vendorCalls.push({ url, init });
+      assert.equal(commands.length, 2);
+      if (url.endsWith("/getMe")) {
+        return jsonResponse({ ok: true, result: { id: 987654321, username: "verified_cli_bot" } });
+      }
+      if (url.endsWith("/setWebhook")) return jsonResponse({ ok: true, result: true });
+      return jsonResponse({
+        ok: true,
+        result: { url: "https://cli-workshop.example/api/telegram/webhook" },
+      });
+    };
+    const capture = captureCli();
+
+    const exitCode = await runConfigureTelegramCli({
+      env,
+      fetch,
+      commandRunner,
+      stdout: capture.stdout,
+      stderr: capture.stderr,
+    });
+
+    assert.equal(exitCode, 0);
+    assert.deepEqual(commands.map(({ command, args }) => [command, args]), [
+      ["pnpm", ["exec", "wrangler", "secret", "put", "TELEGRAM_BOT_TOKEN", "--config", env.TELEGRAM_WRANGLER_CONFIG]],
+      ["pnpm", ["exec", "wrangler", "secret", "put", "TELEGRAM_WEBHOOK_SECRET", "--config", env.TELEGRAM_WRANGLER_CONFIG]],
+    ]);
+    assert.equal(commands[0].stdin, `${env.TELEGRAM_BOT_TOKEN}\n`);
+    const generatedSecret = commands[1].stdin.trim();
+    assert.match(generatedSecret, /^[A-Za-z0-9_-]{43}$/);
+    assert.equal(JSON.stringify(commands.map(({ args }) => args)).includes(env.TELEGRAM_BOT_TOKEN), false);
+    assert.equal(JSON.stringify(commands.map(({ args }) => args)).includes(generatedSecret), false);
+    assert.equal(JSON.parse(vendorCalls[1].init.body).secret_token, generatedSecret);
+    assert.deepEqual(capture.output(), {
+      stdout: "Verified Telegram bot: @verified_cli_bot\n" +
+          "Verified Telegram webhook: https://cli-workshop.example/api/telegram/webhook\n",
+      stderr: "",
+    });
+    assertDoesNotLeak(capture.output(), [env.TELEGRAM_BOT_TOKEN, generatedSecret]);
+  });
+
+  it("rolls back installed secrets when webhook verification fails", async () => {
+    const commands = [];
     const responses = [
-      { ok: true, result: { id: 987654321, username: "verified_cli_bot" } },
+      { ok: true, result: { id: 42, username: "mismatch_bot" } },
       { ok: true, result: true },
-      { ok: true, result: { url: "https://cli-workshop.example/api/telegram/webhook" } },
+      { ok: true, result: { url: "https://other.example/api/telegram/webhook" } },
+      { ok: true, result: true },
     ];
     const capture = captureCli();
 
     const exitCode = await runConfigureTelegramCli({
       env,
       fetch: async () => jsonResponse(responses.shift()),
+      commandRunner: async (command, args, options) => {
+        commands.push({ command, args, stdin: options.stdin });
+      },
+      stdout: capture.stdout,
+      stderr: capture.stderr,
+    });
+
+    assert.equal(exitCode, 1);
+    assert.deepEqual(commands.map(({ args }) => args.slice(1, 5)), [
+      ["wrangler", "secret", "put", "TELEGRAM_BOT_TOKEN"],
+      ["wrangler", "secret", "put", "TELEGRAM_WEBHOOK_SECRET"],
+      ["wrangler", "secret", "delete", "TELEGRAM_WEBHOOK_SECRET"],
+      ["wrangler", "secret", "delete", "TELEGRAM_BOT_TOKEN"],
+    ]);
+    assert.equal(capture.output().stdout, "");
+    assert.match(capture.output().stderr, /^Telegram configuration failed:/);
+    const generatedSecret = commands[1].stdin.trim();
+    assertDoesNotLeak(capture.output(), [env.TELEGRAM_BOT_TOKEN, generatedSecret]);
+  });
+
+  it("rolls back only the first secret when the second put fails", async () => {
+    const commands = [];
+    const capture = captureCli();
+    let commandCount = 0;
+
+    const exitCode = await runConfigureTelegramCli({
+      env,
+      fetch: async () => { throw new Error("vendor must not be called"); },
+      commandRunner: async (command, args, options) => {
+        commands.push({ command, args, stdin: options.stdin });
+        commandCount++;
+        if (commandCount === 2) {
+          throw new Error(`runner exposed ${env.TELEGRAM_BOT_TOKEN} ${options.stdin}`);
+        }
+      },
+      stdout: capture.stdout,
+      stderr: capture.stderr,
+    });
+
+    assert.equal(exitCode, 1);
+    assert.deepEqual(commands.map(({ args }) => args[3] + ":" + args[4]), [
+      "put:TELEGRAM_BOT_TOKEN",
+      "put:TELEGRAM_WEBHOOK_SECRET",
+      "delete:TELEGRAM_BOT_TOKEN",
+    ]);
+    assertDoesNotLeak(capture.output(), [env.TELEGRAM_BOT_TOKEN, commands[1].stdin.trim()]);
+  });
+
+  it("uninstalls the webhook before deleting both Worker secrets", async () => {
+    const events = [];
+    const capture = captureCli();
+
+    const exitCode = await runConfigureTelegramCli({
+      argv: ["--uninstall"],
+      env,
+      fetch: async (url) => {
+        events.push(`vendor:${url.slice(url.lastIndexOf("/") + 1)}`);
+        return jsonResponse({ ok: true, result: true });
+      },
+      commandRunner: async (_command, args) => {
+        events.push(`command:${args[3]}:${args[4]}`);
+      },
       stdout: capture.stdout,
       stderr: capture.stderr,
     });
 
     assert.equal(exitCode, 0);
+    assert.deepEqual(events, [
+      "vendor:deleteWebhook",
+      "command:delete:TELEGRAM_WEBHOOK_SECRET",
+      "command:delete:TELEGRAM_BOT_TOKEN",
+    ]);
     assert.deepEqual(capture.output(), {
-      stdout: "Verified Telegram bot: @verified_cli_bot\n" +
-          "Verified Telegram webhook: https://cli-workshop.example/api/telegram/webhook\n",
+      stdout: "Telegram integration uninstalled.\n",
       stderr: "",
     });
-    assertDoesNotLeak(capture.output(), [env.TELEGRAM_BOT_TOKEN, env.TELEGRAM_WEBHOOK_SECRET]);
+    assertDoesNotLeak(capture.output(), Object.values(env));
   });
 
-  for (const [name, fetch] of [
-    ["Telegram 4xx", async () => new Response(
-      `token=${env.TELEGRAM_BOT_TOKEN}&secret=${env.TELEGRAM_WEBHOOK_SECRET}`,
-      { status: 401 })],
-    ["malformed response", async () => jsonResponse({
-      ok: true,
-      result: {
-        id: env.TELEGRAM_BOT_TOKEN,
-        username: env.TELEGRAM_WEBHOOK_SECRET,
-      },
-    })],
-    ["network error", async () => {
-      throw new Error(`request failed for ${env.TELEGRAM_BOT_TOKEN} ${env.TELEGRAM_WEBHOOK_SECRET}`);
-    }],
-  ]) {
-    it(`sanitizes ${name} output`, async () => {
-      const capture = captureCli();
+  it("rejects a relative deployment config before handling secrets", async () => {
+    const capture = captureCli();
+    let called = false;
 
+    const exitCode = await runConfigureTelegramCli({
+      env: { ...env, TELEGRAM_WRANGLER_CONFIG: "relative/wrangler.jsonc" },
+      fetch: async () => { called = true; throw new Error("unexpected"); },
+      commandRunner: async () => { called = true; },
+      stdout: capture.stdout,
+      stderr: capture.stderr,
+    });
+
+    assert.equal(exitCode, 1);
+    assert.equal(called, false);
+    assert.match(capture.output().stderr, /absolute/);
+    assertDoesNotLeak(capture.output(), Object.values(env));
+  });
+
+  it("sanitizes command and vendor failures", async () => {
+    for (const failure of ["command", "vendor"]) {
+      const capture = captureCli();
+      const commands = [];
       const exitCode = await runConfigureTelegramCli({
         env,
-        fetch,
+        fetch: async () => {
+          throw new Error(`vendor exposed ${env.TELEGRAM_BOT_TOKEN}`);
+        },
+        commandRunner: async (command, args, options) => {
+          commands.push({ command, args, stdin: options.stdin });
+          if (failure === "command") {
+            throw new Error(`command exposed ${env.TELEGRAM_BOT_TOKEN} ${options.stdin}`);
+          }
+        },
         stdout: capture.stdout,
         stderr: capture.stderr,
       });
@@ -213,33 +340,9 @@ describe("runConfigureTelegramCli", () => {
       assert.equal(capture.output().stdout, "");
       assert.match(capture.output().stderr, /^Telegram configuration failed:/);
       assertDoesNotLeak(capture.output(), [
-        ...Object.values(env),
-        env.PUBLIC_BASE_URL.replace(/\/$/, ""),
+        env.TELEGRAM_BOT_TOKEN,
+        ...commands.map(({ stdin }) => stdin?.trim()).filter(Boolean),
       ]);
-    });
-  }
-
-  it("requires the orchestrator to supply the webhook secret", async () => {
-    const capture = captureCli();
-    let requested = false;
-
-    const exitCode = await runConfigureTelegramCli({
-      env: {
-        TELEGRAM_BOT_TOKEN: env.TELEGRAM_BOT_TOKEN,
-        PUBLIC_BASE_URL: env.PUBLIC_BASE_URL,
-      },
-      fetch: async () => {
-        requested = true;
-        throw new Error("unexpected request");
-      },
-      stdout: capture.stdout,
-      stderr: capture.stderr,
-    });
-
-    assert.equal(exitCode, 1);
-    assert.equal(requested, false);
-    assert.equal(capture.output().stdout, "");
-    assert.match(capture.output().stderr, /TELEGRAM_WEBHOOK_SECRET is required/);
-    assertDoesNotLeak(capture.output(), Object.values(env));
+    }
   });
 });

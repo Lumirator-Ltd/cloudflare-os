@@ -52,6 +52,16 @@ type ExternalLinkTokenRecord = {
   expiresAt: number;
 };
 
+type ExternalLinkCompletionReceipt = {
+  sourceOperationKey: string;
+  source: string;
+  operationKey: string;
+  externalSubject: string;
+  tokenDigest: string;
+  internalUserId: string;
+  expiresAt: number;
+};
+
 type IdentitySessionInvalidator = () => Promise<void>;
 
 function makeIdentityRegistryStorage(storage: DurableObjectStorage) {
@@ -81,6 +91,13 @@ function makeIdentityRegistryStorage(storage: DurableObjectStorage) {
             externalLinkTokenExpiryKey(record.expiresAt, record.digest),
         },
       }),
+      externalLinkCompletionReceipts: collection<ExternalLinkCompletionReceipt>()({
+        primaryKey: "sourceOperationKey",
+        uniqueIndexes: {
+          byExpiry: (record: ExternalLinkCompletionReceipt) =>
+            externalLinkReceiptExpiryKey(record.expiresAt, record.sourceOperationKey),
+        },
+      }),
     },
     singletons: {
       emailClaimsBackfilled: false,
@@ -97,7 +114,9 @@ const EXPLICIT_LINK_REQUIRED =
 const SETUP_FAILED = "Identity setup failed.";
 const EXTERNAL_LINK_INVALID = "External identity link is invalid.";
 const EXTERNAL_LINK_TOKEN_TTL_MS = 10 * 60_000;
+const EXTERNAL_LINK_RECEIPT_TTL_MS = 24 * 60 * 60_000;
 const EXPIRED_TOKEN_CLEANUP_LIMIT = 100;
+const EXPIRED_RECEIPT_CLEANUP_LIMIT = 100;
 
 /** Canonicalizes a server-verified email using only trim and lowercase operations. */
 export function canonicalizeVerifiedEmail(email: string): string {
@@ -132,6 +151,14 @@ function internalSourceKey(internalUserId: string, source: string): string {
 
 function externalLinkTokenExpiryKey(expiresAt: number, digest: string): string {
   return `${expiresAt.toString().padStart(16, "0")}:${digest}`;
+}
+
+function externalLinkSourceOperationKey(source: string, operationKey: string): string {
+  return JSON.stringify([source, operationKey]);
+}
+
+function externalLinkReceiptExpiryKey(expiresAt: number, sourceOperationKey: string): string {
+  return `${expiresAt.toString().padStart(16, "0")}:${sourceOperationKey}`;
 }
 
 function randomExternalLinkToken(): string {
@@ -338,16 +365,51 @@ export class IdentityRegistry extends DurableObject<Cloudflare.Env> {
     return { token, expiresAt };
   }
 
-  /** Completes a link and returns the active stable internal user ID that owns it. */
+  /** Completes a single-use link and returns the active stable internal user ID that owns it. */
   async completeExternalLink(
     source: string,
     token: string,
     externalSubject: string,
-  ): Promise<string> {
+  ): Promise<string>;
+
+  /** Completes an idempotent source operation, returning null for invalid or mismatched input. */
+  async completeExternalLink(
+    source: string,
+    token: string,
+    externalSubject: string,
+    operationKey: string,
+  ): Promise<string | null>;
+
+  async completeExternalLink(
+    source: string,
+    token: string,
+    externalSubject: string,
+    operationKey?: string,
+  ): Promise<string | null> {
     const digest = await digestExternalLinkToken(token);
     const result = this.storage.transaction((): string | null => {
       const now = Date.now();
       this.#cleanupExpiredExternalLinkTokens(now);
+      this.#cleanupExpiredExternalLinkCompletionReceipts(now);
+      const sourceOperationKey = operationKey === undefined
+        ? undefined
+        : externalLinkSourceOperationKey(source, operationKey);
+      if (sourceOperationKey) {
+        const receipt = this.storage.externalLinkCompletionReceipts.get(sourceOperationKey);
+        if (receipt) {
+          if (receipt.expiresAt <= now) {
+            this.storage.externalLinkCompletionReceipts.delete(sourceOperationKey);
+          } else {
+            return receipt.source === source &&
+                receipt.operationKey === operationKey &&
+                receipt.externalSubject === externalSubject &&
+                receipt.tokenDigest === digest
+              ? receipt.internalUserId
+              : null;
+          }
+        }
+      }
+
       const pending = this.storage.externalLinkTokens.byDigest.get(digest);
       if (!pending || pending.source !== source || pending.expiresAt <= now) return null;
       const latest = this.storage.externalLinkTokens.get(pending.internalSourceKey);
@@ -378,10 +440,30 @@ export class IdentityRegistry extends DurableObject<Cloudflare.Env> {
         externalSubject,
         internalUserId: pending.internalUserId,
       });
+      if (sourceOperationKey && operationKey !== undefined) {
+        this.storage.externalLinkCompletionReceipts.put({
+          sourceOperationKey,
+          source,
+          operationKey,
+          externalSubject,
+          tokenDigest: digest,
+          internalUserId: pending.internalUserId,
+          expiresAt: now + EXTERNAL_LINK_RECEIPT_TTL_MS,
+        });
+      }
       return pending.internalUserId;
     });
-    if (result === null) throw new Error(EXTERNAL_LINK_INVALID);
+    if (result === null && operationKey === undefined) throw new Error(EXTERNAL_LINK_INVALID);
+    if (operationKey !== undefined) await this.#scheduleExternalLinkReceiptCleanup();
     return result;
+  }
+
+  /** Deletes expired idempotency receipts in bounded batches. */
+  async alarm(): Promise<void> {
+    this.storage.transaction(() => {
+      this.#cleanupExpiredExternalLinkCompletionReceipts(Date.now());
+    });
+    await this.#scheduleExternalLinkReceiptCleanup();
   }
 
   /** Returns only whether the active identity has an external link for this source. */
@@ -502,6 +584,24 @@ export class IdentityRegistry extends DurableObject<Cloudflare.Env> {
         this.storage.externalLinkTokens.delete(token.internalSourceKey);
       }
     }
+  }
+
+  #cleanupExpiredExternalLinkCompletionReceipts(now: number): void {
+    const expired = [...this.storage.externalLinkCompletionReceipts.byExpiry.list({
+      end: externalLinkReceiptExpiryKey(now + 1, ""),
+      limit: EXPIRED_RECEIPT_CLEANUP_LIMIT,
+    })];
+    for (const receipt of expired) {
+      if (receipt.expiresAt <= now) {
+        this.storage.externalLinkCompletionReceipts.delete(receipt.sourceOperationKey);
+      }
+    }
+  }
+
+  async #scheduleExternalLinkReceiptCleanup(): Promise<void> {
+    const next = [...this.storage.externalLinkCompletionReceipts.byExpiry.list({ limit: 1 })][0];
+    if (next) await this.ctx.storage.setAlarm(next.expiresAt);
+    else await this.ctx.storage.deleteAlarm();
   }
 
   #claimEmail(canonicalVerifiedEmail: string, internalUserId: string): void {
