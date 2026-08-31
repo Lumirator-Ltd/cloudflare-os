@@ -549,13 +549,16 @@ type ExternalMessageResponseTargetRegistrationDecision =
     };
 
 type ExternalMessageSubmitInput = {
-  callerEmail: string;
   externalChatKey: string;
   idempotencyKey: string;
   prompt: string;
+  attachments?: ChatAttachmentUpload[];
   chatGatewayRpcTarget: NativeRpcStub<ChatGatewayRpcTarget>;
   title: string;
-};
+} & (
+  | { identityMode: "trustedEmail"; callerEmail: string }
+  | { identityMode: "internalUserId"; internalUserId: string }
+);
 
 type ExternalChatRecord = {
   externalChatKey: string;
@@ -2781,6 +2784,38 @@ class OverseerImpl implements AgentHooks {
     });
   }
 
+  stageChatAttachment(
+    attachment: ChatAttachmentUpload,
+    provider: AiModelConfig["provider"] | undefined,
+  ): ChatAttachmentHandle {
+    attachment = validateChatAttachmentUpload(attachment, provider);
+    this.sweepStagedChatAttachments();
+
+    let id = crypto.randomUUID();
+    this.storage.chatAttachmentContent.put({
+      fileId: id,
+      data: new Uint8Array(attachment.content),
+      state: {
+        type: "staged",
+        uploadedAt: Date.now(),
+        mimeType: attachment.mimeType,
+        name: attachment.name,
+      },
+    });
+    return {id};
+  }
+
+  deleteStagedChatAttachments(attachments: ChatAttachmentHandle[]): void {
+    this.ctx.storage.transactionSync(() => {
+      for (let attachment of attachments) {
+        let content = this.storage.chatAttachmentContent.get(attachment.id);
+        if (content?.state.type === "staged") {
+          this.storage.chatAttachmentContent.delete(attachment.id);
+        }
+      }
+    });
+  }
+
   // Enforce an observation's `excludeObservers`. For each named opaque observerId:
   //   - Map it back to a profileId via the byObserverId index. An unknown id is not an active
   //     observer (e.g. already torn down), so it is ignored.
@@ -3656,6 +3691,7 @@ class OverseerImpl implements AgentHooks {
     try {
       await record.chatGatewayRpcTarget.onGadgetResponse({
         text: record.responseText,
+        chatPath: `/workspace/${this.ctx.id.toString()}?chat=${record.chatId}`,
       });
     } catch (err) {
       this.logger.error("failed to deliver external message response", {
@@ -6499,15 +6535,22 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
   async receiveExternalMessage(
     input: ExternalMessageSubmitInput,
   ): Promise<SubmitExternalMessageResult> {
-    if (!input.prompt.trim()) {
-      return { accepted: false, message: "Please include a prompt." };
+    if (!input.prompt.trim() && !input.attachments?.length) {
+      return { accepted: false, message: "Please include a prompt or attachment." };
     }
 
-    // Resolve trusted gateway email input at the same discovery boundary as sharing. Registry users
-    // are always referenced by stable application ID; legacy email users retain their direct route.
-    let internalUserId = await this.impl.ctx.exports.IdentityRegistry.getByName("")
-        .findInternalUserIdByVerifiedEmail(input.callerEmail);
-    let callerId = internalUserId ?? input.callerEmail;
+    let registry = this.impl.ctx.exports.IdentityRegistry.getByName("");
+    let callerId: string;
+    if (input.identityMode === "internalUserId") {
+      let identity = await registry.getIdentity(input.internalUserId);
+      if (identity?.status !== "active" || identity.canonicalVerifiedEmail === null) {
+        return { accepted: false, message: "Please link an active account to continue." };
+      }
+      callerId = identity.internalUserId;
+    } else {
+      let internalUserId = await registry.findInternalUserIdByVerifiedEmail(input.callerEmail);
+      callerId = internalUserId ?? input.callerEmail;
+    }
     let caller = this.impl.users.getByName(callerId);
     let callerProfile = await caller.whoamiIfExists();
     if (!callerProfile) {
@@ -6583,36 +6626,44 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     // Re-check because another request may have created the external chat while resolving the model.
     externalChat = this.#getExternalChat(input.externalChatKey);
 
-    // Submit the prompt to the existing external chat, or start a new external chat.
-    let responseTargetRegistration: ExternalMessageResponseTargetRegistration = {
-      idempotencyKey: input.idempotencyKey,
-      chatGatewayRpcTarget: input.chatGatewayRpcTarget,
-    };
-    let chatId: number;
-    if (externalChat) {
-      await this.impl.sendChatMessage(
-        caller,
-        userContext,
-        externalChat.chatId,
-        input.prompt,
-        undefined,
-        undefined,
-        responseTargetRegistration,
-      );
-      chatId = externalChat.chatId;
-    } else {
-      chatId = await this.impl.newChat(
-        caller,
-        userContext,
-        input.prompt,
-        undefined,
-        undefined,
-        responseTargetRegistration,
-        input.externalChatKey,
-      );
-    }
+    let attachments: ChatAttachmentHandle[] = [];
+    try {
+      for (let attachment of input.attachments ?? []) {
+        attachments.push(this.impl.stageChatAttachment(attachment, aiModel.config.provider));
+      }
 
-    return { accepted: true, chatPath: `/workspace/${this.ctx.id.toString()}?chat=${chatId}` };
+      let responseTargetRegistration: ExternalMessageResponseTargetRegistration = {
+        idempotencyKey: input.idempotencyKey,
+        chatGatewayRpcTarget: input.chatGatewayRpcTarget,
+      };
+      let chatId: number;
+      if (externalChat) {
+        await this.impl.sendChatMessage(
+          caller,
+          userContext,
+          externalChat.chatId,
+          input.prompt,
+          undefined,
+          attachments,
+          responseTargetRegistration,
+        );
+        chatId = externalChat.chatId;
+      } else {
+        chatId = await this.impl.newChat(
+          caller,
+          userContext,
+          input.prompt,
+          undefined,
+          attachments,
+          responseTargetRegistration,
+          input.externalChatKey,
+        );
+      }
+
+      return { accepted: true, chatPath: `/workspace/${this.ctx.id.toString()}?chat=${chatId}` };
+    } finally {
+      this.impl.deleteStagedChatAttachments(attachments);
+    }
   }
 
   // Initialize this workspace's default gadget from a blueprint's code snapshot. Called by
@@ -7989,25 +8040,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     if (modelId !== null) {
       provider = (await this.#clientUser.getChatContext(modelId)).aiModel?.config.provider;
     }
-    attachment = validateChatAttachmentUpload(
-      attachment,
-      provider,
-    );
-
-    this.impl.sweepStagedChatAttachments();
-
-    let id = crypto.randomUUID();
-    this.impl.storage.chatAttachmentContent.put({
-      fileId: id,
-      data: new Uint8Array(attachment.content),
-      state: {
-        type: "staged",
-        uploadedAt: Date.now(),
-        mimeType: attachment.mimeType,
-        name: attachment.name,
-      },
-    });
-    return {id};
+    return this.impl.stageChatAttachment(attachment, provider);
   }
 
   // Fetch the bytes of a committed chat attachment over the authenticated RPC connection. The

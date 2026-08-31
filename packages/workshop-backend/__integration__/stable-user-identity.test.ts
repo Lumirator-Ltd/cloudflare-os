@@ -936,6 +936,7 @@ describe("stable human application identities", () => {
     using responseTarget = new NativeRpcStub<ChatGatewayRpcTarget>(new TestChatGatewayTarget());
 
     const result = await workspace.receiveExternalMessage({
+      identityMode: "trustedEmail",
       callerEmail: account.email,
       externalChatKey: `chat-${crypto.randomUUID()}`,
       idempotencyKey: `message-${crypto.randomUUID()}`,
