@@ -151,6 +151,29 @@ describe("X account observations", () => {
     expect(session.authorize).toHaveBeenCalledTimes(11);
   });
 
+  it("rejects invalid read arguments before crossing the account boundary", async () => {
+    const cases: Array<[() => Promise<unknown>, RegExp, ReturnType<typeof subject>]> = [];
+    for (const [invoke, pattern] of [
+      [(session: ReturnType<typeof subject>) => session.value.getUser({}), /exactly one/i],
+      [(session: ReturnType<typeof subject>) => session.value.getUser({ id: USER.id, username: USER.username }), /exactly one/i],
+      [(session: ReturnType<typeof subject>) => session.value.getUser({ id: "https://evil.test" }), /id/i],
+      [(session: ReturnType<typeof subject>) => session.value.getUser({ username: "bad/name" }), /username/i],
+      [(session: ReturnType<typeof subject>) => session.value.getPost("1/../2"), /id/i],
+      [(session: ReturnType<typeof subject>) => session.value.searchRecent(""), /query/i],
+      [(session: ReturnType<typeof subject>) => session.value.searchRecent("x".repeat(513)), /query/i],
+      [(session: ReturnType<typeof subject>) => session.value.listMyPosts({ maxResults: 21 }), /maxResults/i],
+      [(session: ReturnType<typeof subject>) => session.value.listFollowers({ nextToken: "bad token" }), /nextToken/i],
+    ] as const) {
+      const session = subject();
+      cases.push([() => invoke(session), pattern, session]);
+    }
+
+    for (const [invoke, pattern, session] of cases) {
+      await expect(invoke()).rejects.toThrow(pattern);
+      expect(session.performRead).not.toHaveBeenCalled();
+    }
+  });
+
   it("keeps search text and full post text out of durable observation descriptions", async () => {
     const session = subject();
 

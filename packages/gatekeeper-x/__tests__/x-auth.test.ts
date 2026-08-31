@@ -346,6 +346,19 @@ describe("X connected account OAuth", () => {
       .toContain("X Developer App を接続");
   });
 
+  it("supersedes an older reconnect candidate before scheduling a new form", async () => {
+    const initial = await completeFlow();
+    const before = await storageValue<any>(initial.doId, "credentials");
+    await beginFlow({ reconnect: true });
+    expect(await storageValue(initial.doId, "oauthAttempt")).toBeDefined();
+
+    const replacement = await callback.reconnectConnected();
+
+    expect(replacement.url).toContain(initial.doId);
+    expect(await storageValue(initial.doId, "oauthAttempt")).toBeUndefined();
+    expect(await storageValue(initial.doId, "credentials")).toEqual(before);
+  });
+
   it("scrubs expired reconnect candidates without deleting active credentials", async () => {
     const initial = await completeFlow();
     const before = await storageValue<any>(initial.doId, "credentials");

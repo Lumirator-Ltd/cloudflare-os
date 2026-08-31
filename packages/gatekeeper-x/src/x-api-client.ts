@@ -144,6 +144,30 @@ function pageOptions(options: XPageOptions = {}): { maxResults: number; nextToke
   return { maxResults, ...(options.nextToken ? { nextToken: options.nextToken } : {}) };
 }
 
+export function validateXId(value: string, name = "id"): string {
+  return requireId(value, name);
+}
+
+export function validateXUsername(value: string): string {
+  return requireUsername(value);
+}
+
+export function validateXSearchQuery(value: string): string {
+  return requireSearchQuery(value);
+}
+
+export function validateXPageOptions(options?: XPageOptions): void {
+  pageOptions(options);
+}
+
+export function validateXUserLookup(input: { id?: string; username?: string }): void {
+  if ((input.id === undefined) === (input.username === undefined)) {
+    throw new TypeError("Provide exactly one user id or username.");
+  }
+  if (input.id !== undefined) requireId(input.id);
+  if (input.username !== undefined) requireUsername(input.username);
+}
+
 function numericMetrics(value: unknown): Record<string, number> | undefined {
   if (!isObject(value)) return undefined;
   const result: Record<string, number> = {};

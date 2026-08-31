@@ -32,6 +32,10 @@ import {
   type XPostPage,
   type XUser,
   type XUserPage,
+  validateXId,
+  validateXPageOptions,
+  validateXSearchQuery,
+  validateXUserLookup,
 } from "./x-api-client";
 import type { XAccountSession } from "./types";
 import {
@@ -405,6 +409,7 @@ export class UserAccount extends DurableObject<Env> {
   async prepareReconnect(nonce: string): Promise<XConnectLanguage> {
     const credentials = this.ctx.storage.kv.get<StoredCredentials>("credentials");
     if (!credentials) throw new Error("X credentials are unavailable. Reconnect the account.");
+    this.ctx.storage.kv.delete("oauthAttempt");
     const expiresAt = Date.now() + CONNECTION_LIFETIME_MS;
     this.ctx.storage.kv.put<ConnectionAttempt>("connectionAttempt", {
       nonce,
@@ -873,50 +878,61 @@ export class XAccountSessionImpl extends RpcTarget implements XAccountSession {
     }));
   }
 
-  getUser(input: { id?: string; username?: string }): Promise<XUser> {
-    return this.#read<XUser>({ type: "getUser", input }, result => ({
+  async getUser(input: { id?: string; username?: string }): Promise<XUser> {
+    validateXUserLookup(input);
+    return await this.#read<XUser>({ type: "getUser", input }, result => ({
       title: `Read X profile @${result.username}`,
       description: `Read public profile metadata for X user ${result.id}.`,
     }));
   }
 
-  getPost(id: string): Promise<XPost> {
-    return this.#read<XPost>({ type: "getPost", id }, result => ({
+  async getPost(id: string): Promise<XPost> {
+    validateXId(id);
+    return await this.#read<XPost>({ type: "getPost", id }, result => ({
       title: `Read X post ${result.id}`,
       description: `Read post ${result.id} from X.`,
     }));
   }
 
-  listMyPosts(options?: XPageOptions): Promise<XPostPage> {
-    return this.#postPage({ type: "listMyPosts", options }, "X post");
+  async listMyPosts(options?: XPageOptions): Promise<XPostPage> {
+    validateXPageOptions(options);
+    return await this.#postPage({ type: "listMyPosts", options }, "X post");
   }
 
-  listMentions(options?: XPageOptions): Promise<XPostPage> {
-    return this.#postPage({ type: "listMentions", options }, "X mention");
+  async listMentions(options?: XPageOptions): Promise<XPostPage> {
+    validateXPageOptions(options);
+    return await this.#postPage({ type: "listMentions", options }, "X mention");
   }
 
-  listHomeTimeline(options?: XPageOptions): Promise<XPostPage> {
-    return this.#postPage({ type: "listHomeTimeline", options }, "X timeline post");
+  async listHomeTimeline(options?: XPageOptions): Promise<XPostPage> {
+    validateXPageOptions(options);
+    return await this.#postPage({ type: "listHomeTimeline", options }, "X timeline post");
   }
 
-  searchRecent(query: string, options?: XPageOptions): Promise<XPostPage> {
-    return this.#postPage({ type: "searchRecent", query, options }, "recent X search result");
+  async searchRecent(query: string, options?: XPageOptions): Promise<XPostPage> {
+    validateXSearchQuery(query);
+    validateXPageOptions(options);
+    return await this.#postPage({ type: "searchRecent", query, options }, "recent X search result");
   }
 
-  listLikedPosts(options?: XPageOptions): Promise<XPostPage> {
-    return this.#postPage({ type: "listLikedPosts", options }, "liked X post");
+  async listLikedPosts(options?: XPageOptions): Promise<XPostPage> {
+    validateXPageOptions(options);
+    return await this.#postPage({ type: "listLikedPosts", options }, "liked X post");
   }
 
-  listBookmarks(options?: XPageOptions): Promise<XPostPage> {
-    return this.#postPage({ type: "listBookmarks", options }, "X bookmark");
+  async listBookmarks(options?: XPageOptions): Promise<XPostPage> {
+    validateXPageOptions(options);
+    return await this.#postPage({ type: "listBookmarks", options }, "X bookmark");
   }
 
-  listFollowers(options?: XPageOptions): Promise<XUserPage> {
-    return this.#userPage({ type: "listFollowers", options }, "X follower");
+  async listFollowers(options?: XPageOptions): Promise<XUserPage> {
+    validateXPageOptions(options);
+    return await this.#userPage({ type: "listFollowers", options }, "X follower");
   }
 
-  listFollowing(options?: XPageOptions): Promise<XUserPage> {
-    return this.#userPage({ type: "listFollowing", options }, "followed X account");
+  async listFollowing(options?: XPageOptions): Promise<XUserPage> {
+    validateXPageOptions(options);
+    return await this.#userPage({ type: "listFollowing", options }, "followed X account");
   }
 
   #postPage(operation: XReadOperation, label: string): Promise<XPostPage> {
