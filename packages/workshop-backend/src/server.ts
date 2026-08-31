@@ -1,6 +1,6 @@
 import { RpcStub, RpcTarget, newHttpBatchRpcResponse, newWebSocketRpcSession, RpcSessionOptions } from "capnweb";
 import { validateRpc } from "capnweb-validate";
-import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, ClerkAuthentication, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, GATEKEEPER_SESSION_LOGOUT_PATH } from '@gadgets/workshop-shared/api';
+import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, ClerkAuthentication, TelegramLinkStatus, TelegramLinkStart, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, GATEKEEPER_SESSION_LOGOUT_PATH } from '@gadgets/workshop-shared/api';
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
 import { getServerConfig } from "./deployment-config.js";
 import { isPasswordAuthEnabled, getAuthGatekeeperAllowlist } from "./auth/config.js";
@@ -119,6 +119,7 @@ const COLLISION_LOCKED = "Identity collision requires deployment operator assist
 const ACCESS_SESSION_EXPIRED = "Cloudflare Access session expired.";
 const GATEKEEPER_SESSION_EXPIRED = "Gatekeeper session expired.";
 const MAX_TIMEOUT_MILLISECONDS = 0x7fffffff;
+const TELEGRAM_EXTERNAL_SOURCE = "telegram";
 
 function canonicalAdminEmails(value: unknown): string[] {
   if (typeof value === "string") {
@@ -181,6 +182,22 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
       this.ctx.exports.IdentityRegistry.getByName(""), internalUserId, this.authority);
   }
 
+  async #requireCurrentRegistryAuthority(): Promise<{
+    internalUserId: string;
+    authority: VerifiedAuthorityContext;
+  }> {
+    const internalUserId = this.#userId.name;
+    if (!this.authority || !internalUserId) {
+      throw new Error(CURRENT_IDENTITY_AUTHORITY_REQUIRED);
+    }
+    await assertCurrentIdentityAuthority(
+      this.ctx.exports.IdentityRegistry.getByName(""),
+      internalUserId,
+      this.authority,
+    );
+    return { internalUserId, authority: this.authority };
+  }
+
   async #currentAdmin(): Promise<boolean> {
     await this.#assertCurrentAuthority();
     return this.#isAdmin();
@@ -210,6 +227,35 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   hasPasswordLogin(): Promise<boolean> {
     return this.#user.hasPasswordLogin();
   }
+
+  async getTelegramLinkStatus(): Promise<TelegramLinkStatus> {
+    const { internalUserId, authority } = await this.#requireCurrentRegistryAuthority();
+    const status = await this.ctx.exports.IdentityRegistry.getByName("").getExternalLinkStatus(
+      internalUserId,
+      authority.identityVersion,
+      TELEGRAM_EXTERNAL_SOURCE,
+    );
+    return { connected: status.connected };
+  }
+
+  async startTelegramLink(): Promise<TelegramLinkStart> {
+    const { internalUserId, authority } = await this.#requireCurrentRegistryAuthority();
+    return await this.ctx.exports.IdentityRegistry.getByName("").startExternalLink(
+      internalUserId,
+      authority.identityVersion,
+      TELEGRAM_EXTERNAL_SOURCE,
+    );
+  }
+
+  async unlinkTelegram(): Promise<void> {
+    const { internalUserId, authority } = await this.#requireCurrentRegistryAuthority();
+    await this.ctx.exports.IdentityRegistry.getByName("").unlinkExternalIdentity(
+      internalUserId,
+      authority.identityVersion,
+      TELEGRAM_EXTERNAL_SOURCE,
+    );
+  }
+
   listModels(): Promise<AiChatAuthorInfo[]> {
     return this.#user.listModels();
   }

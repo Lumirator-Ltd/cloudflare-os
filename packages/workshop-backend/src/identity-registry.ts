@@ -35,6 +35,23 @@ type EmailClaimRecord = {
   internalUserId: string;
 };
 
+type ExternalLinkRecord = {
+  externalKey: string;
+  internalSourceKey: string;
+  source: string;
+  externalSubject: string;
+  internalUserId: string;
+};
+
+type ExternalLinkTokenRecord = {
+  internalSourceKey: string;
+  digest: string;
+  source: string;
+  internalUserId: string;
+  identityVersion: number;
+  expiresAt: number;
+};
+
 type IdentitySessionInvalidator = () => Promise<void>;
 
 function makeIdentityRegistryStorage(storage: DurableObjectStorage) {
@@ -50,6 +67,20 @@ function makeIdentityRegistryStorage(storage: DurableObjectStorage) {
       emailClaims: collection<EmailClaimRecord>()({
         primaryKey: "canonicalVerifiedEmail",
       }),
+      externalLinks: collection<ExternalLinkRecord>()({
+        primaryKey: "externalKey",
+        uniqueIndexes: {
+          byInternalSource: (record: ExternalLinkRecord) => record.internalSourceKey,
+        },
+      }),
+      externalLinkTokens: collection<ExternalLinkTokenRecord>()({
+        primaryKey: "internalSourceKey",
+        uniqueIndexes: {
+          byDigest: (record: ExternalLinkTokenRecord) => record.digest,
+          byExpiry: (record: ExternalLinkTokenRecord) =>
+            externalLinkTokenExpiryKey(record.expiresAt, record.digest),
+        },
+      }),
     },
     singletons: {
       emailClaimsBackfilled: false,
@@ -64,6 +95,9 @@ const COLLISION_LOCKED = "Identity collision requires deployment operator assist
 const EXPLICIT_LINK_REQUIRED =
   "Identity ownership requires explicit linking or deployment operator resolution.";
 const SETUP_FAILED = "Identity setup failed.";
+const EXTERNAL_LINK_INVALID = "External identity link is invalid.";
+const EXTERNAL_LINK_TOKEN_TTL_MS = 10 * 60_000;
+const EXPIRED_TOKEN_CLEANUP_LIMIT = 100;
 
 /** Canonicalizes a server-verified email using only trim and lowercase operations. */
 export function canonicalizeVerifiedEmail(email: string): string {
@@ -86,6 +120,29 @@ function randomInternalUserId(): string {
   const bytes = new Uint8Array(32);
   crypto.getRandomValues(bytes);
   return bytes.toHex();
+}
+
+function externalKey(source: string, externalSubject: string): string {
+  return JSON.stringify([source, externalSubject]);
+}
+
+function internalSourceKey(internalUserId: string, source: string): string {
+  return JSON.stringify([internalUserId, source]);
+}
+
+function externalLinkTokenExpiryKey(expiresAt: number, digest: string): string {
+  return `${expiresAt.toString().padStart(16, "0")}:${digest}`;
+}
+
+function randomExternalLinkToken(): string {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  return bytes.toBase64({ alphabet: "base64url" }).replace(/=+$/, "");
+}
+
+async function digestExternalLinkToken(token: string): Promise<string> {
+  const bytes = new TextEncoder().encode(token);
+  return new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)).toHex();
 }
 
 function activeResolution(record: IdentityRecord, created: boolean): IdentityResolution {
@@ -257,6 +314,119 @@ export class IdentityRegistry extends DurableObject<Cloudflare.Env> {
     };
   }
 
+  /** Creates a short-lived, single-use token for linking one external identity source. */
+  async startExternalLink(
+    internalUserId: string,
+    identityVersion: number,
+    source: string,
+  ): Promise<{ token: string; expiresAt: Date }> {
+    const token = randomExternalLinkToken();
+    const digest = await digestExternalLinkToken(token);
+    const expiresAt = new Date(Date.now() + EXTERNAL_LINK_TOKEN_TTL_MS);
+    this.storage.transaction(() => {
+      this.#cleanupExpiredExternalLinkTokens(Date.now());
+      this.#assertActiveIdentity(internalUserId, identityVersion);
+      this.storage.externalLinkTokens.put({
+        internalSourceKey: internalSourceKey(internalUserId, source),
+        digest,
+        source,
+        internalUserId,
+        identityVersion,
+        expiresAt: expiresAt.getTime(),
+      });
+    });
+    return { token, expiresAt };
+  }
+
+  /** Completes a link and returns the active stable internal user ID that owns it. */
+  async completeExternalLink(
+    source: string,
+    token: string,
+    externalSubject: string,
+  ): Promise<string> {
+    const digest = await digestExternalLinkToken(token);
+    const result = this.storage.transaction((): string | null => {
+      const now = Date.now();
+      this.#cleanupExpiredExternalLinkTokens(now);
+      const pending = this.storage.externalLinkTokens.byDigest.get(digest);
+      if (!pending || pending.source !== source || pending.expiresAt <= now) return null;
+      const latest = this.storage.externalLinkTokens.get(pending.internalSourceKey);
+      if (latest?.digest !== digest) return null;
+      this.storage.externalLinkTokens.delete(pending.internalSourceKey);
+
+      const identity = this.storage.identities.get(pending.internalUserId);
+      if (identity?.status !== "active" ||
+          identity.canonicalVerifiedEmail === null ||
+          identity.identityVersion !== pending.identityVersion) {
+        return null;
+      }
+
+      const targetKey = externalKey(source, externalSubject);
+      const target = this.storage.externalLinks.get(targetKey);
+      if (target && target.internalUserId !== pending.internalUserId) return null;
+
+      const previous = this.storage.externalLinks.byInternalSource.get(
+        pending.internalSourceKey,
+      );
+      if (previous && previous.externalKey !== targetKey) {
+        this.storage.externalLinks.delete(previous.externalKey);
+      }
+      this.storage.externalLinks.put({
+        externalKey: targetKey,
+        internalSourceKey: pending.internalSourceKey,
+        source,
+        externalSubject,
+        internalUserId: pending.internalUserId,
+      });
+      return pending.internalUserId;
+    });
+    if (result === null) throw new Error(EXTERNAL_LINK_INVALID);
+    return result;
+  }
+
+  /** Returns only whether the active identity has an external link for this source. */
+  getExternalLinkStatus(
+    internalUserId: string,
+    identityVersion: number,
+    source: string,
+  ): { connected: boolean } {
+    return this.storage.transaction(() => {
+      this.#cleanupExpiredExternalLinkTokens(Date.now());
+      this.#assertActiveIdentity(internalUserId, identityVersion);
+      return {
+        connected: this.storage.externalLinks.byInternalSource.get(
+          internalSourceKey(internalUserId, source),
+        ) !== undefined,
+      };
+    });
+  }
+
+  /** Removes a source mapping and every pending token for the exact active identity version. */
+  unlinkExternalIdentity(
+    internalUserId: string,
+    identityVersion: number,
+    source: string,
+  ): void {
+    this.storage.transaction(() => {
+      this.#cleanupExpiredExternalLinkTokens(Date.now());
+      this.#assertActiveIdentity(internalUserId, identityVersion);
+      const key = internalSourceKey(internalUserId, source);
+      const current = this.storage.externalLinks.byInternalSource.get(key);
+      if (current) this.storage.externalLinks.delete(current.externalKey);
+      this.storage.externalLinkTokens.delete(key);
+    });
+  }
+
+  /** Finds the active stable internal user ID linked to a source subject, without minting authority. */
+  findInternalUserIdByExternalSubject(source: string, subject: string): string | null {
+    const link = this.storage.externalLinks.get(externalKey(source, subject));
+    if (!link) return null;
+    const identity = this.storage.identities.get(link.internalUserId);
+    return identity?.status === "active" && identity.canonicalVerifiedEmail !== null
+      ? identity.internalUserId
+      : null;
+  }
+
   async #resolveSubjectIdentity(
       subjectKey: string,
       verifiedEmail: string,
@@ -310,6 +480,28 @@ export class IdentityRegistry extends DurableObject<Cloudflare.Env> {
 
     if (result.changed) this.#invalidateIdentitySessions(result.record.internalUserId);
     return await this.#initialize(result.record, result.created);
+  }
+
+  #assertActiveIdentity(internalUserId: string, identityVersion: number): IdentityRecord {
+    const identity = this.storage.identities.get(internalUserId);
+    if (identity?.status !== "active" ||
+        identity.canonicalVerifiedEmail === null ||
+        identity.identityVersion !== identityVersion) {
+      throw new Error(COLLISION_LOCKED);
+    }
+    return identity;
+  }
+
+  #cleanupExpiredExternalLinkTokens(now: number): void {
+    const expired = [...this.storage.externalLinkTokens.byExpiry.list({
+      end: externalLinkTokenExpiryKey(now + 1, ""),
+      limit: EXPIRED_TOKEN_CLEANUP_LIMIT,
+    })];
+    for (const token of expired) {
+      if (token.expiresAt <= now) {
+        this.storage.externalLinkTokens.delete(token.internalSourceKey);
+      }
+    }
   }
 
   #claimEmail(canonicalVerifiedEmail: string, internalUserId: string): void {

@@ -349,6 +349,20 @@ export const createAuthError = authErrors.create;
 /** Reads the machine-readable code from an authentication failure. */
 export const getAuthErrorCode = authErrors.getCode;
 
+/** Privacy-preserving Telegram connection state for the current authenticated identity. */
+export type TelegramLinkStatus = {
+  /** Whether a Telegram account is connected; the Telegram subject is never exposed. */
+  connected: boolean;
+};
+
+/** One short-lived token used by the Telegram bot to complete account linking. */
+export type TelegramLinkStart = {
+  /** Unpadded base64url token that must be kept secret until completion. */
+  token: string;
+  /** Absolute time after which the token cannot complete a link. */
+  expiresAt: Date;
+};
+
 // Top-level API exposed to the user after they have authenticated.
 export interface AuthenticatedApi extends RpcTarget {
   // Get profile info for the user who is logged in.
@@ -365,6 +379,15 @@ export interface AuthenticatedApi extends RpcTarget {
   // Whether this account has a password set. False for accounts created via an OAuth provider, in
   // which case the change-password UI should be hidden.
   hasPasswordLogin(): Promise<boolean>;
+
+  /** Returns whether the current stable identity is connected to Telegram. */
+  getTelegramLinkStatus(): Promise<TelegramLinkStatus>;
+
+  /** Starts a ten-minute Telegram link for the current stable identity. */
+  startTelegramLink(): Promise<TelegramLinkStart>;
+
+  /** Disconnects Telegram and invalidates the current identity's pending Telegram link. */
+  unlinkTelegram(): Promise<void>;
 
   // List the user's configured AI models.
   //
