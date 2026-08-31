@@ -313,18 +313,20 @@ function appendPage(url: URL, options: XPageOptions): void {
 
 export class XApi {
   readonly #accessToken: string;
-  readonly #userId: string;
+  readonly #userId?: string;
   readonly #options: XHttpOptions;
 
   constructor(options: {
     accessToken: string;
-    userId: string;
+    userId?: string;
     fetch?: typeof fetch;
     timeoutMs?: number;
   }) {
     if (!options.accessToken) throw new TypeError("accessToken is required.");
     this.#accessToken = options.accessToken;
-    this.#userId = requireId(options.userId, "userId");
+    this.#userId = options.userId === undefined
+      ? undefined
+      : requireId(options.userId, "userId");
     this.#options = {
       ...(options.fetch ? { fetch: options.fetch } : {}),
       ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
@@ -352,6 +354,11 @@ export class XApi {
     if (!response.ok) throw apiError(response, parsed);
     if (!parsed) throw invalidResponse("an invalid response");
     return parsed;
+  }
+
+  #actorId(): string {
+    if (!this.#userId) throw new TypeError("Authenticated X userId is required for this operation.");
+    return this.#userId;
   }
 
   async getMe(): Promise<XUser> {
@@ -384,16 +391,16 @@ export class XApi {
   }
 
   listMyPosts(options: XPageOptions = {}): Promise<XPostPage> {
-    return this.#postPage(`/2/users/${this.#userId}/tweets`, options);
+    return this.#postPage(`/2/users/${this.#actorId()}/tweets`, options);
   }
 
   listMentions(options: XPageOptions = {}): Promise<XPostPage> {
-    return this.#postPage(`/2/users/${this.#userId}/mentions`, options);
+    return this.#postPage(`/2/users/${this.#actorId()}/mentions`, options);
   }
 
   listHomeTimeline(options: XPageOptions = {}): Promise<XPostPage> {
     return this.#postPage(
-      `/2/users/${this.#userId}/timelines/reverse_chronological`,
+      `/2/users/${this.#actorId()}/timelines/reverse_chronological`,
       options,
     );
   }
@@ -404,11 +411,11 @@ export class XApi {
   }
 
   listLikedPosts(options: XPageOptions = {}): Promise<XPostPage> {
-    return this.#postPage(`/2/users/${this.#userId}/liked_tweets`, options);
+    return this.#postPage(`/2/users/${this.#actorId()}/liked_tweets`, options);
   }
 
   listBookmarks(options: XPageOptions = {}): Promise<XPostPage> {
-    return this.#postPage(`/2/users/${this.#userId}/bookmarks`, options);
+    return this.#postPage(`/2/users/${this.#actorId()}/bookmarks`, options);
   }
 
   #userPage(path: string, options: XPageOptions = {}): Promise<XUserPage> {
@@ -419,11 +426,11 @@ export class XApi {
   }
 
   listFollowers(options: XPageOptions = {}): Promise<XUserPage> {
-    return this.#userPage(`/2/users/${this.#userId}/followers`, options);
+    return this.#userPage(`/2/users/${this.#actorId()}/followers`, options);
   }
 
   listFollowing(options: XPageOptions = {}): Promise<XUserPage> {
-    return this.#userPage(`/2/users/${this.#userId}/following`, options);
+    return this.#userPage(`/2/users/${this.#actorId()}/following`, options);
   }
 
   async createPost(text: string): Promise<void> {
@@ -453,7 +460,7 @@ export class XApi {
   }
 
   async like(postId: string): Promise<void> {
-    const result = await this.#request(`/2/users/${this.#userId}/likes`, {
+    const result = await this.#request(`/2/users/${this.#actorId()}/likes`, {
       method: "POST",
       body: { tweet_id: requireId(postId, "postId") },
     });
@@ -462,14 +469,14 @@ export class XApi {
 
   async unlike(postId: string): Promise<void> {
     const result = await this.#request(
-      `/2/users/${this.#userId}/likes/${requireId(postId, "postId")}`,
+      `/2/users/${this.#actorId()}/likes/${requireId(postId, "postId")}`,
       { method: "DELETE" },
     );
     this.#requireBooleanResult(result, "liked", false);
   }
 
   async bookmark(postId: string): Promise<void> {
-    const result = await this.#request(`/2/users/${this.#userId}/bookmarks`, {
+    const result = await this.#request(`/2/users/${this.#actorId()}/bookmarks`, {
       method: "POST",
       body: { tweet_id: requireId(postId, "postId") },
     });
@@ -478,14 +485,14 @@ export class XApi {
 
   async removeBookmark(postId: string): Promise<void> {
     const result = await this.#request(
-      `/2/users/${this.#userId}/bookmarks/${requireId(postId, "postId")}`,
+      `/2/users/${this.#actorId()}/bookmarks/${requireId(postId, "postId")}`,
       { method: "DELETE" },
     );
     this.#requireBooleanResult(result, "bookmarked", false);
   }
 
   async follow(userId: string): Promise<void> {
-    const result = await this.#request(`/2/users/${this.#userId}/following`, {
+    const result = await this.#request(`/2/users/${this.#actorId()}/following`, {
       method: "POST",
       body: { target_user_id: requireId(userId, "userId") },
     });
@@ -494,7 +501,7 @@ export class XApi {
 
   async unfollow(userId: string): Promise<void> {
     const result = await this.#request(
-      `/2/users/${this.#userId}/following/${requireId(userId, "userId")}`,
+      `/2/users/${this.#actorId()}/following/${requireId(userId, "userId")}`,
       { method: "DELETE" },
     );
     this.#requireBooleanResult(result, "following", false);
