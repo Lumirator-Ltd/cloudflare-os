@@ -79,3 +79,32 @@ with `PUBLIC_BASE_URL`):
 
 See [docs/oauth-signin.md](oauth-signin.md) and [docs/ai-gateway-billing.md](ai-gateway-billing.md)
 for the full list of options, free-tier and required-user-funding behavior, and storage bindings.
+
+## Telegram bot
+
+Create a bot by opening [BotFather](https://t.me/BotFather) and sending `/newbot`. Keep
+BotFather's default Privacy Mode enabled. The deployment admin supplies the managed service with
+only the resulting bot token; users never need that token.
+
+The managed deployment derives the bot ID and username with Telegram's `getMe`, generates a random
+webhook secret, stores the token and webhook secret as Worker secrets, and registers
+`${PUBLIC_BASE_URL}/api/telegram/webhook` for message updates. It then verifies Telegram's recorded
+webhook URL and delivery status before reporting success. The deployment primitive is
+`pnpm telegram:configure`; its non-interactive CLI expects `TELEGRAM_BOT_TOKEN`,
+`TELEGRAM_WEBHOOK_SECRET`, and `PUBLIC_BASE_URL` to have already been injected by the orchestrator.
+It does not generate or print a secret because secret generation and persistence belong to the
+managed deployment boundary.
+
+After setup, each user opens **Profile > Connect**, selects Telegram, and presses **Start** to link
+their Telegram account. For a group conversation, add the bot to the group and address it by
+mentioning its username, replying to one of its messages, or starting a message with `/ask`.
+Privacy Mode should remain enabled so unrelated group messages are not delivered to the bot.
+Images can be sent to Gadgets from Telegram, but image transfer is incoming-only; bot responses in
+Telegram are text.
+
+To rotate credentials, revoke the old token with BotFather, submit the replacement token to the
+managed service, and let deployment generate a new webhook secret, update both Worker secrets, and
+register and verify the webhook again. To uninstall Telegram, use the managed deployment removal
+flow to delete the Telegram webhook and remove both Worker secrets, then revoke the bot token with
+BotFather. Do not place tokens, webhook secrets, or tenant-specific setup output in repository
+files.

@@ -7,6 +7,7 @@
   "scripts": {
     "build": "pnpm run --recursive build",
     "run-local": "node scripts/run-local.mjs",
+    "telegram:configure": "node scripts/configure-telegram.mjs",
     "test": "pnpm test:unit && pnpm test:integration",
     "test:unit": "node --test scripts/*.test.js && pnpm --filter \"!@gadgets/integration-tests\" --filter \"!@gadgets/workshop-backend\" --recursive --if-present test && pnpm --filter @gadgets/workshop-backend test:unit",
     "test:integration": "pnpm --filter @gadgets/workshop-backend test:integration && pnpm --filter @gadgets/integration-tests test",
