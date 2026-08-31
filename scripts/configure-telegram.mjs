@@ -85,11 +85,14 @@ function requireEnv(env, name) {
 }
 
 async function defaultCommandRunner(command, args, { stdin } = {}) {
-  await new Promise((resolve, reject) => {
-    const child = spawn(command, args, { stdio: ["pipe", "ignore", "ignore"] });
+  return await new Promise((resolve, reject) => {
+    const child = spawn(command, args, { stdio: ["pipe", "pipe", "ignore"] });
+    let output = "";
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", chunk => { output += chunk; });
     child.once("error", reject);
-    child.once("exit", code => {
-      if (code === 0) resolve();
+    child.once("close", code => {
+      if (code === 0) resolve(output);
       else reject(new Error("Deployment command failed."));
     });
     child.stdin.end(stdin);
@@ -98,6 +101,22 @@ async function defaultCommandRunner(command, args, { stdin } = {}) {
 
 function wranglerArgs(action, name, config) {
   return ["exec", "wrangler", "secret", action, name, "--config", config];
+}
+
+async function listWorkerSecretNames(commandRunner, config) {
+  try {
+    const output = await commandRunner("pnpm", [
+      "exec", "wrangler", "secret", "list", "--format", "json", "--config", config,
+    ], {});
+    const secrets = JSON.parse(output);
+    if (!Array.isArray(secrets) || secrets.some(secret =>
+      secret === null || typeof secret !== "object" || typeof secret.name !== "string")) {
+      throw new Error("Invalid secret list.");
+    }
+    return new Set(secrets.map(secret => secret.name));
+  } catch {
+    throw new TelegramSetupError("Worker secret inspection failed.");
+  }
 }
 
 async function putWorkerSecret(commandRunner, config, name, value) {
@@ -134,6 +153,13 @@ async function rollbackInstalledSecrets(commandRunner, config, installed) {
 }
 
 async function installTelegram({ token, publicBaseUrl, config, fetch, commandRunner }) {
+  const existing = await listWorkerSecretNames(commandRunner, config);
+  if (existing.has("TELEGRAM_BOT_TOKEN") || existing.has("TELEGRAM_WEBHOOK_SECRET")) {
+    throw new TelegramSetupError(
+      "Telegram integration is already configured; explicitly uninstall it before replacement.",
+    );
+  }
+
   const webhookSecret = randomBytes(32).toString("base64url");
   const installed = [];
   let vendorStarted = false;

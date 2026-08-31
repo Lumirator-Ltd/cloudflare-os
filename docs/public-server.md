@@ -104,9 +104,10 @@ Privacy Mode should remain enabled so unrelated group messages are not delivered
 Images can be sent to Gadgets from Telegram, but image transfer is incoming-only; bot responses in
 Telegram are text.
 
-To rotate credentials, revoke the old token with BotFather, submit the replacement token to the
-managed service, and let deployment generate a new webhook secret, update both Worker secrets, and
-register and verify the webhook again. To uninstall Telegram, use the managed deployment removal
-flow to delete the Telegram webhook and remove both Worker secrets, then revoke the bot token with
-BotFather. Do not place tokens, webhook secrets, or tenant-specific setup output in repository
-files.
+To rotate credentials, first run the explicit uninstall flow with the current token so it can delete
+the existing Telegram webhook and both Worker secrets. Then revoke the old token with BotFather and
+run the install flow with the replacement token; deployment generates a new webhook secret and
+registers and verifies the replacement webhook. The installer fails closed if either Worker secret
+already exists, so rerunning it does not rotate credentials. To uninstall Telegram without replacing
+it, use the same managed deployment removal flow before revoking the bot token with BotFather. Do not
+place tokens, webhook secrets, or tenant-specific setup output in repository files.

@@ -262,7 +262,8 @@ export class TelegramChannel extends DurableObject<Cloudflare.Env> {
       }
       return;
     }
-    if (!this.#store.enqueue(update)) return;
+    const inserted = this.#store.enqueue(update);
+    if (!inserted && !this.#store.get(update.updateId)) return;
     await this.ctx.storage.setAlarm(Date.now());
     this.ctx.waitUntil(this.#drain());
   }

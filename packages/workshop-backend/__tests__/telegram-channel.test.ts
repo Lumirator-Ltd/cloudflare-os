@@ -108,6 +108,23 @@ describe("TelegramChannel", () => {
     expect(storedText(harness.storage)).not.toContain(token);
   });
 
+  it("re-arms a durably queued duplicate after the first alarm scheduling failure", async () => {
+    const harness = makeChannel();
+    vi.mocked(harness.storage.setAlarm)
+      .mockRejectedValueOnce(new Error("alarm unavailable"))
+      .mockResolvedValue(undefined);
+    const update = rawMessage(903);
+
+    await expect(harness.channel.enqueueUpdate(update)).rejects.toThrow("alarm unavailable");
+    expect(harness.submitExternalMessage).not.toHaveBeenCalled();
+
+    await expect(harness.channel.enqueueUpdate(update)).resolves.toBeUndefined();
+    await harness.flush();
+
+    expect(harness.submitExternalMessage).toHaveBeenCalledTimes(1);
+    expect(TelegramBotApi.prototype.sendMessage).toHaveBeenCalledTimes(1);
+  });
+
   it("sends one direct rejection for a declared oversized photo", async () => {
     const harness = makeChannel();
     const send = vi.mocked(TelegramBotApi.prototype.sendMessage);
