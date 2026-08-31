@@ -78,7 +78,7 @@ export function HomePageContent({ prompt }: HomeSearch) {
     return () => {
       cancelled = true;
     };
-  }, [authenticatedApi, t, toasts]);
+  }, [authenticatedApi, t]);
 
   const handleModelChange = useCallback((value: string | null) => {
     setSelectedModel(value);

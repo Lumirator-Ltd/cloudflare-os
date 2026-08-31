@@ -25,6 +25,7 @@ const testState = vi.hoisted(() => {
   return {
     addToast,
     toastManager: { add: addToast },
+    useUnstableToastManager: false,
     authenticatedApi: { listModels, newGadget },
     classifyRpcError,
     currentUser: { id: "user-a", name: "User A" },
@@ -48,7 +49,9 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
 }));
 
 vi.mock("@cloudflare/kumo", () => ({
-  useKumoToastManager: () => testState.toastManager,
+  useKumoToastManager: () => testState.useUnstableToastManager
+    ? { add: testState.addToast }
+    : testState.toastManager,
 }));
 
 vi.mock("./AuthContext", () => ({
@@ -96,7 +99,26 @@ describe("Home prompt route flow", () => {
     testState.seeds.length = 0;
     testState.draftStorageKeys.length = 0;
     testState.send = undefined;
+    testState.useUnstableToastManager = false;
     vi.clearAllMocks();
+  });
+
+  it("loads models once when the toast manager changes between renders", async () => {
+    testState.useUnstableToastManager = true;
+    testState.listModels
+      .mockResolvedValueOnce([])
+      .mockRejectedValueOnce(new Error("unexpected repeated load"));
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+
+    await act(async () => root!.render(
+      <I18nextProvider i18n={i18n}>
+        <HomePageContent />
+      </I18nextProvider>,
+    ));
+
+    expect(testState.listModels).toHaveBeenCalledTimes(1);
   });
 
   it("seeds the composer once, clears route state, and does not create a workspace", async () => {
