@@ -2,7 +2,7 @@
 //
 // This module owns all manipulation of the `collaborators` and `shareKeys` storage collections
 // and the permission graph that links them. It deliberately performs no RPC: anything that
-// requires talking to a User DO (resolving a profile from a username, fetching the owner's
+// requires talking to a User DO (resolving discovery input to a stable profile, fetching the owner's
 // profile, notifying a user that a gadget was opened, etc.) stays in the Overseer, which passes
 // resolved values (or, where laziness matters, a callback) into this module.
 //
@@ -140,7 +140,7 @@ function asLink(record: ShareKeyRecord | undefined): ShareLinkRecord | undefined
  * connected client.
  */
 export interface SharingCaller {
-  /** The caller's profile.id (username/email). */
+  /** The caller's stable application user ID (their profile.id). */
   profileId: string;
   /**
    * True if the caller is the gadget owner. The owner can manage anyone's collaborator edges

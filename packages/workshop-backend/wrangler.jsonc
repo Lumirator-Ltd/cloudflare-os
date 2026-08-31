@@ -56,11 +56,20 @@
       // login back to the waiting browser.
       "tag": "v2",
       "new_sqlite_classes": [ "PendingLogin" ]
+    },
+    {
+      // Singleton authority mapping verified external identities to stable internal users.
+      "tag": "v3",
+      "new_sqlite_classes": [ "IdentityRegistry" ]
+    },
+    {
+      "tag": "v4",
+      "new_sqlite_classes": [ "TelegramChannel" ]
     }
   ],
 
-  // All DO classes (UserDurableObject, OverseerDurableObject, AdminSettings, PendingLogin, ...) are
-  // reached via ctx.exports and need no explicit durable_objects binding.
+  // All DO classes (UserDurableObject, OverseerDurableObject, AdminSettings, PendingLogin,
+  // IdentityRegistry, ...) are reached via ctx.exports and need no explicit durable_objects binding.
   "kv_namespaces": [
     {
       "binding": "BLUEPRINTS",

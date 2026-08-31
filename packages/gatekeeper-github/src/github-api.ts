@@ -1,3 +1,5 @@
+import type { GatekeeperAuthenticationIdentity } from "@gadgets/workshop-shared/gatekeeper";
+
 export type GitHubOAuthGrant = {
   accessToken: string;
   scopes: string[];
@@ -5,6 +7,7 @@ export type GitHubOAuthGrant = {
 };
 
 export type GitHubSimpleUser = {
+  id: number;
   login: string;
   name?: string | null;
   avatar_url: string;
@@ -489,13 +492,26 @@ export class GitHubApi {
    * account has no verified email. Requires the `user:email` scope.
    */
   async getPrimaryVerifiedEmail(): Promise<string | null> {
-    const result = await this.#request<Array<{
-      email: string; primary: boolean; verified: boolean;
-    }>>("GET", "/user/emails", {});
-    const emails = result.data ?? [];
-    const primary = emails.find(e => e.primary && e.verified);
-    const verified = primary ?? emails.find(e => e.verified);
-    return verified?.email ?? null;
+    const result = await this.#request<unknown>("GET", "/user/emails", {});
+    if (!Array.isArray(result.data)) return null;
+    const primary = result.data.find((candidate: unknown) => {
+      if (typeof candidate !== "object" || candidate === null) return false;
+      const email = candidate as Record<string, unknown>;
+      return email.primary === true && email.verified === true &&
+        typeof email.email === "string" && email.email.trim().length > 0;
+    }) as Record<string, unknown> | undefined;
+    return typeof primary?.email === "string" ? primary.email : null;
+  }
+
+  /** Returns the immutable numeric viewer ID and primary verified email for sign-in. */
+  async getAuthenticationIdentity(): Promise<GatekeeperAuthenticationIdentity | null> {
+    const viewer = await this.getViewer();
+    const user: unknown = viewer.user;
+    if (typeof user !== "object" || user === null) return null;
+    const id = (user as Record<string, unknown>).id;
+    if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0) return null;
+    const verifiedEmail = await this.getPrimaryVerifiedEmail();
+    return verifiedEmail ? { subject: String(id), verifiedEmail } : null;
   }
 
   async getRepo(owner: string, repo: string): Promise<GitHubRepoResponse> {

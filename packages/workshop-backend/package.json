@@ -14,6 +14,7 @@
     "import:format-blueprint": "node --experimental-strip-types --no-warnings scripts/import-format-blueprint.mjs"
   },
   "dependencies": {
+    "@clerk/backend": "3.16.4",
     "@cloudflare/puppeteer": "^1.3.0",
     "@earendil-works/pi-agent-core": "0.83.0",
     "@earendil-works/pi-ai": "0.83.0",

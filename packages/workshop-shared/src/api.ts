@@ -33,6 +33,18 @@ export const SERVICE_SALT = new Uint8Array([
 ]);
 
 /**
+ * Same-origin POST endpoint for idempotently revoking one local Gatekeeper bearer.
+ *
+ * Send an exact `application/json` body shaped as `{ token: string }`. A 204 confirms that the
+ * bearer is durably deleted, so replay fails, and that every live subscriber known to the current
+ * User Durable Object instance has finished invalidating. A restart loses ephemeral subscribers;
+ * any such graph closes through its token watchdog within 30 seconds rather than necessarily before
+ * the 204. The response intentionally does not distinguish an already-revoked, otherwise missing,
+ * or newly revoked well-formed bearer. This affects only the deployment-local Workshop session.
+ */
+export const GATEKEEPER_SESSION_LOGOUT_PATH = "/api/gatekeeper-session/logout";
+
+/**
  * A pending gatekeeper sign-in attempt, returned by `PublicApi.startGatekeeperLogin()`. Holding this
  * stub is the capability to receive the resulting session token; dispose it to abandon the attempt.
  */
@@ -44,6 +56,25 @@ export interface LoginAttempt extends RpcTarget {
    */
   wait(): Promise<string>;
 }
+
+/** Controls the verified Clerk lease associated with one authenticated WebSocket session. */
+export interface ClerkSessionControl extends RpcTarget {
+  /** Replaces the lease with a fully verified token and returns its exact server-verified expiry. */
+  refresh(token: string): Promise<Date>;
+
+  /** Aborts the whole WebSocket session and all capabilities descended from it. */
+  logout(): Promise<void>;
+}
+
+/** Capabilities and verified deadline returned by Clerk authentication. */
+export type ClerkAuthentication = {
+  /** The authenticated Workshop API capability governed by this Clerk lease. */
+  api: RpcStub<AuthenticatedApi>;
+  /** The sole capability through which the Clerk lease can be refreshed or logged out. */
+  session: RpcStub<ClerkSessionControl>;
+  /** The exact expiry accepted by the backend verifier; clients should refresh before this time. */
+  expiresAt: Date;
+};
 
 /** Public API exposed to the internet. */
 export interface PublicApi extends RpcTarget {
@@ -66,6 +97,12 @@ export interface PublicApi extends RpcTarget {
 
   /** Authenticates the user using an auth token (typically stored in localStorage). */
   authenticate(token: string): Promise<AuthenticatedApi>;
+
+  /**
+   * Authenticates a verified Clerk session and returns sibling API/session-control capabilities
+   * governed by the same hard WebSocket deadline.
+   */
+  authenticateWithClerk(token: string): Promise<ClerkAuthentication>;
 
   /**
    * Like authenticate() but the server is expected to be sitting behind Cloudflare Access, and the
@@ -353,6 +390,20 @@ export const createAuthError = authErrors.create;
 /** Reads the machine-readable code from an authentication failure. */
 export const getAuthErrorCode = authErrors.getCode;
 
+/** Privacy-preserving Telegram connection state for the current authenticated identity. */
+export type TelegramLinkStatus = {
+  /** Whether a Telegram account is connected; the Telegram subject is never exposed. */
+  connected: boolean;
+};
+
+/** One short-lived official Telegram deep link for completing account linking. */
+export type TelegramLinkStart = {
+  /** Official t.me URL containing the single-use link token. */
+  url: string;
+  /** Absolute time after which the URL cannot complete a link. */
+  expiresAt: Date;
+};
+
 /** Top-level API exposed to the user after they have authenticated. */
 export interface AuthenticatedApi extends RpcTarget {
   /** Get profile info for the user who is logged in. */
@@ -379,6 +430,15 @@ export interface AuthenticatedApi extends RpcTarget {
    * which case the change-password UI should be hidden.
    */
   hasPasswordLogin(): Promise<boolean>;
+
+  /** Returns whether the current stable identity is connected to Telegram. */
+  getTelegramLinkStatus(): Promise<TelegramLinkStatus>;
+
+  /** Starts a ten-minute Telegram link for the current stable identity. */
+  startTelegramLink(): Promise<TelegramLinkStart>;
+
+  /** Disconnects Telegram and invalidates the current identity's pending Telegram link. */
+  unlinkTelegram(): Promise<void>;
 
   /**
    * List the user's configured AI models.
@@ -436,8 +496,9 @@ export interface AuthenticatedApi extends RpcTarget {
   getCloudflareUsage(): Promise<CloudflareUsageInfo>;
 
   /**
-   * List the eligible Cloudflare billing accounts. Returns an empty array if none are connected and
-   * throws when account discovery is temporarily unavailable.
+   * List the eligible Cloudflare billing accounts available through the explicitly connected grant.
+   * Returns an empty array when the user has not connected Cloudflare and throws when account
+   * discovery is temporarily unavailable. Cloudflare sign-in alone creates no billing authority.
    */
   listCloudflareAccounts(): Promise<CloudflareAccountOption[]>;
 
@@ -457,8 +518,8 @@ export interface AuthenticatedApi extends RpcTarget {
   setAvatar(data: Uint8Array | null): Promise<void>;
 
   /**
-   * Fetch a user's avatar image by user ID. Returns null if no avatar has been set.
-   * Accepts any user ID so that other users' avatars can be displayed (e.g. in chat).
+   * Fetches an avatar by stable application user ID. Returns null if none has been set. The opaque
+   * ID is accepted for other users so their avatars can be displayed.
    */
   getAvatar(userId: string): Promise<Uint8Array | null>;
 
@@ -709,10 +770,9 @@ export interface AuthenticatedApi extends RpcTarget {
   amIAdmin(): Promise<boolean>;
 
   /**
-   * Returns a capability for managing deployment-wide admin settings, or null when the caller is not
-   * an admin. The access check happens once here, so the returned stub's methods need no per-call
-   * checks. (Authentication config — sign-in providers, password login — is intentionally not
-   * managed here; it stays env-var driven.)
+   * Returns a capability for managing deployment-wide admin settings, or null when the caller is
+   * not a current admin. Registry-backed authority is revalidated here and by every operation on
+   * the returned capability. Authentication config remains environment-driven.
    */
   getAdminApi(): Promise<RpcStub<AdminApi> | null>;
 
@@ -941,10 +1001,10 @@ export type AdminConnectorConfigurationValues = Record<string, string>;
 
 /**
  * Capability for managing deployment-wide admin settings, obtained via
- * AuthenticatedApi.getAdminApi() (which is null for non-admins). The access check happens when the
- * capability is minted, so these methods don't re-check. Covers branding, agent instructions, and
- * which gatekeeper connectors/resources are offered — NOT authentication config (that's env-var
- * driven). Each setter throws on invalid input.
+ * AuthenticatedApi.getAdminApi() (which is null for non-admins). Every operation revalidates the
+ * retained caller's current admin authority. Covers branding, agent instructions, and which
+ * gatekeeper connectors/resources are offered — NOT authentication config (that's env-var driven).
+ * Each setter throws on invalid input.
  */
 export interface AdminApi {
   /** Read all admin-managed settings for the admin UI in one call. */
@@ -1093,6 +1153,9 @@ export type AuthVendorInfo = {
  * Returned by `PublicApi.getServerConfig()`. Contains no secrets.
  */
 export type ServerConfig = {
+  /** Clerk frontend publishable key for normal auth mode; absent in Cloudflare Access mode. */
+  clerkPublishableKey?: string;
+
   /** Default language for signed-out users and users whose language preference is `"auto"`. */
   defaultLanguage: SupportedLanguage;
 
@@ -1120,6 +1183,9 @@ export type ServerConfig = {
    * hides the create-account form when false.
    */
   signupsEnabled: boolean;
+
+  /** Whether the backend has both Telegram transport secrets configured. */
+  telegramEnabled: boolean;
 
   /**
    * Site name shown next to the top-bar logo (admin-configurable). Empty falls back to
@@ -2053,12 +2119,14 @@ export interface Overseer extends RpcTarget {
   listCollaborators(): Promise<CollaboratorInfo[]>;
 
   /**
-   * Add a collaborator by username/email. The caller must be the owner or an existing
-   * collaborator. `role` is the access level to grant; the caller may not grant a role higher
-   * than their own effective role. Returns the new collaborator's info, or null if the username
-   * doesn't correspond to an existing account.
+   * Adds a collaborator discovered only by their verified email address.
+   *
+   * The email is canonicalized for lookup and is not durable identity: returned and persisted
+   * references use the resolved stable application user ID. Stable IDs and usernames are not
+   * accepted as discovery input. The caller cannot grant a role higher than their own. Returns
+   * null when no active account resolves.
    */
-  addCollaborator(username: string, role: CollaboratorRole,
+  addCollaborator(verifiedEmail: string, role: CollaboratorRole,
                   note?: string): Promise<CollaboratorInfo | null>;
 
   /**
@@ -2204,6 +2272,7 @@ export type AiChatHistoryPage = {
   };
 };
 
+/** Lightweight display and stable identity information for a chat actor. */
 export type AiChatAuthorInfo = {
   /**
    * Is the author a human, AI, or Gadget?
@@ -2214,7 +2283,10 @@ export type AiChatAuthorInfo = {
    */
   type: "user" | "agent" | "gadget";
 
-  /** Unique user identifier, e.g. "kenton@cloudflare.com" or "gpt-5.1-pro". */
+  /**
+   * Stable actor identifier. Human IDs are opaque internal application IDs; agent/model IDs retain
+   * their configured model identity.
+   */
   id: string;
 
   /** Display name for author, e.g. "Kenton Varda" or "GPT" */
@@ -3538,6 +3610,7 @@ export type CollaboratorRole = "build" | "use";
 export type PresenceParticipant = {
   /** Opaque key matching this participant across add/remove events. */
   key: string;
+  /** The participant profile, carrying their stable application user ID. */
   user: AiChatAuthorInfo;
   role: CollaboratorRole;
 };
@@ -3564,7 +3637,8 @@ export type PermissionEdge = {
 } & ({
   /** Granted directly by another user. */
   type: "user";
-  sharer: string;  // profile.id of the person who shared
+  /** Stable application user ID of the person who shared. */
+  sharer: string;
   note?: string;
 } | {
   /** Gained by redeeming a share key. */

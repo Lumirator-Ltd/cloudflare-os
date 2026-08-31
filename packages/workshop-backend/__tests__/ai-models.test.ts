@@ -156,6 +156,12 @@ describe("getModel AI Gateway routing", () => {
     )).toThrow("A funded Cloudflare account is required for AI inference.");
   });
 
+  it("rejects platform routing when user funding is required", () => {
+    expect(() => getModel(
+      env({ REQUIRE_USER_FUNDED_AI: "true" }), ANTHROPIC_CONFIG, INITIATOR,
+    )).toThrow("A funded Cloudflare account is required for AI inference.");
+  });
+
   it("prioritizes a connected user's Gateway over platform routing", async () => {
     const handle = getModel(env({ REQUIRE_USER_FUNDED_AI: "true" }), WORKERS_AI_CONFIG, INITIATOR, {
       userGateway: { accountId: "user-account-id", apiKey: "user-token" },

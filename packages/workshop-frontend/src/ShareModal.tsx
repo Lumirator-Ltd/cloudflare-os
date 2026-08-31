@@ -207,9 +207,8 @@ function DependentKeepList({
         >
           <Checkbox
             label={(
-              <span className="flex min-w-0 items-baseline gap-1.5">
-                <span className="truncate text-[12px] font-medium text-kumo-default">{dep.profile.name}</span>
-                <span className="truncate text-[11px] text-kumo-subtle">{dep.profile.id}</span>
+              <span className="truncate text-[12px] font-medium text-kumo-default">
+                {dep.profile.name}
               </span>
             )}
             checked={keepSet.has(dep.profile.id)}
@@ -308,7 +307,7 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
   toastsRef.current = toasts
   const [collaborators, setCollaborators] = useState<CollaboratorInfo[]>([])
   const [shareLinks, setShareLinks] = useState<ShareLinkInfo[]>([])
-  const [addUsername, setAddUsername] = useState('')
+  const [addEmail, setAddEmail] = useState('')
   const [addRole, setAddRole] = useState<CollaboratorRole>('use')
   const [adding, setAdding] = useState(false)
   const [newLinkRole, setNewLinkRole] = useState<CollaboratorRole>('use')
@@ -434,7 +433,7 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
     if (open) {
       loadData()
       if (!wasOpenRef.current) {
-        setAddUsername('')
+        setAddEmail('')
         setNewShareLink(null)
         setNewShareLinkId(null)
         setNewShareLinkCopied(false)
@@ -531,7 +530,7 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
     }
     const edge = info.addedBy[0]
     if (!edge) return t('workspace.sharing.collaborator')
-    if (edge.type === 'user') return t('workspace.sharing.addedDirectlyBy', { name: edge.sharer })
+    if (edge.type === 'user') return t('workspace.sharing.addedDirectly')
     const key = shareLinks.find(item => item.linkId === edge.keyId)
     return key?.note
       ? t('workspace.sharing.joinedThroughNamed', { name: key.note })
@@ -572,18 +571,18 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
   }
 
   const handleAddCollaborator = async () => {
-    const username = addUsername.trim()
-    if (!username || sharingProhibited || addingRef.current) return
+    const verifiedEmail = addEmail.trim()
+    if (!verifiedEmail || sharingProhibited || addingRef.current) return
 
     addingRef.current = true
     setAdding(true)
     try {
-      const result = await overseer.addCollaborator(username, addRole, undefined)
+      const result = await overseer.addCollaborator(verifiedEmail, addRole, undefined)
       if (result === null) {
         toasts.add({ title: t('workspace.sharing.accountNotFound'), variant: 'error' })
       } else {
         const landedId = result.profile.id
-        setAddUsername('')
+        setAddEmail('')
         setInvitedName(result.profile.name)
         setInvitedLinkCopied(false)
         await loadData()
@@ -822,10 +821,10 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
             </div>
             <input
               type="search"
-              placeholder={t('workspace.sharing.username')}
-              aria-label={t('workspace.sharing.username')}
-              value={addUsername}
-              onChange={(e) => setAddUsername(e.target.value)}
+              placeholder={t('workspace.sharing.verifiedEmail')}
+              aria-label={t('workspace.sharing.verifiedEmail')}
+              value={addEmail}
+              onChange={(e) => setAddEmail(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter') handleAddCollaborator() }}
               name="gadget-share-people-search"
               autoComplete="off"
@@ -851,7 +850,7 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
               tone="primary"
               className="col-span-3 w-full !rounded-xl sm:col-span-1 sm:w-auto sm:min-w-[68px]"
               onClick={handleAddCollaborator}
-              disabled={!addUsername.trim() || adding || sharingProhibited}
+              disabled={!addEmail.trim() || adding || sharingProhibited}
             >
               {adding ? t('workspace.sharing.inviting') : t('workspace.sharing.invite')}
             </WorkshopButton>
@@ -987,7 +986,7 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
                           {profile.name}{profile.id === currentUser?.id ? t('workspace.sharing.youSuffix') : ''}
                         </p>
                         <p className="truncate text-[12px] leading-[15px] tracking-[-0.15px] text-kumo-subtle">
-                          {row.kind === 'owner' ? profile.id : describeAccess(row.info)}
+                          {row.kind === 'owner' ? t('workspace.sharing.ownerDescription') : describeAccess(row.info)}
                         </p>
                       </div>
                       {row.kind === 'owner' ? (

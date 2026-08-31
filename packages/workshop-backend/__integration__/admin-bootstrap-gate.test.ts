@@ -103,6 +103,7 @@ class TestChatGateway extends RpcTarget implements ChatGatewayRpcTarget {
 }
 
 const EXTERNAL_MESSAGE: SubmitExternalMessageInput = {
+  identityMode: "trustedEmail",
   callerEmail: "private-caller@example.com",
   gadgetKey: "gadget-key",
   chatKey: "chat-key",
@@ -136,7 +137,9 @@ function externalMessageGateway(
   const ctx = createExecutionContext();
   const gatewayContext = new Proxy(ctx, {
     get(target, property) {
-      if (property === "props") return {source: "test-source"};
+      if (property === "props") {
+        return {source: "test-source", identityMode: "trustedEmail"};
+      }
       if (property === "exports") return workerExports;
       return Reflect.get(target, property, target);
     },

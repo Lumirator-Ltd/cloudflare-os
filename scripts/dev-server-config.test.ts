@@ -49,6 +49,19 @@ describe("workshop backend optional feature vars", () => {
   it("forwards required user-funded AI mode", () => {
     assert.ok(WORKSHOP_BACKEND_OPTIONAL_FEATURE_VARS.includes("REQUIRE_USER_FUNDED_AI"));
   });
+
+  it("forwards Telegram transport secrets", () => {
+    assert.ok(WORKSHOP_BACKEND_OPTIONAL_FEATURE_VARS.includes("TELEGRAM_BOT_TOKEN"));
+    assert.ok(WORKSHOP_BACKEND_OPTIONAL_FEATURE_VARS.includes("TELEGRAM_WEBHOOK_SECRET"));
+  });
+
+  it("forwards Clerk verification configuration", () => {
+    assert.ok(WORKSHOP_BACKEND_OPTIONAL_FEATURE_VARS.includes("CLERK_PUBLISHABLE_KEY"));
+    assert.ok(WORKSHOP_BACKEND_OPTIONAL_FEATURE_VARS.includes("CLERK_SECRET_KEY"));
+    assert.ok(WORKSHOP_BACKEND_OPTIONAL_FEATURE_VARS.includes("CLERK_JWT_KEY"));
+    assert.ok(WORKSHOP_BACKEND_OPTIONAL_FEATURE_VARS.includes("CLERK_JWT_AUDIENCE"));
+    assert.ok(WORKSHOP_BACKEND_OPTIONAL_FEATURE_VARS.includes("CLERK_DEV_AUTHORIZED_PARTIES"));
+  });
 });
 
 describe("getDevServerConfig", () => {

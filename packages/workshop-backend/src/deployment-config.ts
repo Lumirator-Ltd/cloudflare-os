@@ -78,11 +78,13 @@ export async function getServerConfig(env: Cloudflare.Env): Promise<ServerConfig
     getAuthVendors(env),
   ]);
   return {
+    clerkPublishableKey: env.CF_ACCESS_AUD ? undefined : env.CLERK_PUBLISHABLE_KEY,
     defaultLanguage: defaultLanguage(env),
     authVendors,
     passwordAuthEnabled: passwordAuthEnabled(env, authVendors),
     cloudflareLimitsEnabled: isCloudflareBillingEnabled(env),
     signupsEnabled: config.signupsEnabled,
+    telegramEnabled: Boolean(env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_WEBHOOK_SECRET),
     siteName: config.siteName,
     siteLogo: siteLogoImage(config.siteLogoConfigured),
     announcement: config.announcement,

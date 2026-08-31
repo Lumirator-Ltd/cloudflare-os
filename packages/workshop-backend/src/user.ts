@@ -3,7 +3,11 @@ import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTE
 import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, assertConnectorConfigured, resourceAllowsNewConnections } from "@gadgets/workshop-shared/gatekeeper";
 import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
 import { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
-import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
+import {
+  DurableObject,
+  WorkerEntrypoint,
+  type RpcStub as NativeRpcStub,
+} from "cloudflare:workers";
 import { createTypedStorage, collection } from "@gadgets/typed-storage";
 import { createWorkshopLogger } from "./observability";
 import { getAiGatewayConfig } from "./ai-gateway.js";
@@ -12,6 +16,7 @@ import type { AdminSettings } from "./admin-settings.js";
 import { isReservedBlueprintKey, readBlueprintKvRecord } from "./blueprint-archive.js";
 import { filterEnabledResources, isResourceDisabled, readAdminConfig } from "./admin-config.js";
 import { buildGatekeeperVendorMap } from "./auth/auth-vendors.js";
+import type { IdentityResolution } from "./identity-registry.js";
 
 const logger = createWorkshopLogger("workshop.user");
 
@@ -77,10 +82,25 @@ export type UserChatContext = {
   quickModel?: AiModelConfig;
 }
 
-type LoginSessionRecord = {
-  tokenId: string,  // sha256 hash of token, hex-formatted
-  created: Date,
-}
+type SessionRecordBase = {
+  tokenId: string;  // sha256 hash of token, hex-formatted
+  created: Date;
+};
+
+/** Maximum lifetime of a retained local Gatekeeper sign-in session. */
+export const GATEKEEPER_SESSION_MAX_AGE_MS = 60 * 60 * 1_000;
+
+/** Exact registry and provider authority persisted with a Gatekeeper-authenticated local session. */
+export type RegistrySessionAuthentication =
+  Pick<IdentityResolution, "canonicalVerifiedEmail" | "identityVersion"> & {
+    kind: "gatekeeper";
+    provider: string;
+    subject: string;
+    expiresAt: Date;
+  };
+
+type LoginSessionRecord = SessionRecordBase & Partial<RegistrySessionAuthentication>;
+type GatekeeperSessionInvalidator = () => Promise<void>;
 
 // Blueprint record stored in the user's `blueprints` collection.
 type BlueprintUserRecord = {
@@ -192,6 +212,14 @@ function makeUserStorage(storage: DurableObjectStorage) {
       cloudflareBilling: <CloudflareBilling | null>null,
 
       created: false,
+
+      // Registry-backed users keep their stable internal identity separate from mutable contact
+      // email. Both remain null for legacy username/password and email-keyed users. The applied
+      // registry version prevents delayed initialization calls from restoring stale contact data.
+      identityInternalUserId: <string | null>null,
+      identityAppliedVersion: 0,
+      verifiedEmail: <string | null>null,
+
       profile: <AiChatAuthorInfo>{
         type: "user",
         name: "User",
@@ -318,6 +346,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   private storage: UserStorage;
   private vendors: Map<string, Service<GatekeeperVendor>>;
   private adminSettings: DurableObjectNamespace<AdminSettings>;
+  private gatekeeperSessions =
+    new Map<string, Map<string, NativeRpcStub<GatekeeperSessionInvalidator>>>();
+  private gatekeeperSessionRevocations = new Map<string, Promise<void>>();
 
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
@@ -336,7 +367,56 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     this.vendors = buildGatekeeperVendorMap(env);
   }
 
-  async authenticate(token: string): Promise<void> {
+  /**
+   * Idempotently initializes a registry-routed user at an identity version.
+   *
+   * Newer versions update the mutable verified contact email, older versions are ignored, and a
+   * same-version retry must carry the same email. The initial display name is derived from the email
+   * local-part, but later calls never replace a user-customized name.
+   */
+  initializeIdentity(
+    internalUserId: string,
+    verifiedEmail: string,
+    identityVersion: number,
+  ): void {
+    if (this.ctx.id.name !== internalUserId) {
+      throw new Error("Internal user identity does not match this User Durable Object.");
+    }
+
+    this.storage.transaction(() => {
+      const existingInternalUserId = this.storage.identityInternalUserId.get();
+      if (existingInternalUserId !== null && existingInternalUserId !== internalUserId) {
+        throw new Error("User Durable Object is initialized for a different internal identity.");
+      }
+
+      if (existingInternalUserId === null) {
+        if (this.storage.created.get()) {
+          throw new Error("User Durable Object was already initialized without a registry identity.");
+        }
+        this.storage.identityInternalUserId.put(internalUserId);
+        this.storage.created.put(true);
+        this.storage.profile.put({
+          type: "user",
+          id: internalUserId,
+          name: verifiedEmail.split("@")[0],
+        });
+      }
+
+      const appliedVersion = this.storage.identityAppliedVersion.get();
+      if (identityVersion < appliedVersion) return;
+      if (identityVersion === appliedVersion) {
+        if (this.storage.verifiedEmail.get() !== verifiedEmail) {
+          throw new Error("Identity version is already applied with a different verified email.");
+        }
+        return;
+      }
+
+      this.storage.verifiedEmail.put(verifiedEmail);
+      this.storage.identityAppliedVersion.put(identityVersion);
+    });
+  }
+
+  async #gatekeeperTokenId(token: string): Promise<string> {
     let tokenBytes: Uint8Array;
     try {
       tokenBytes = Uint8Array.fromBase64(token);
@@ -345,43 +425,107 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       // not surface as the decoder's SyntaxError.
       throw createAuthError(AUTH_ERROR_CODES.invalidSessionToken);
     }
-    let hash = await crypto.subtle.digest('SHA-256', tokenBytes);
-    let tokenId = new Uint8Array(hash).toHex();
-    let session = this.storage.sessions.get(tokenId);
-    if (!session) {
+    const hash = await crypto.subtle.digest("SHA-256", tokenBytes);
+    return new Uint8Array(hash).toHex();
+  }
+
+  #exactGatekeeperSession(
+      tokenId: string,
+      expected?: RegistrySessionAuthentication,
+  ): RegistrySessionAuthentication | null {
+    const session = this.storage.sessions.get(tokenId);
+    if (!session || session.kind !== "gatekeeper" ||
+        typeof session.provider !== "string" || session.provider.length === 0 ||
+        typeof session.subject !== "string" || session.subject.trim().length === 0 ||
+        typeof session.canonicalVerifiedEmail !== "string" ||
+        typeof session.identityVersion !== "number" || !(session.expiresAt instanceof Date) ||
+        !Number.isFinite(session.expiresAt.getTime()) || session.expiresAt.getTime() <= Date.now()) {
+      if (session?.kind === "gatekeeper") this.storage.sessions.delete(tokenId);
+      return null;
+    }
+    if (expected && (
+      session.provider !== expected.provider ||
+      session.subject !== expected.subject ||
+      session.canonicalVerifiedEmail !== expected.canonicalVerifiedEmail ||
+      session.identityVersion !== expected.identityVersion ||
+      session.expiresAt.getTime() !== expected.expiresAt.getTime()
+    )) return null;
+    return {
+      kind: session.kind,
+      provider: session.provider,
+      subject: session.subject,
+      canonicalVerifiedEmail: session.canonicalVerifiedEmail,
+      identityVersion: session.identityVersion,
+      expiresAt: session.expiresAt,
+    };
+  }
+
+  /** Authenticates a local token and returns its captured registry authority when present. */
+  async authenticate(token: string): Promise<RegistrySessionAuthentication | null> {
+    const tokenId = await this.#gatekeeperTokenId(token);
+    const session = this.storage.sessions.get(tokenId);
+    if (!session) throw createAuthError(AUTH_ERROR_CODES.invalidSessionToken);
+    if (session.kind !== "gatekeeper") return null;
+    const authentication = this.#exactGatekeeperSession(tokenId);
+    if (!authentication) throw createAuthError(AUTH_ERROR_CODES.invalidSessionToken);
+    return authentication;
+  }
+
+  /**
+   * Registers one live graph for an exact, currently valid local Gatekeeper bearer token.
+   *
+   * The registration is ephemeral and is rejected if revocation or authority replacement won the
+   * race. The owning PublicApi must unregister it when its socket closes.
+   */
+  async registerGatekeeperSession(
+    token: string,
+    expected: RegistrySessionAuthentication,
+    subscriberId: string,
+    subscriber: NativeRpcStub<GatekeeperSessionInvalidator>,
+  ): Promise<void> {
+    const tokenId = await this.#gatekeeperTokenId(token);
+    if (!this.#exactGatekeeperSession(tokenId, expected)) {
+      throw createAuthError(AUTH_ERROR_CODES.invalidSessionToken);
+    }
+
+    const ownedSubscriber = subscriber.dup();
+    let sessions = this.gatekeeperSessions.get(tokenId);
+    if (!sessions) {
+      sessions = new Map();
+      this.gatekeeperSessions.set(tokenId, sessions);
+    }
+    sessions.get(subscriberId)?.[Symbol.dispose]();
+    sessions.set(subscriberId, ownedSubscriber);
+  }
+
+  /** Unregisters one live Gatekeeper token graph without revoking its bearer token. */
+  async unregisterGatekeeperSession(token: string, subscriberId: string): Promise<void> {
+    let tokenId: string;
+    try {
+      tokenId = await this.#gatekeeperTokenId(token);
+    } catch {
+      return;
+    }
+    this.#removeGatekeeperSession(tokenId, subscriberId);
+  }
+
+  /** Requires an exact local Gatekeeper bearer token and all captured authority to remain current. */
+  async assertGatekeeperSession(
+    token: string,
+    expected: RegistrySessionAuthentication,
+  ): Promise<void> {
+    const tokenId = await this.#gatekeeperTokenId(token);
+    if (!this.#exactGatekeeperSession(tokenId, expected)) {
       throw createAuthError(AUTH_ERROR_CODES.invalidSessionToken);
     }
   }
 
-  /**
-   * Returns true when this login created the account on first use. When the account doesn't yet
-   * exist and `allowCreate` is false (deployment signups are closed), refuses rather than creating —
-   * existing users can still sign in.
-   */
-  async authenticateFromCfAccess(email: string, allowCreate: boolean): Promise<boolean> {
-    if (!this.storage.created.get()) {
-      if (!allowCreate) {
-        throw new Error("New sign-ups are currently disabled on this deployment.");
-      }
-      // Create on first use.
-      this.storage.created.put(true);
-      this.storage.profile.put({
-        type: "user",
-        name: email.split("@")[0],
-        id: email,
-      });
-      return true;
-    }
-
-    return false;
-  }
-
-  async #newSessionToken(): Promise<string> {
+  async #newSessionToken(authentication?: RegistrySessionAuthentication): Promise<string> {
     let sessionToken = new Uint8Array(32);
     crypto.getRandomValues(sessionToken);
 
     let tokenId = new Uint8Array(await crypto.subtle.digest('SHA-256', sessionToken)).toHex();
-    this.storage.sessions.put({ tokenId, created: new Date() });
+    this.storage.sessions.put({ tokenId, created: new Date(), ...authentication });
 
     return sessionToken.toBase64();
   }
@@ -435,30 +579,100 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   /**
-   * Log in via an authentication gatekeeper, creating the account on first use. The user DO is keyed
-   * by the verified email (this DO's id derives from idFromName(email)), so `email` is also used as
-   * the profile id and the initial display name is the email's local-part — consistent with the
-   * Cloudflare Access flow. Password login is left disabled for these accounts. Returns the session
-   * secret to store client-side.
+   * Mints a retained Gatekeeper session bound to the exact initialized registry authority.
    *
-   * The profile is written only on first sign-in. We intentionally do NOT refresh the display name
-   * on later logins: once set, the name is the user's to change (via setOwnDisplayName), so we don't
-   * clobber a customized name with the email local-part.
-   *
-   * When the account doesn't yet exist and `allowCreate` is false (deployment signups are closed),
-   * returns null instead of creating one — existing users can still sign in.
+   * Identity resolution and signup policy remain at the backend callback boundary; this User DO
+   * only verifies that the supplied resolution is the exact version and email already initialized.
+   * The absolute expiry is the earlier of a valid future provider expiry and the fixed one-hour
+   * local maximum; a missing, invalid, or stale provider expiry uses that local maximum.
    */
-  async loginOrCreateViaGatekeeper(email: string, allowCreate: boolean): Promise<string | null> {
-    if (!this.storage.created.get()) {
-      if (!allowCreate) return null;
-      this.storage.created.put(true);
-      this.storage.profile.put({
-        type: "user",
-        name: email.split("@")[0],
-        id: email,
-      });
+  async createGatekeeperSession(
+    identity: Pick<IdentityResolution, "canonicalVerifiedEmail" | "identityVersion">,
+    provider: string,
+    subject: string,
+    providerExpiresAt?: Date,
+  ): Promise<string> {
+    if (!this.storage.created.get() ||
+        this.storage.identityInternalUserId.get() !== this.ctx.id.name ||
+        this.storage.identityAppliedVersion.get() !== identity.identityVersion ||
+        this.storage.verifiedEmail.get() !== identity.canonicalVerifiedEmail) {
+      throw new Error("Gatekeeper session identity is not initialized at this exact version.");
     }
-    return this.#newSessionToken();
+    if (typeof subject !== "string" || subject.trim().length === 0) {
+      throw new Error("Gatekeeper session requires a stable provider subject.");
+    }
+    const now = Date.now();
+    const localExpiresAt = now + GATEKEEPER_SESSION_MAX_AGE_MS;
+    const providerExpiry = providerExpiresAt?.getTime();
+    const expiresAt = new Date(
+      typeof providerExpiry === "number" && Number.isFinite(providerExpiry) && providerExpiry > now
+        ? Math.min(providerExpiry, localExpiresAt)
+        : localExpiresAt,
+    );
+    return this.#newSessionToken({
+      kind: "gatekeeper", provider, subject, expiresAt, ...identity,
+    });
+  }
+
+  /**
+   * Revokes one local Gatekeeper bearer token and invalidates its known live graphs.
+   *
+   * This revokes only the deployment-local Workshop session. The transient provider sign-in grant
+   * is not retained, so there is no provider OAuth credential to revoke here. Missing tokens are
+   * harmless. Exact-token concurrent calls share durable deletion and all invalidations registered
+   * on this User DO instance. A restart loses those ephemeral subscribers, whose independent token
+   * watchdogs close their graphs within 30 seconds; durable deletion prevents replay at completion.
+   */
+  async revokeGatekeeperSession(token: string): Promise<void> {
+    let tokenId: string;
+    try {
+      tokenId = await this.#gatekeeperTokenId(token);
+    } catch {
+      return;
+    }
+    const inFlight = this.gatekeeperSessionRevocations.get(tokenId);
+    if (inFlight) return inFlight;
+    const revocation = this.#revokeGatekeeperSession(tokenId)
+      .finally(() => { this.gatekeeperSessionRevocations.delete(tokenId); });
+    this.gatekeeperSessionRevocations.set(tokenId, revocation);
+    return revocation;
+  }
+
+  async #revokeGatekeeperSession(tokenId: string): Promise<void> {
+    this.storage.sessions.delete(tokenId);
+    const sessions = this.gatekeeperSessions.get(tokenId);
+    if (!sessions) return;
+    this.gatekeeperSessions.delete(tokenId);
+    const invalidations: Promise<void>[] = [];
+    for (const subscriber of sessions.values()) {
+      invalidations.push(this.#invalidateGatekeeperSession(subscriber));
+    }
+    await Promise.allSettled(invalidations);
+  }
+
+  async #invalidateGatekeeperSession(
+      subscriber: NativeRpcStub<GatekeeperSessionInvalidator>): Promise<void> {
+    try {
+      await subscriber();
+    } catch (error) {
+      logger.warn("failed to invalidate Gatekeeper session callback", {
+        event: "gatekeeper.session.invalidate.failed", failureCount: 1, error,
+      });
+    } finally {
+      subscriber[Symbol.dispose]();
+    }
+  }
+
+  #removeGatekeeperSession(
+      tokenId: string,
+      subscriberId: string,
+      expected?: NativeRpcStub<GatekeeperSessionInvalidator>): void {
+    const sessions = this.gatekeeperSessions.get(tokenId);
+    const subscriber = sessions?.get(subscriberId);
+    if (!subscriber || (expected && subscriber !== expected)) return;
+    sessions!.delete(subscriberId);
+    if (sessions!.size === 0) this.gatekeeperSessions.delete(tokenId);
+    subscriber[Symbol.dispose]();
   }
 
   /** Whether this account has a password set (false for gatekeeper sign-in accounts). */
@@ -662,9 +876,8 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   // ---------------------------------------------------------------------------------------------
 
   /**
-   * Return the connected Cloudflare *gatekeeper* account stub, if any. The AI Gateway billing flow
-   * narrows it to CloudflareGatekeeperUser to obtain a usable access token. Null if the user hasn't
-   * connected (or signed in with) Cloudflare.
+   * Return the explicitly connected Cloudflare gatekeeper account, if any. Sign-in is identity-only
+   * and never stores billing authority.
    */
   async getCloudflareGatekeeperAccount(): Promise<Fetcher<CloudflareGatekeeperUser> | null> {
     let nextAccountId = this.storage.nextAccountId.get();
@@ -898,7 +1111,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     }
     let done = examined < OUTPUTS_BACKFILL_PAGE;
 
-    let ownerId = this.ctx.id.toString();
+    let ownerId = this.ctx.id.name!;
     let overseers = this.ctx.exports.OverseerDurableObject;
     let results = await Promise.allSettled(targets.map(id =>
         overseers.get(overseers.idFromString(id)).getOutputsForOwnerBackfill(ownerId)));
@@ -1056,7 +1269,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     }
 
     if (kvRecord) {
-      if (kvRecord.ownerId !== this.ctx.id.toString()) {
+      if (kvRecord.ownerId !== this.ctx.id.name) {
         throw new Error("You don't own this blueprint.");
       }
 
@@ -1216,7 +1429,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     this.storage.nextAccountId.put(accountId + 1);
 
     let props = {
-      userId: this.ctx.id.toString(),
+      userId: this.ctx.id.name!,
       accountId,
       vendorId,
     };
@@ -1806,7 +2019,7 @@ export class GatekeeperConnectCallbackImpl
     extends WorkerEntrypoint<Cloudflare.Env, GatekeeperConnectCallbackProps>
     implements GatekeeperConnectCallback {
   #getUserStub() {
-    let userId = this.ctx.exports.UserDurableObject.idFromString(this.ctx.props.userId);
+    let userId = this.ctx.exports.UserDurableObject.idFromName(this.ctx.props.userId);
     return this.ctx.exports.UserDurableObject.get(userId);
   }
 

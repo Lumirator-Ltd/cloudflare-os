@@ -7,6 +7,7 @@
   "scripts": {
     "build": "vp run -r --cache build",
     "run-local": "node scripts/run-local.ts",
+    "telegram:configure": "node scripts/configure-telegram.mjs",
     "test": "node --test 'scripts/**/*.test.ts' scripts/*.test.js && vp run --filter @gadgets/workshop-backend --no-cache build:format-blueprints && vp run --filter '!cloudflare-os' --cache test",
     "dev-client": "cd packages/workshop-frontend && pnpm run dev",
     "dev-server": "node scripts/run-dev-server.ts",

@@ -62,7 +62,9 @@ describe("authentication connector readiness", () => {
           get: () => user,
         },
       },
-    }, env, () => {}]);
+    }, env, () => {}, new AbortController().signal, async () => {
+      throw new Error("Clerk verification is not expected in this test.");
+    }]);
 
     await expect(Reflect.apply(target.login, target, ["person", new Uint8Array([1])]))
       .resolves.toBe("person:session");
@@ -83,7 +85,10 @@ describe("authentication connector readiness", () => {
           },
         },
       },
-    }, environment(authVendor(false, () => { connectCalls++; })), () => {}]);
+    }, environment(authVendor(false, () => { connectCalls++; })), () => {},
+    new AbortController().signal, async () => {
+      throw new Error("Clerk verification is not expected in this test.");
+    }]);
 
     await expect(Reflect.apply(target.startGatekeeperLogin, target, ["github"]))
       .rejects.toThrow(UNCONFIGURED_MESSAGE);

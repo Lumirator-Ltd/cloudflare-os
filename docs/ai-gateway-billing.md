@@ -37,10 +37,10 @@ holds money.
 
 Billing is tied to the **Cloudflare gatekeeper**: the OAuth tokens live in that gatekeeper's
 connection, and the billing flow obtains a usable token from it via `getUsableAccessToken()`. A user
-connects Cloudflare either by signing in with it, or — if they signed in another way — via the
-"Connect Cloudflare" button, which runs the normal gatekeeper connect flow
-(`AuthenticatedApi.connectAccount("cloudflare")`). See [sign-in](./oauth-signin.md) for the OAuth
-mechanics and redirect URIs.
+connects Cloudflare through the "Connect Cloudflare" button, which runs the explicit full-scope
+gatekeeper connect flow (`AuthenticatedApi.connectAccount("cloudflare")`). Signing in with
+Cloudflare is deliberately separate: it requests only transient identity scopes and never creates
+billing authority. See [sign-in](./oauth-signin.md) for the OAuth mechanics and redirect URIs.
 
 The account to bill is auto-selected when the grant sees exactly one account; with several, the user
 is prompted to choose one. Billing is account-level (Unified Billing): inference is routed through
@@ -55,7 +55,7 @@ ENABLE_CLOUDFLARE_LIMITS=true
 REQUIRE_USER_FUNDED_AI=true
 
 PUBLIC_BASE_URL=https://your-host
-AUTH_GATEKEEPERS=cloudflare       # allow Cloudflare sign-in/connect (plus any others)
+AUTH_GATEKEEPERS=cloudflare       # allow Cloudflare sign-in (connector availability is separate)
 
 # The Cloudflare gatekeeper's OAuth app (client id/secret live on the gatekeeper Worker; in dev
 # they're seeded from these shell vars by run-dev-server.ts):
@@ -90,7 +90,9 @@ The Cloudflare dashboard OAuth endpoints and scopes are **hardcoded** in the Clo
 
 - auth: `https://dash.cloudflare.com/oauth2/auth`
 - token: `https://dash.cloudflare.com/oauth2/token`
-- scopes: `offline_access aig.read aig.run aig.write user-details.read account-settings.read`
+- sign-in scopes: `offline_access user-details.read` (transient identity grant)
+- explicit connector scopes: `offline_access aig.read aig.run aig.write user-details.read account-settings.read`
+  (persistent billing grant)
 
 Cloudflare gatekeeper redirect URI: `${PUBLIC_BASE_URL}/gatekeeper/cloudflare/oauth`.
 

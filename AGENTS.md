@@ -182,3 +182,52 @@ IMPORTANT: Frontend error reporting is a separate, opt-in path:
 - Install automatic capture only in trusted first-party surfaces, never gadget/user-authored code.
   Exception messages and stacks reach the external Reporter, so never intentionally put secrets,
   prompts, tokens, headers, or request/response bodies in thrown errors or report metadata.
+
+## Delivery workflow (required)
+
+- Work on a feature branch only; never direct-push to `main`.
+- Use strict test-driven development: write and run the failing test before implementation.
+- Commit each small concern separately, and use pnpm only.
+- Before delivery, run unit tests, integration tests, build, and lint; report any failures without hiding them.
+- For every feature-development branch, push only to `origin` and create a pull request on the `origin` repository targeting `main`.
+- Request a Codex Cloud review on every PR with the exact comment `@codex review`. Do not enable auto-merge until Codex has completed its latest review and reported no blocking P0/P1 findings. Fix findings in priority order, push small commits, and request another Codex review until clear.
+- After required GitHub Actions checks pass and Codex review is clear, enable GitHub auto-merge without asking.
+- Never push to the `cloudflare` remote; it is fetch-only upstream reference material.
+- Never bypass failed checks, Codex blocking findings, direct-push, or force-push.
+- If GitHub auto-merge or a hard required-review rule is unavailable, report the platform blocker instead of bypassing it. The current private repository plan may not support branch protection/rulesets, so this agent workflow is the mandatory fallback gate.
+
+## Code Review Rules
+
+### Authentication and identity
+
+- Treat verified identity, session lifetime, account convergence, and admin authorization as security boundaries. Flag any path that trusts browser-supplied identity, leaves stale capabilities usable past their verified session deadline, silently merges populated identities, or persists mutable email as a durable user key.
+- For Clerk, Gatekeeper, and Cloudflare Access changes, require issuer/origin/lifetime validation, backend-enforced signup policy, stable internal user IDs, and fail-closed collision behavior. Never log tokens, passwords, OAuth payloads, complete identity profiles, or secret configuration.
+
+### Capability and kernel safety
+
+- In `workshop-backend` and `workshop-shared`, flag parallel authorization mechanisms, unchecked capability minting, leaked RPC stubs, missing disposal, or changes that let gadget/agent code gain ambient authority. Prefer the existing capability path and keep kernel/API diffs minimal and documented.
+- Verify every changed exported `workshop-shared` member has a doc comment and every retained long-lived RPC capability is either explicitly disposed or invalidated with its owning session.
+
+### Delivery decision
+
+- Review only consequential correctness, security, data-loss, and compatibility risks. Assign each blocking finding P0 or P1 with an exploit/failure path and a concrete remediation. If no P0/P1 findings remain, approve the PR; leave deterministic formatting, lint, type, and test checks to GitHub Actions.
+
+## Project intent: PoC / MVP (Lumirator)
+
+This work is a proof of concept and MVP for using Cloudflare OS to its full
+extent and offering it as a managed service to our clients.
+
+Priorities, in order:
+
+1. Fast implementation.
+2. A simple, working MVP.
+3. Everything else.
+
+Guidelines:
+
+- Prefer the simplest approach that works end to end; avoid speculative
+  complexity and heavyweight process.
+- Do not run supply-chain or downloaded-code audits unless explicitly
+  requested in chat.
+- Keep changes small and shippable; iterate instead of perfecting.
+- Still never commit secrets, tenant configuration, state, or credentials.

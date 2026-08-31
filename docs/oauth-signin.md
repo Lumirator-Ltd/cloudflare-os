@@ -1,7 +1,8 @@
 # Sign-in via authentication gatekeepers
 
 Sign-in is provided by **authentication gatekeepers** — gatekeepers that advertise `providesAuth`
-and can return a provider-verified email. Each such gatekeeper uses a single OAuth app for both
+and can return a provider-stable subject plus provider-verified email. Each such gatekeeper uses a
+single OAuth app for both
 sign-in and (when the user later connects it) its capabilities, so there's only one OAuth app per
 provider — no separate "login" vs. "gatekeeper" apps.
 
@@ -13,13 +14,53 @@ The deployment opts gatekeepers into sign-in via the `AUTH_GATEKEEPERS` allowlis
 vendor ids). Set `DISABLE_PASSWORD_AUTH=true` to hide username/password and offer gatekeeper sign-in
 only (ignored unless the allowlist is non-empty, to avoid locking everyone out).
 
-## Identity: keyed by verified email
+## Identity: stable internal ID resolved from verified authority
 
-The primary account key is always the user's **verified email**. Signing in with any allowlisted
-gatekeeper that yields the same verified email resolves to the same account — its `UserDurableObject`
-is addressed by `idFromName(email)` (the same scheme as Cloudflare Access). Each gatekeeper must only
-return an email the provider has verified (Google `email_verified`, a GitHub primary+verified email,
-the Cloudflare account email); otherwise it returns null and can't be used to sign in.
+A provider-verified email is an identity claim, not a durable account key. The deployment-local
+`IdentityRegistry` resolves Clerk subjects and Cloudflare Access subjects (scoped by configured
+issuer and audience) to random opaque internal user IDs; `UserDurableObject` is addressed by
+`idFromName(internalUserId)`. Every canonical email ever presented by a stable subject remains a
+durable claim of that internal identity. A new stable subject cannot take over or silently merge
+with a current or historical claim: authentication fails until an explicit linking or deployment
+operator resolution flow exists. The owning subject may move back to one of its historical emails.
+Session records capture the registry's exact canonical email and identity version so a moved or
+collision-locked identity fails closed.
+
+Authentication Gatekeepers resolve a provider-stable opaque subject scoped by vendor ID together
+with its current provider-verified email. Email moves preserve the internal identity, tombstone the
+old email, increment the identity version, and invalidate retained sessions. An unseen Gatekeeper
+subject cannot claim a current or historical email owned by any Gatekeeper, Clerk, or Access identity.
+It fails closed regardless of signup policy. A proof-based user linking UI and operator resolution
+workflow remain future LUM-73 work; sign-in never invents an email-only merge while those flows are
+absent.
+
+Retained local Gatekeeper sessions have an absolute expiry at the earlier of the provider's valid
+future credential expiry and a fixed one-hour local maximum. Missing or stale provider expiry uses
+the one-hour maximum. Expired and legacy subjectless/unbounded records are rejected and removed, and
+the complete capability graph is aborted at the retained session deadline.
+
+Same-origin `POST /api/gatekeeper-session/logout` revokes only the local bearer supplied in its
+strict, bounded `application/json` body (`{ "token": "<opaque-internal-id>:<secret>" }`). A 204
+confirms that the User DO durably deleted that exact token, so bearer replay fails, and finished every
+live subscriber invalidation known to that User DO instance, including the requesting browser's graph
+when its subscriber is still registered there. A syntactically valid missing or already-revoked
+bearer is idempotently acknowledged with the same 204 so the endpoint does not disclose token
+existence; malformed requests are rejected before Durable Object lookup. Subscribers are ephemeral:
+a User DO restart can lose them before revocation, so a pre-existing graph is not guaranteed closed
+at 204 in that case. Each graph also polls the exact durable token behind an independent absolute
+30-second deadline and closes within that bound after durable revocation. Socket disposal unregisters
+its ephemeral subscriber but does not revoke the token, so closing a tab is not logout. Logout is
+deployment-local: the sign-in grant is transient and never retained, so there is no provider OAuth
+credential to revoke.
+
+The strict stable-subject cutover rejects legacy subjectless Gatekeeper sessions instead of upgrading
+them by email. This release assumes a greenfield deployment with no existing users. Any deployment
+that previously enabled Gatekeeper sign-in must ship a separate proof-based migration or operator
+recovery flow before adopting this cutover.
+
+Cloudflare Access WebSocket capability graphs have both one non-refreshable absolute deadline at the
+assertion's verified `exp` and exact registry-authority invalidation. The browser must reconnect with
+a fresh assertion after expiry.
 
 ## Incremental scopes
 
@@ -41,9 +82,11 @@ what persists a usable connected account. `GatekeeperVendor.connectAccount` take
 2. The client opens `url` in a pop-up (the gatekeeper's self-closing OAuth window) and calls
    `attempt.wait()`, which blocks on the `PendingLogin` DO.
 3. When the gatekeeper finishes, it calls `complete(user)`. The callback reads
-   `user.getAuthenticatedEmail()`, resolves/creates the email-keyed `UserDurableObject`, mints a
-   session, and delivers the `"<email>:<secret>"` token to the `PendingLogin` DO — which resolves the
-   awaiting RPC.
+   `user.getAuthenticationIdentity()`, resolves the vendor-scoped stable subject and verified email,
+   initializes its `UserDurableObject`, and mints an exact-version, bounded session. A missing,
+   throwing, null, or blank stable identity fails sign-in without falling back to the deprecated
+   email-only method. It delivers the
+   `"<opaque-internal-id>:<secret>"` token to the `PendingLogin` DO, which resolves the awaiting RPC.
 4. The client stores the token and authenticates as usual.
 
 Sign-in does **not** persist a connected account: the minimal-scope grant is only used to read the

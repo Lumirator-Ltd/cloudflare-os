@@ -74,7 +74,7 @@ function overseer(vendors: GatekeeperVendorInfo[] = VENDORS): ReadinessOverseer 
   }, {}]) as ReadinessOverseer;
   target.ownerId = "owner-id";
   target.users = {
-    idFromString: () => "owner-id",
+    idFromName: () => "owner-id",
     get: () => ({ listGatekeeperVendors: async () => vendors }),
   };
   return target;

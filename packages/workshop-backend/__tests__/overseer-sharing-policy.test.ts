@@ -111,7 +111,14 @@ function overseer(hasAnyShares: boolean): SharingPolicyOverseer {
   const target = Reflect.construct(OverseerImpl, [{
     id: { toString: () => "workspace-id" },
     storage: makeMockStorage(),
-    exports: { UserDurableObject: {} },
+    exports: {
+      UserDurableObject: {},
+      IdentityRegistry: {
+        getByName: () => ({
+          findInternalUserIdByVerifiedEmail: async (email: string) => email,
+        }),
+      },
+    },
   }, {}]) as SharingPolicyOverseer;
   target.getSharingManager = async () => ({ hasAnyShares: () => hasAnyShares });
   return target;
@@ -341,7 +348,7 @@ describe("Overseer sharing transition concurrency", () => {
       ensureAmbientCapsules: async () => undefined,
       markOutputsDirty: () => undefined,
       users: {
-        idFromString: (id: string) => id,
+        idFromName: (id: string) => id,
         get: () => ({ whoami: async () => (
           { type: "user", id: "collaborator", name: "Collaborator" } as AiChatAuthorInfo
         ) }),
@@ -386,7 +393,7 @@ describe("Overseer sharing transition concurrency", () => {
       ensureAmbientCapsules: async () => undefined,
       markOutputsDirty: () => undefined,
       users: {
-        idFromString: (id: string) => id,
+        idFromName: (id: string) => id,
         get: () => ({ whoami: async () => (
           { type: "user", id: "collaborator", name: "Collaborator" } as AiChatAuthorInfo
         ) }),

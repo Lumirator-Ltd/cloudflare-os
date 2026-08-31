@@ -37,6 +37,8 @@ declare global {
       // Note: gatekeeper service bindings (GATEKEEPER_*) are intentionally NOT declared here. Core
       // discovers them generically by scanning env for the GATEKEEPER_ prefix (buildGatekeeperVendorMap)
       // and never references a specific gatekeeper by name, so naming one here would be wrong.
+      // IdentityRegistry is also intentionally absent: like the other local Durable Objects it is
+      // reached through ctx.exports rather than an explicit environment binding.
 
       // Optional product analytics stream. Deployments can bind this to a
       // structured Cloudflare Pipelines stream; local/dev configs omit it and analytics no-op.
@@ -64,6 +66,15 @@ declare global {
       CF_ACCESS_AUD?: string;   // audience
       CF_ACCESS_ISS?: string;   // team URL, e.g. https://<team>.cloudflareaccess.com
 
+      // Clerk configuration for normal (non-Access) authentication. API/JWKS traffic is always sent
+      // directly to https://api.clerk.com; no deployment-configurable API endpoint is accepted.
+      CLERK_PUBLISHABLE_KEY?: string;
+      CLERK_SECRET_KEY?: string;
+      CLERK_JWT_KEY?: string;              // Optional PEM public key for networkless verification
+      CLERK_JWT_AUDIENCE?: string;         // Optional single exact JWT audience
+      CLERK_DEV_AUTHORIZED_PARTIES?: string; // Local-only comma-separated exact origins
+      DEV?: boolean;                       // Set only by generated local Wrangler configuration
+
       // Comma-separated allowlist of gatekeeper vendor ids permitted to drive sign-in (e.g.
       // "google,github,cloudflare"). A listed gatekeeper must also advertise providesAuth. Empty =
       // no gatekeeper sign-in (password / CF Access only).
@@ -82,6 +93,10 @@ declare global {
 
       // Public base URL of the deployment.
       PUBLIC_BASE_URL?: string;
+
+      // Optional Telegram transport secrets. Telegram is enabled only when both are present.
+      TELEGRAM_BOT_TOKEN?: string;
+      TELEGRAM_WEBHOOK_SECRET?: string;
 
       // Default Workshop UI language. Defaults to English when omitted.
       DEFAULT_LANGUAGE?: string;

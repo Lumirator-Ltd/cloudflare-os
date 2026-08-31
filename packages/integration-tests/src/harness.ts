@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 import { parse } from "jsonc-parser";
 import { createTestHarness, type TestHarness } from "wrangler";
 import { z } from "zod";
+import { runCustomBuildOnce, runFileBuildOnce } from "./custom-build.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -18,6 +19,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // vendors this one as a submodule.
 const WORKSHOP_DIR = resolve(HERE, "../../workshop-backend");
 const REPO_ROOT = resolve(HERE, "../../..");
+const UPDATE_MARKER = "__INTEGRATION_TEST_HARNESS_UPDATE";
 
 /** Directory of the bundled fixture gatekeeper. See fixtures/gatekeeper-test/README-ish comments. */
 export const TEST_GATEKEEPER_DIR = resolve(HERE, "../fixtures/gatekeeper-test");
@@ -79,9 +81,35 @@ function readWorkerConfig(dir: string): WorkerConfig {
   return config;
 }
 
+async function prepareCustomBuild(config: WorkerConfig): Promise<void> {
+  const build = config.build;
+  if (!build?.command) return;
+
+  await runCustomBuildOnce(build);
+  delete build.command;
+}
+
+async function waitForRuntimeConfig(
+    server: TestHarness, workerNames: string[], marker: string): Promise<void> {
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    try {
+      const envs = await Promise.all(workerNames.map(
+        name => server.getWorker<Record<string, unknown>>(name).getEnv(),
+      ));
+      if (envs.every(env => env[UPDATE_MARKER] === marker)) return;
+    } catch {
+      // A runtime that is between bundles may temporarily reject environment inspection.
+    }
+    await new Promise(complete => setTimeout(complete, 10));
+  }
+  throw new Error("Timed out waiting for every harness worker to apply its runtime config");
+}
+
 function workshopConfig(
     gatekeepers: { binding: string; name: string }[],
-    patch?: (config: WorkerConfig) => void): WorkerConfig {
+    patch?: (config: WorkerConfig) => void,
+    enableWorkerLoader = false): WorkerConfig {
   const config = readWorkerConfig(WORKSHOP_DIR);
 
   // The checked-in config declares no services; run-dev-server.ts adds one per gatekeeper. We add
@@ -96,9 +124,9 @@ function workshopConfig(
   // No CF_ACCESS_AUD, so /api takes the unauthenticated path and password signup is available.
   config.vars = { ...config.vars, ADMINS: [ADMIN_USERNAME] };
 
-  // Gadget code is never executed here (a gatekeeper is in observer scope purely by having a
-  // vendorId), so drop the Worker Loader rather than requiring it to start.
-  delete config.worker_loaders;
+  // Most suites never execute gadget code, so avoid starting the Worker Loader unless a capability-
+  // graph test explicitly needs a real dynamic gadget Worker descendant.
+  if (!enableWorkerLoader) delete config.worker_loaders;
 
   patch?.(config);
   return config;
@@ -119,11 +147,15 @@ export type Harness = {
    */
   fetchWorker(name: string, ...args: Parameters<TestHarness["fetch"]>)
       : ReturnType<TestHarness["fetch"]>;
+  /** Reload the Workshop's inline config while retaining this harness's durable storage. */
+  updateWorkshop(patch: (config: WorkerConfig) => void): Promise<void>;
 };
 
 export async function startHarness(opts: {
   gatekeepers: GatekeeperSpec[];
   patchWorkshop?: (config: WorkerConfig) => void;
+  /** Keep the real Worker Loader binding so tests can open dynamic gadget Worker descendants. */
+  enableWorkerLoader?: boolean;
   /** Defaults to this repo's root. Override when a gatekeeper lives outside it. */
   root?: string;
 }): Promise<Harness> {
@@ -135,26 +167,62 @@ export async function startHarness(opts: {
     return { binding: gk.binding, name: config.name, config };
   });
 
-  const server = createTestHarness({
-    root: opts.root ?? REPO_ROOT,
+  const root = opts.root ?? REPO_ROOT;
+  let workshop = workshopConfig(gatekeepers, opts.patchWorkshop, opts.enableWorkerLoader);
+
+  // This generated module is gitignored, so prepare it explicitly just as run-dev-server.js does.
+  await runFileBuildOnce(
+    process.execPath,
+    [join(WORKSHOP_DIR, "scripts", "build-format-blueprints.mjs")],
+    WORKSHOP_DIR,
+  );
+
+  // Inline config updates make Wrangler run every custom build again, including unchanged workers.
+  // Build before workerd starts, then remove the commands so runtime-only updates cannot rewrite a
+  // generated entrypoint while the active runtime is reloading it.
+  await Promise.all([
+    prepareCustomBuild(workshop),
+    ...gatekeepers.map(({ config }) => prepareCustomBuild(config)),
+  ]);
+
+  const harnessOptions = () => ({
+    root,
     // workshop-backend is primary, so unrouted requests (e.g. /api) go to it.
     workers: [
-      { config: workshopConfig(gatekeepers, opts.patchWorkshop) },
+      { config: workshop },
       ...gatekeepers.map(({ config }) => ({ config })),
     ],
   });
+  const server = createTestHarness(harnessOptions());
 
   const { url } = await server.listen();
+  let updateSequence = 0;
+  const workerNames = [workshop.name, ...gatekeepers.map(({ name }) => name)];
   return {
     server,
     url,
     fetchWorker: (name, ...args) => server.getWorker(name).fetch(...args),
+    async updateWorkshop(patch) {
+      workshop = structuredClone(workshop);
+      patch(workshop);
+      const marker = String(++updateSequence);
+      workshop.vars = { ...workshop.vars, [UPDATE_MARKER]: marker };
+      for (const { config } of gatekeepers) {
+        config.vars = { ...config.vars, [UPDATE_MARKER]: marker };
+      }
+      await server.update(harnessOptions());
+      await waitForRuntimeConfig(server, workerNames, marker);
+    },
   };
 }
 
 /** Boot the Workshop with only the bundled fixture gatekeeper bound. */
-export function startTestGatekeeperHarness(): Promise<Harness> {
+export function startTestGatekeeperHarness(options: {
+  patchWorkshop?: (config: WorkerConfig) => void;
+  enableWorkerLoader?: boolean;
+} = {}): Promise<Harness> {
   return startHarness({
     gatekeepers: [{ binding: TEST_GATEKEEPER_BINDING, dir: TEST_GATEKEEPER_DIR }],
+    ...options,
   });
 }

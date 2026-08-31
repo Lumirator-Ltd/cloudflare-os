@@ -20,11 +20,12 @@
 // is one control knob here, `allow`, and the reason string is what carries the distinction to the
 // user. Tests exercise both narratives by choosing reason text.
 
-import { DurableObject, WorkerEntrypoint, type RpcStub } from "cloudflare:workers";
+import { DurableObject, RpcTarget, WorkerEntrypoint, type RpcStub } from "cloudflare:workers";
 import type {
-  AccountDescription, ActionKind, ApprovalQueue, Gatekeeper, GatekeeperConnectCallback,
-  GatekeeperUser, GatekeeperUserVerifier, ResourceDescription, ResourceConfiguratorFrame,
-  SupportedResource, VendorDescription,
+  AccountDescription, ActionKind, AppUiContext, ApprovalQueue, Gatekeeper,
+  GatekeeperAuthenticationIdentity, GatekeeperConnectCallback, GatekeeperConnectOptions,
+  GatekeeperUiFrame, GatekeeperUser, GatekeeperUserVerifier,
+  ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
 
 // Nothing but classes and the default handler may be exported from a Worker entry module: workerd
@@ -55,8 +56,27 @@ const AVATAR = {
 // without having to learn any internal id.
 
 type VerifyOutcome = { allow: true } | { allow: false; reason: string };
+type ClerkProfile = { email: string; status: string };
+type GatekeeperLoginIdentity = { subject: string; email: string; expiresAt?: Date };
 
 export class TestControl extends DurableObject<Cloudflare.Env> {
+  setGatekeeperLoginIdentity(identity: GatekeeperLoginIdentity): void {
+    this.ctx.storage.kv.put("gatekeeper-login-identity", identity);
+  }
+
+  getGatekeeperLoginIdentity(): GatekeeperLoginIdentity | null {
+    return this.ctx.storage.kv.get<GatekeeperLoginIdentity>("gatekeeper-login-identity") ?? null;
+  }
+
+  recordConnectScope(scope: "auth" | "full"): void {
+    const scopes = this.ctx.storage.kv.get<Array<"auth" | "full">>("connect-scopes") ?? [];
+    this.ctx.storage.kv.put("connect-scopes", [...scopes, scope]);
+  }
+
+  getConnectScopes(): Array<"auth" | "full"> {
+    return this.ctx.storage.kv.get<Array<"auth" | "full">>("connect-scopes") ?? [];
+  }
+
   setVerifyOutcome(label: string, outcome: VerifyOutcome): void {
     this.ctx.storage.kv.put(`outcome:${label}`, outcome);
   }
@@ -74,6 +94,14 @@ export class TestControl extends DurableObject<Cloudflare.Env> {
   getAmbientVerificationCount(label: string): number {
     return this.ctx.storage.kv.get<number>(`ambient-verifications:${label}`) ?? 0;
   }
+
+  setClerkProfile(subject: string, profile: ClerkProfile): void {
+    this.ctx.storage.kv.put(`clerk-profile:${subject}`, profile);
+  }
+
+  getClerkProfile(subject: string): ClerkProfile | null {
+    return this.ctx.storage.kv.get<ClerkProfile>(`clerk-profile:${subject}`) ?? null;
+  }
 }
 
 // ctx.exports is typed via the Cloudflare.GlobalProps declaration in env.d.ts, so loopback bindings
@@ -83,9 +111,35 @@ function control(exports: Cloudflare.Exports): DurableObjectStub<TestControl> {
 }
 
 // ---------------------------------------------------------------------------
+// Clerk profile service used only by the separate Task5 Workshop test entry.
+
+export class ClerkTestProfiles extends WorkerEntrypoint<Cloudflare.Env> {
+  async getSession(sessionId: string): Promise<{ id: string; userId: string; status: string }> {
+    const subject = `user_${sessionId.slice("sess_".length)}`;
+    const profile = await control(this.ctx.exports).getClerkProfile(subject);
+    return { id: sessionId, userId: subject, status: profile?.status ?? "revoked" };
+  }
+
+  async getUser(subject: string): Promise<{
+    id: string;
+    primaryEmailAddress: { emailAddress: string; verification: { status: string } };
+  }> {
+    const profile = await control(this.ctx.exports).getClerkProfile(subject);
+    if (!profile) throw new Error("Clerk test profile is not configured.");
+    return {
+      id: subject,
+      primaryEmailAddress: {
+        emailAddress: profile.email,
+        verification: { status: "verified" },
+      },
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Vendor
 
-type AccountProps = { label: string };
+type AccountProps = { label: string; authenticatedSubject?: string; authenticatedEmail?: string };
 type BindingProps = AccountProps & { resourceUrl: string; ambient?: true };
 
 export class GatekeeperVendor extends WorkerEntrypoint<Cloudflare.Env> {
@@ -95,6 +149,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Cloudflare.Env> {
       url: `https://${VENDOR_HOST}`,
       logo: AVATAR,
       tagline: "A gatekeeper that exists only for integration tests.",
+      providesAuth: true,
       // Accounts are minted on request with no auth flow, which is what keeps these tests about the
       // overseer rather than about somebody's OAuth dance.
       autoProvisionsAccount: true,
@@ -118,12 +173,22 @@ export class GatekeeperVendor extends WorkerEntrypoint<Cloudflare.Env> {
     return TYPES_CODE;
   }
 
-  /**
-   * Required by the interface but unreachable: autoProvisionsAccount means the Workshop mints
-   * accounts through createAccount() and never offers a connect flow.
-   */
-  async connectAccount(_callback: Fetcher<GatekeeperConnectCallback>): Promise<{ url: string }> {
-    throw new Error("The test gatekeeper auto-provisions accounts; it has no connect flow.");
+  async connectAccount(
+      callback: Fetcher<GatekeeperConnectCallback>, options?: GatekeeperConnectOptions,
+  ): Promise<{ url: string }> {
+    const scope = options?.scopes ?? "full";
+    await control(this.ctx.exports).recordConnectScope(scope);
+    const identity = await control(this.ctx.exports).getGatekeeperLoginIdentity();
+    if (!identity) throw new Error("The test gatekeeper login identity is not configured.");
+    const account = this.ctx.exports.TestAccount({
+      props: {
+        label: identity.email,
+        authenticatedSubject: identity.subject,
+        authenticatedEmail: identity.email,
+      },
+    });
+    await callback.complete(account, identity.expiresAt);
+    return { url: `https://${VENDOR_HOST}/oauth/test-login` };
   }
 }
 
@@ -139,6 +204,7 @@ export class TestAccount
       uniqueName: this.ctx.props.label,
       avatar: AVATAR,
       singleton: { tsType: "TestThing" },
+      providesUi: { title: "Test Gatekeeper App", icon: AVATAR },
     };
   }
 
@@ -181,14 +247,30 @@ export class TestAccount
     return {};
   }
 
+  async getAuthenticationIdentity(): Promise<GatekeeperAuthenticationIdentity | null> {
+    const subject = this.ctx.props.authenticatedSubject;
+    const verifiedEmail = this.ctx.props.authenticatedEmail;
+    return subject && verifiedEmail ? { subject, verifiedEmail } : null;
+  }
+
   async getAuthenticatedEmail(): Promise<string | null> {
-    return null;
+    return this.ctx.props.authenticatedEmail ?? null;
   }
 
   async revoke(): Promise<void> {}
 
-  startResourceConfigurator(_resourceUrlPattern: string): Promise<ResourceConfiguratorFrame> {
-    throw new Error("The test gatekeeper has no resource configurator; bind a URL directly.");
+  async startResourceConfigurator(resourceUrlPattern: string): Promise<ResourceConfiguratorFrame> {
+    return {
+      iframeHtml: "<!doctype html><title>Test resource configurator</title>",
+      ui: new TestUi(`configurator:${resourceUrlPattern}`) as unknown as RpcStub<RpcTarget>,
+    };
+  }
+
+  async startAppUi(context: AppUiContext): Promise<GatekeeperUiFrame> {
+    return {
+      iframeHtml: "<!doctype html><title>Test gatekeeper app</title>",
+      ui: new TestUi(`app:${context.isAdmin ? "admin" : "user"}`) as unknown as RpcStub<RpcTarget>,
+    };
   }
 
   reconnect(): Promise<{ url: string }> {
@@ -217,8 +299,27 @@ export class TestVerifier
 // ---------------------------------------------------------------------------
 // Gatekeeper (one per bound resource, running as a facet under the gadget's Overseer)
 
-/** No operations: these tests never open a gadget's session, only verify observers. */
-export type TestSession = Record<string, never>;
+/** Test-only capability returned by UI frames and direct gatekeeper sessions. */
+class TestUi extends RpcTarget {
+  constructor(private label: string) {
+    super();
+  }
+
+  async ping(): Promise<string> {
+    return this.label;
+  }
+}
+
+/** Session API used to prove a retained cross-worker descendant dies with the Workshop socket. */
+export interface TestSession {
+  ping(): Promise<string>;
+}
+
+class TestSessionImpl extends RpcTarget implements TestSession {
+  async ping(): Promise<string> {
+    return "gatekeeper-session";
+  }
+}
 
 export class TestGatekeeper
     extends DurableObject<Cloudflare.Env, BindingProps> implements Gatekeeper<TestSession> {
@@ -252,7 +353,7 @@ export class TestGatekeeper
   }
 
   async startSession(_approvalQueue: RpcStub<ApprovalQueue>): Promise<TestSession> {
-    return {};
+    return new TestSessionImpl();
   }
 
   /**
@@ -325,6 +426,31 @@ export default {
       }
     }
 
+    if (url.pathname === "/control/gatekeeper-login-email" && req.method === "POST") {
+      const { subject, email, expiresAt } = body as Record<string, unknown>;
+      if (!isNonEmptyString(subject) || subject.trim().length === 0) {
+        return badRequest("`subject` must be a non-empty stable id");
+      }
+      if (!isNonEmptyString(email) || !email.includes("@")) {
+        return badRequest("`email` must be a non-empty email");
+      }
+      if (expiresAt !== undefined && typeof expiresAt !== "string") {
+        return badRequest("`expiresAt` must be an ISO date string when present");
+      }
+      const parsedExpiresAt = expiresAt === undefined ? undefined : new Date(expiresAt);
+      if (parsedExpiresAt && !Number.isFinite(parsedExpiresAt.getTime())) {
+        return badRequest("`expiresAt` must be a valid ISO date string");
+      }
+      await control(ctx.exports).setGatekeeperLoginIdentity({
+        subject, email, expiresAt: parsedExpiresAt,
+      });
+      return new Response(null, { status: 204 });
+    }
+
+    if (url.pathname === "/control/connect-scopes" && req.method === "GET") {
+      return Response.json({ scopes: await control(ctx.exports).getConnectScopes() });
+    }
+
     // Set what addObserver() should do for one account.
     // Body: {"label": "...", "allow": false, "reason": "..."}
     if (url.pathname === "/control/verify-outcome" && req.method === "POST") {
@@ -346,6 +472,19 @@ export default {
       const { label } = body as Record<string, unknown>;
       if (!isNonEmptyString(label)) return badRequest("`label` must be a non-empty string");
       return Response.json({ count: await control(ctx.exports).getAmbientVerificationCount(label) });
+    }
+
+    if (url.pathname === "/control/clerk-profile" && req.method === "POST") {
+      const { subject, email, status } = body as Record<string, unknown>;
+      if (!isNonEmptyString(subject) || !subject.startsWith("user_")) {
+        return badRequest("`subject` must be a Clerk user id");
+      }
+      if (!isNonEmptyString(email) || !email.includes("@")) {
+        return badRequest("`email` must be a non-empty email");
+      }
+      if (!isNonEmptyString(status)) return badRequest("`status` must be non-empty");
+      await control(ctx.exports).setClerkProfile(subject, { email, status });
+      return new Response(null, { status: 204 });
     }
 
     // Make this Worker issue a subrequest, so a test can prove that Worker-originated fetches really

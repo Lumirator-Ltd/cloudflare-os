@@ -1,7 +1,8 @@
-// Drives the Workshop over its real Cap'n Web WebSocket API, the same transport the browser uses.
+// Drives the Workshop over its real Cap'n Web API, using the browser's WebSocket transport by
+// default and HTTP batch only where tests need edge-injected request headers.
 
 import { createHash } from "node:crypto";
-import { RpcStub, RpcTarget, newWebSocketRpcSession } from "capnweb";
+import { RpcStub, RpcTarget, newHttpBatchRpcSession, newWebSocketRpcSession } from "capnweb";
 import type {
   AuthenticatedApi, ConnectedAccountsSubscriber, ObserverAccountChoice, ObserverBindingNeed,
   ObserverConfigCallback, PublicApi,
@@ -50,6 +51,11 @@ export function connect(baseUrl: URL): RpcStub<PublicApi> {
   return newWebSocketRpcSession<PublicApi>(wsUrl.toString());
 }
 
+/** Open one HTTP-batch RPC session with custom request headers. */
+export function connectBatch(request: Request): RpcStub<PublicApi> {
+  return newHttpBatchRpcSession<PublicApi>(request);
+}
+
 /**
  * Wrap a target so it can be passed to the Workshop over a session from `connect()`.
  *
@@ -62,6 +68,12 @@ export function connect(baseUrl: URL): RpcStub<PublicApi> {
  */
 export function stubFor<T extends RpcTarget>(target: T): RpcStub<T> {
   return new RpcStub(target) as unknown as RpcStub<T>;
+}
+
+/** Mint a serialisable callback-function stub from the same Cap'n Web instance as `connect()`. */
+export function callbackStubFor<Args extends unknown[], Result>(
+    target: (...args: Args) => Result): RpcStub<(...args: Args) => Result> {
+  return new RpcStub(target) as unknown as RpcStub<(...args: Args) => Result>;
 }
 
 // The server stores and compares these bytes verbatim and never re-derives them, so the tests skip

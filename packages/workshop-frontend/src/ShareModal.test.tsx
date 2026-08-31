@@ -8,6 +8,7 @@ import type { RpcStub } from 'capnweb'
 import type {
   AiChatAuthorInfo,
   AuthenticatedApi,
+  CollaboratorInfo,
   CollaboratorRole,
   GadgetMetadata,
   ObserverBindingNeed,
@@ -73,7 +74,7 @@ import ShareModal from './ShareModal'
 const METADATA = { id: 'trip-planner', title: 'Trip planner' } as GadgetMetadata
 const WORKSPACE_URL = `${window.location.origin}/workspace/trip-planner`
 
-const CURRENT_USER: AiChatAuthorInfo = { type: 'user', id: 'dan@cloudflare.com', name: 'Dan' }
+const CURRENT_USER: AiChatAuthorInfo = { type: 'user', id: 'user_internal_dan', name: 'Dan' }
 
 const DOC_REQUIREMENT: ObserverBindingNeed = {
   gatekeeperId: 7,
@@ -97,6 +98,7 @@ const SHARE_LINK: ShareLinkInfo = {
 }
 
 type OverseerOverrides = {
+  collaborators?: CollaboratorInfo[]
   requirements?: Partial<Record<CollaboratorRole, ObserverBindingNeed[]>>
   listObserverRequirements?: (role: CollaboratorRole) => Promise<ObserverBindingNeed[]>
   shareLinks?: ShareLinkInfo[]
@@ -106,13 +108,13 @@ type OverseerOverrides = {
 function fakeOverseer(overrides: OverseerOverrides = {}): RpcStub<Overseer> {
   const requirements = overrides.requirements ?? { use: [], build: [] }
   return {
-    listCollaborators: async () => [],
+    listCollaborators: async () => overrides.collaborators ?? [],
     listShareLinks: async () => overrides.shareLinks ?? [],
     listObserverRequirements:
       overrides.listObserverRequirements ??
       (async (role: CollaboratorRole) => requirements[role] ?? []),
     addCollaborator: async () => ({
-      profile: { type: 'user', id: 'ada@cloudflare.com', name: 'Ada' },
+      profile: { type: 'user', id: 'user_internal_ada', name: 'Ada' },
       role: 'use',
       addedBy: [],
     }),
@@ -149,11 +151,11 @@ function verificationSection(rendered: HTMLElement, headingId: string): HTMLElem
   return section
 }
 
-async function invite(rendered: HTMLElement, username: string) {
-  const input = rendered.querySelector<HTMLInputElement>('input[aria-label="Username or email"]')!
+async function invite(rendered: HTMLElement, verifiedEmail: string) {
+  const input = rendered.querySelector<HTMLInputElement>('input[aria-label="Verified email"]')!
   const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!
   await act(async () => {
-    setValue.call(input, username)
+    setValue.call(input, verifiedEmail)
     input.dispatchEvent(new Event('input', { bubbles: true }))
   })
   await click(button(rendered, 'Invite'))
@@ -194,6 +196,39 @@ describe('ShareModal', () => {
     await act(async () => { await Promise.resolve() })
     return container
   }
+
+  it('presents verified email as the only direct-invite discovery input', async () => {
+    const rendered = await render(fakeOverseer())
+
+    expect(rendered.querySelector('input[aria-label="Verified email"]')).not.toBeNull()
+    expect(rendered.textContent).not.toContain('Username')
+  })
+
+  it('does not present opaque stable IDs as email addresses', async () => {
+    const rendered = await render(fakeOverseer())
+
+    expect(rendered.textContent).toContain('Dan')
+    expect(rendered.textContent).not.toContain(CURRENT_USER.id)
+  })
+
+  it('does not render a direct sharer opaque stable ID', async () => {
+    const opaqueSharerId = 'user_internal_opaque_sharer'
+    const rendered = await render(fakeOverseer({
+      collaborators: [{
+        profile: { type: 'user', id: 'user_internal_ada', name: 'Ada' },
+        role: 'use',
+        addedBy: [{
+          type: 'user',
+          sharer: opaqueSharerId,
+          created: new Date('2026-08-01T00:00:00Z'),
+          role: 'use',
+        }],
+      }],
+    }))
+
+    expect(rendered.textContent).toContain('Added directly')
+    expect(rendered.textContent).not.toContain(opaqueSharerId)
+  })
 
   it('reveals the workspace link to send after a direct invite', async () => {
     const rendered = await render(fakeOverseer())

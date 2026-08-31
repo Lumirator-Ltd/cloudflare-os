@@ -12,14 +12,21 @@ connect the account's capabilities. There's no single switch — the pieces turn
 
 | Configure | Effect |
 | --- | --- |
-| `AUTH_GATEKEEPERS=cloudflare,google,github` | Allowlists which connected gatekeepers may be used to sign in. Each shows a "Continue with …" button alongside username/password. |
-| Each gatekeeper's OAuth credentials (on the gatekeeper Worker) | Required for that gatekeeper to actually authenticate. In dev, seeded from `GOOGLE_*` / `GITHUB_*` / `CLOUDFLARE_OAUTH_*` shell vars (see `run-dev-server.ts`). |
+| `AUTH_GATEKEEPERS=cloudflare,google,github` | Allowlists which bound, auth-capable gatekeeper vendors may be used for transient sign-in. Each shows a "Continue with …" button alongside username/password; sign-in neither requires nor creates a connected account. |
+| Each gatekeeper's OAuth credentials (on the gatekeeper Worker) | Required for that gatekeeper to actually authenticate. In dev, seeded from `GOOGLE_*` / `GITHUB_*` / `CLOUDFLARE_OAUTH_*` shell vars (see `scripts/run-dev-server.ts`). |
 | `ENABLE_CLOUDFLARE_LIMITS=true` | Enables the free daily limit + Cloudflare-credits top-up flow. Billing reads a token from the connected Cloudflare gatekeeper. |
 | `REQUIRE_USER_FUNDED_AI=true` | Disables platform-funded inference and requires a connected Cloudflare account with sufficient AI Gateway credits from the first request. Takes precedence over the free-tier flag. |
 | `DISABLE_PASSWORD_AUTH=true` | Hides username/password, leaving gatekeeper sign-in only (ignored unless `AUTH_GATEKEEPERS` is non-empty, to avoid lockout). |
 
-The primary account key is always the user's **verified email**: signing in with any allowlisted
-gatekeeper that yields the same verified email maps to the same account.
+For Gatekeeper, Clerk, and Cloudflare Access authentication, a **verified email is a convergence
+claim, not the durable account key**: the deployment-local Identity Registry maps it to an opaque
+stable internal ID. Access additionally keys its stable subject by the verified issuer and configured
+audience, so two Access deployments cannot collide by subject alone. A verified Access email change
+moves that subject's email mapping and version; a conflicting move locks the identity rather than
+merging accounts. Each Access API WebSocket and all capabilities minted from it expire at the JWT's
+absolute `exp`; extending authority requires reconnecting with a fresh Access assertion. The legacy
+built-in password path remains locally username-keyed until it is disabled or removed; neither
+usernames nor opaque IDs should be interpreted as provider identities.
 
 For local development, set the required variables in a root `.dev.vars` file (gitignored,
 `KEY=VALUE` per line); `pnpm run dev-server` loads it automatically. A minimal example:
@@ -82,3 +89,35 @@ with `PUBLIC_BASE_URL`):
 
 See [docs/oauth-signin.md](oauth-signin.md) and [docs/ai-gateway-billing.md](ai-gateway-billing.md)
 for the full list of options, free-tier and required-user-funding behavior, and storage bindings.
+
+## Telegram bot
+
+Create a bot by opening [BotFather](https://t.me/BotFather) and sending `/newbot`. Keep
+BotFather's default Privacy Mode enabled. The deployment admin supplies the managed service with
+only the resulting bot token; users never need that token.
+
+The managed deployment derives the bot ID and username with Telegram's `getMe`, generates a random
+webhook secret, stores the token and webhook secret as Worker secrets, and registers
+`${PUBLIC_BASE_URL}/api/telegram/webhook` for message updates. It then verifies Telegram's recorded
+webhook URL and delivery status before reporting success. The deployment primitive is
+`pnpm telegram:configure`. Its only customer-supplied secret is `TELEGRAM_BOT_TOKEN`;
+`PUBLIC_BASE_URL` and the absolute `TELEGRAM_WRANGLER_CONFIG` path come from the deployment
+context. The CLI generates the webhook secret, writes both Worker secrets through the repo-pinned
+Wrangler using stdin, then registers and verifies the webhook without printing either secret.
+Run `pnpm telegram:configure -- --uninstall` with the same deployment context to delete the webhook
+and remove both Worker secrets.
+
+After setup, each user opens **Profile > Connect**, selects Telegram, and presses **Start** to link
+their Telegram account. For a group conversation, add the bot to the group and address it by
+mentioning its username, replying to one of its messages, or starting a message with `/ask`.
+Privacy Mode should remain enabled so unrelated group messages are not delivered to the bot.
+Images can be sent to Gadgets from Telegram, but image transfer is incoming-only; bot responses in
+Telegram are text.
+
+To rotate credentials, first run the explicit uninstall flow with the current token so it can delete
+the existing Telegram webhook and both Worker secrets. Then revoke the old token with BotFather and
+run the install flow with the replacement token; deployment generates a new webhook secret and
+registers and verifies the replacement webhook. The installer fails closed if either Worker secret
+already exists, so rerunning it does not rotate credentials. To uninstall Telegram without replacing
+it, use the same managed deployment removal flow before revoking the bot token with BotFather. Do not
+place tokens, webhook secrets, or tenant-specific setup output in repository files.
