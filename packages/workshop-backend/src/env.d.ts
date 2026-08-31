@@ -91,6 +91,10 @@ declare global {
       // Public base URL of the deployment.
       PUBLIC_BASE_URL?: string;
 
+      // Optional Telegram transport secrets. Telegram is enabled only when both are present.
+      TELEGRAM_BOT_TOKEN?: string;
+      TELEGRAM_WEBHOOK_SECRET?: string;
+
       // Daily free-tier LLM-call limit (per user). Defaults to DEFAULT_DAILY_LLM_CALL_LIMIT.
       DAILY_LLM_CALL_LIMIT?: string;
 

@@ -355,11 +355,11 @@ export type TelegramLinkStatus = {
   connected: boolean;
 };
 
-/** One short-lived token used by the Telegram bot to complete account linking. */
+/** One short-lived official Telegram deep link for completing account linking. */
 export type TelegramLinkStart = {
-  /** Unpadded base64url token that must be kept secret until completion. */
-  token: string;
-  /** Absolute time after which the token cannot complete a link. */
+  /** Official t.me URL containing the single-use link token. */
+  url: string;
+  /** Absolute time after which the URL cannot complete a link. */
   expiresAt: Date;
 };
 
@@ -960,6 +960,9 @@ export type ServerConfig = {
   // Whether new account signups are allowed (admin-configurable, default true). The signup page
   // hides the create-account form when false.
   signupsEnabled: boolean;
+
+  /** Whether the backend has both Telegram transport secrets configured. */
+  telegramEnabled: boolean;
 
   // Site name shown next to the top-bar logo (admin-configurable). Empty falls back to
   // DEFAULT_SITE_NAME.

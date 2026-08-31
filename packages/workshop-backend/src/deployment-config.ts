@@ -51,6 +51,7 @@ export async function getServerConfig(env: Cloudflare.Env): Promise<ServerConfig
     passwordAuthEnabled: isPasswordAuthEnabled(env),
     cloudflareLimitsEnabled: isCloudflareBillingEnabled(env),
     signupsEnabled: config.signupsEnabled,
+    telegramEnabled: Boolean(env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_WEBHOOK_SECRET),
     siteName: config.siteName,
     siteLogo: siteLogoImage(config.siteLogoConfigured),
     announcement: config.announcement,

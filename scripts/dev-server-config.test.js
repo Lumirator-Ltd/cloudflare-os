@@ -61,6 +61,20 @@ describe("getBackendDevVars", () => {
     });
   });
 
+  it("passes Telegram transport configuration into generated backend dev config", () => {
+    assert.deepEqual(getBackendDevVars({}, {
+      TELEGRAM_BOT_TOKEN: "bot-token",
+      TELEGRAM_WEBHOOK_SECRET: "webhook-secret",
+      PUBLIC_BASE_URL: "https://workshop.example",
+    }), {
+      ADMINS: ["admin"],
+      DEV: true,
+      TELEGRAM_BOT_TOKEN: "bot-token",
+      TELEGRAM_WEBHOOK_SECRET: "webhook-secret",
+      PUBLIC_BASE_URL: "https://workshop.example",
+    });
+  });
+
   it("preserves an existing admin array and falls back only when unset", () => {
     assert.deepEqual(getBackendDevVars({ ADMINS: ["existing@example.com"] }, {}).ADMINS,
         ["existing@example.com"]);

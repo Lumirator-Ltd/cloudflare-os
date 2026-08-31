@@ -1105,6 +1105,12 @@
             "IdentityRegistry"
           ],
           "tag": "v3"
+        },
+        {
+          "new_sqlite_classes": [
+            "TelegramChannel"
+          ],
+          "tag": "v4"
         }
       ],
       "modules": [

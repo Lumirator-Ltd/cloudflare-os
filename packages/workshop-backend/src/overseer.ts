@@ -40,7 +40,7 @@ import { AutoApprovalDrainer } from "./auto-approval";
 import { collectSlashCommands, invokeSlashCommand } from "./slash-commands";
 import { createWorkshopLogger, obsContext, traced } from "./observability";
 import { wrapDoStubForTelemetry } from "./do-telemetry";
-import type { ChatGatewayRpcTarget, SubmitExternalMessageResult } from "@gadgets/workshop-shared/external-message-gateway";
+import type { ChatGatewayCallback, SubmitExternalMessageResult } from "@gadgets/workshop-shared/external-message-gateway";
 import {
   assertChatAttachmentSupportedByProvider,
   isAllowedChatAttachmentImageMimeType,
@@ -521,11 +521,11 @@ type ExternalMessageRecord = {
 } & (
   | {
       status: "waiting";
-      chatGatewayRpcTarget: NativeRpcStub<ChatGatewayRpcTarget>;
+      chatGatewayRpcTarget: ChatGatewayCallback;
     }
   | {
       status: "ready";
-      chatGatewayRpcTarget: NativeRpcStub<ChatGatewayRpcTarget>;
+      chatGatewayRpcTarget: ChatGatewayCallback;
       responseText: string;
     }
   | {
@@ -536,7 +536,7 @@ type ExternalMessageRecord = {
 
 type ExternalMessageResponseTargetRegistration = {
   idempotencyKey: string;
-  chatGatewayRpcTarget: NativeRpcStub<ChatGatewayRpcTarget>;
+  chatGatewayRpcTarget: ChatGatewayCallback;
 };
 
 type ExternalMessageResponseTargetRegistrationDecision =
@@ -548,12 +548,20 @@ type ExternalMessageResponseTargetRegistrationDecision =
       record: ExternalMessageRecord;
     };
 
+function retainChatGatewayCallback(callback: ChatGatewayCallback): ChatGatewayCallback {
+  return "dup" in callback ? callback.dup() : callback;
+}
+
+function releaseChatGatewayCallback(callback: ChatGatewayCallback): void {
+  if (Symbol.dispose in callback) callback[Symbol.dispose]();
+}
+
 type ExternalMessageSubmitInput = {
   externalChatKey: string;
   idempotencyKey: string;
   prompt: string;
   attachments?: ChatAttachmentUpload[];
-  chatGatewayRpcTarget: NativeRpcStub<ChatGatewayRpcTarget>;
+  chatGatewayRpcTarget: ChatGatewayCallback;
   title: string;
 } & (
   | { identityMode: "trustedEmail"; callerEmail: string }
@@ -1242,7 +1250,7 @@ class OverseerImpl implements AgentHooks {
   #deleteExternalMessageResponseDeliveryRecord(record: ExternalMessageRecord): void {
     this.storage.gadgetResponseDeliveries.delete(record.idempotencyKey);
     if (record.status !== "delivered") {
-      record.chatGatewayRpcTarget[Symbol.dispose]();
+      releaseChatGatewayCallback(record.chatGatewayRpcTarget);
     }
   }
 
@@ -3603,12 +3611,12 @@ class OverseerImpl implements AgentHooks {
     idempotencyKey: string,
     chatId: number,
     promptSequence: number,
-    chatGatewayRpcTarget: NativeRpcStub<ChatGatewayRpcTarget>,
+    chatGatewayRpcTarget: ChatGatewayCallback,
   ): void {
     if (this.storage.gadgetResponseDeliveries.undeliveredByChatId.get(chatId)) {
       throw new Error("This chat already has an undelivered workspace response target.");
     }
-    chatGatewayRpcTarget = chatGatewayRpcTarget.dup();
+    chatGatewayRpcTarget = retainChatGatewayCallback(chatGatewayRpcTarget);
     try {
       this.storage.gadgetResponseDeliveries.put({
         idempotencyKey,
@@ -3619,7 +3627,7 @@ class OverseerImpl implements AgentHooks {
         status: "waiting",
       });
     } catch (err) {
-      chatGatewayRpcTarget[Symbol.dispose]();
+      releaseChatGatewayCallback(chatGatewayRpcTarget);
       throw err;
     }
   }
@@ -3709,7 +3717,7 @@ class OverseerImpl implements AgentHooks {
       createdAt: record.createdAt,
       deliveredAt: Date.now(),
     });
-    record.chatGatewayRpcTarget[Symbol.dispose]();
+    releaseChatGatewayCallback(record.chatGatewayRpcTarget);
   }
 
   async deliverReadyExternalMessageResponses(): Promise<void> {

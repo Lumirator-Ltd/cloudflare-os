@@ -36,6 +36,8 @@ import {
 } from "./user";
 import { OverseerDurableObject, GatekeeperLoopback, CodeModeTailLoopback, AgentSpawnerGatekeeper, GatekeeperHookLoopback, GadgetTailLoopback, AgentSelfLoopback, TransientStubLoopback } from "./overseer";
 import { ExternalMessageGateway } from "./external-message-gateway";
+import { TelegramChannel, TelegramResponseTarget } from "./telegram/channel.js";
+import { handleTelegramWebhook } from "./telegram/webhook.js";
 import { RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { recordAnalytics } from "./analytics";
 import { handleClientErrorRequest } from "./client-errors.js";
@@ -99,8 +101,8 @@ export { OverseerDurableObject, GatekeeperLoopback, GatekeeperHookLoopback,
     CodeModeTailLoopback, AgentSpawnerGatekeeper, GadgetTailLoopback,
     AgentSelfLoopback, TransientStubLoopback };
 
-// Re-export service-binding entrypoint for external channel integrations.
-export { ExternalMessageGateway };
+// Re-export service-binding entrypoints and Durable Objects for external channel integrations.
+export { ExternalMessageGateway, TelegramChannel, TelegramResponseTarget };
 
 // Declare optional environment variables here since they may be omitted from wrangler.jsonc.
 type Env = Cloudflare.Env & {
@@ -240,11 +242,16 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
 
   async startTelegramLink(): Promise<TelegramLinkStart> {
     const { internalUserId, authority } = await this.#requireCurrentRegistryAuthority();
-    return await this.ctx.exports.IdentityRegistry.getByName("").startExternalLink(
+    const bot = await this.ctx.exports.TelegramChannel.getByName("").getBotIdentity();
+    const link = await this.ctx.exports.IdentityRegistry.getByName("").startExternalLink(
       internalUserId,
       authority.identityVersion,
       TELEGRAM_EXTERNAL_SOURCE,
     );
+    return {
+      url: `https://t.me/${bot.username}?start=${encodeURIComponent(link.token)}`,
+      expiresAt: link.expiresAt,
+    };
   }
 
   async unlinkTelegram(): Promise<void> {
@@ -1339,6 +1346,10 @@ export default {
     // OAuth redirect lands on `/gatekeeper/<name>/oauth`); the result is bridged back to the waiting
     // browser via the `attempt` stub from PublicApi.startGatekeeperLogin(). So the backend no longer
     // hosts /auth/* callbacks.
+
+    if (url.pathname === "/api/telegram/webhook") {
+      return handleTelegramWebhook(req, env, ctx.exports.TelegramChannel.getByName(""));
+    }
 
     if (url.pathname === "/api/client-errors") {
       return handleClientErrorRequest(req, env, ctx);

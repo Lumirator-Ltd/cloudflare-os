@@ -1,4 +1,4 @@
-import type { RpcStub, RpcTarget } from "cloudflare:workers";
+import type { RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
 import type { ChatAttachmentUpload } from "./api";
 
 /** A completed Gadget response that should be delivered back to the chat gateway. */
@@ -18,6 +18,17 @@ export interface ChatGatewayRpcTarget extends RpcTarget {
   onGadgetResponse(response: GadgetResponse): Promise<void>;
 }
 
+/** Restart-safe Worker entrypoint provided for an eventual external-message response. */
+export interface ChatGatewayEntrypoint extends WorkerEntrypoint {
+  /** Durably accepts an at-least-once completed Gadget response. */
+  onGadgetResponse(response: GadgetResponse): Promise<void>;
+}
+
+/** Persistent callback capability accepted from either legacy targets or Worker entrypoints. */
+export type ChatGatewayCallback =
+  | RpcStub<ChatGatewayRpcTarget>
+  | Fetcher<ChatGatewayEntrypoint>;
+
 /** Bytes and metadata for an attachment submitted through an external message gateway. */
 export type ExternalMessageAttachment = ChatAttachmentUpload;
 
@@ -35,7 +46,7 @@ type SubmitExternalMessageBase = {
   /** Files submitted with the external message. */
   attachments?: ExternalMessageAttachment[];
   /** Persistent target invoked when the Gadget response is ready. */
-  chatGatewayRpcTarget: RpcStub<ChatGatewayRpcTarget>;
+  chatGatewayRpcTarget: ChatGatewayCallback;
 };
 
 /** External message submission accepted by the backend gateway. */

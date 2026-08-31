@@ -32,6 +32,7 @@ type TelegramApiHarness = {
     startExternalLink: ReturnType<typeof vi.fn>;
     unlinkExternalIdentity: ReturnType<typeof vi.fn>;
   };
+  getBotIdentity: ReturnType<typeof vi.fn>;
   setIdentity(identity: IdentityState | null): void;
 };
 
@@ -65,6 +66,7 @@ async function makeTelegramApi(legacy = false): Promise<TelegramApiHarness> {
     }),
     unlinkExternalIdentity: vi.fn().mockResolvedValue(undefined),
   };
+  const getBotIdentity = vi.fn().mockResolvedValue({ id: 42, username: "verified_bot" });
   const abortController = new AbortController();
   const ctx = {
     exports: {
@@ -73,6 +75,7 @@ async function makeTelegramApi(legacy = false): Promise<TelegramApiHarness> {
         get: vi.fn(() => user),
       },
       IdentityRegistry: { getByName: vi.fn(() => registry) },
+      TelegramChannel: { getByName: vi.fn(() => ({ getBotIdentity })) },
       OverseerDurableObject: {},
       AdminSettings: { getByName: vi.fn(() => ({})) },
     },
@@ -90,6 +93,7 @@ async function makeTelegramApi(legacy = false): Promise<TelegramApiHarness> {
     publicApi,
     api,
     registry,
+    getBotIdentity,
     setIdentity(next) { identity = next; },
   };
 }
@@ -100,7 +104,7 @@ describe("Telegram link authority", () => {
     try {
       await expect(harness.api.getTelegramLinkStatus()).resolves.toEqual({ connected: true });
       await expect(harness.api.startTelegramLink()).resolves.toEqual({
-        token: "telegram-link-token",
+        url: "https://t.me/verified_bot?start=telegram-link-token",
         expiresAt: new Date("2026-04-01T12:10:00Z"),
       });
       await expect(harness.api.unlinkTelegram()).resolves.toBeUndefined();
@@ -110,6 +114,7 @@ describe("Telegram link authority", () => {
         authority.identityVersion,
         "telegram",
       );
+      expect(harness.getBotIdentity).toHaveBeenCalledOnce();
       expect(harness.registry.startExternalLink).toHaveBeenCalledExactlyOnceWith(
         internalUserId,
         authority.identityVersion,
@@ -120,6 +125,17 @@ describe("Telegram link authority", () => {
         authority.identityVersion,
         "telegram",
       );
+    } finally {
+      harness.publicApi[Symbol.dispose]();
+    }
+  });
+
+  it("does not mint a link token when verified bot discovery fails", async () => {
+    const harness = await makeTelegramApi();
+    harness.getBotIdentity.mockRejectedValueOnce(new Error("Telegram unavailable"));
+    try {
+      await expect(harness.api.startTelegramLink()).rejects.toThrow("Telegram unavailable");
+      expect(harness.registry.startExternalLink).not.toHaveBeenCalled();
     } finally {
       harness.publicApi[Symbol.dispose]();
     }
