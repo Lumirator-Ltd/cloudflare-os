@@ -5,6 +5,7 @@ import type {
 } from "@gadgets/workshop-shared/gatekeeper";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { XAccountSessionImpl, type XReadOperation } from "../src/x";
+import type { XWriteOperation } from "../src/x-actions";
 import type { XPostPage, XUserPage } from "../src/x-api-client";
 
 const USER = { id: "2244994945", name: "X Developer", username: "XDevelopers" };
@@ -18,6 +19,14 @@ type Authorize = ReturnType<
 
 type Account = {
   performRead(operation: XReadOperation): Promise<unknown>;
+};
+
+type ActionHost = {
+  queueAction(
+    queue: RpcStub<ApprovalQueue>,
+    operation: XWriteOperation,
+    description: Parameters<ApprovalQueue["submitAction"]>[1],
+  ): Promise<void>;
 };
 
 function deferred<T>() {
@@ -54,11 +63,21 @@ function subject(options: {
     submitAction: vi.fn(),
     [Symbol.dispose]: dispose,
   } as unknown as RpcStub<ApprovalQueue>;
+  const queued: Array<{
+    operation: XWriteOperation;
+    description: Parameters<ApprovalQueue["submitAction"]>[1];
+  }> = [];
+  const queueAction = vi.fn(async (
+    _queue: RpcStub<ApprovalQueue>,
+    operation: XWriteOperation,
+    description: Parameters<ApprovalQueue["submitAction"]>[1],
+  ) => { queued.push({ operation, description }); });
   const value = new XAccountSessionImpl(
     { performRead } as unknown as Account,
     queue,
+    { queueAction } as ActionHost,
   );
-  return { authorize, dispose, operations, performRead, value };
+  return { authorize, dispose, operations, performRead, queueAction, queued, value };
 }
 
 afterEach(() => {
@@ -166,5 +185,62 @@ describe("X account observations", () => {
     session.value[Symbol.dispose]();
 
     expect(session.dispose).toHaveBeenCalledOnce();
+  });
+});
+
+describe("X account mutations", () => {
+  it.each([
+    ["createPost", ["Announcement"], { type: "createPost", text: "Announcement" }, "Create X post"],
+    ["reply", ["Reply", POST.id], { type: "reply", text: "Reply", postId: POST.id }, `Reply to X post ${POST.id}`],
+    ["deletePost", [POST.id], { type: "deletePost", postId: POST.id }, `Delete X post ${POST.id}`],
+    ["like", [POST.id], { type: "like", postId: POST.id }, `Like X post ${POST.id}`],
+    ["unlike", [POST.id], { type: "unlike", postId: POST.id }, `Unlike X post ${POST.id}`],
+    ["bookmark", [POST.id], { type: "bookmark", postId: POST.id }, `Bookmark X post ${POST.id}`],
+    ["removeBookmark", [POST.id], { type: "removeBookmark", postId: POST.id }, `Remove X bookmark ${POST.id}`],
+    ["follow", [USER.id], { type: "follow", userId: USER.id }, `Follow X user ${USER.id}`],
+    ["unfollow", [USER.id], { type: "unfollow", userId: USER.id }, `Unfollow X user ${USER.id}`],
+  ])("queues %s without applying it", async (method, args, operation, title) => {
+    const session = subject();
+
+    await (session.value[method as keyof XAccountSessionImpl] as (
+      ...values: string[]
+    ) => Promise<void>)(...args);
+
+    expect(session.queueAction).toHaveBeenCalledOnce();
+    expect(session.queued).toEqual([{
+      operation,
+      description: expect.objectContaining({
+        title,
+        implementsRevert: false,
+        awaitDecision: true,
+      }),
+    }]);
+    expect(session.queued[0].description).not.toHaveProperty("autoApprovable");
+    expect(session.queued[0].description).not.toHaveProperty("actionKind");
+    expect(session.performRead).not.toHaveBeenCalled();
+  });
+
+  it("includes the complete post text as inert approval content", async () => {
+    const session = subject();
+    const text = "First line\n# forged heading\n```forged fence```";
+
+    await session.value.createPost(text);
+
+    const description = session.queued[0].description.description;
+    expect(description).toContain("    First line");
+    expect(description).toContain("    # forged heading");
+    expect(description).toContain("    ```forged fence```");
+    expect(description).not.toMatch(/^# forged heading/m);
+    expect(description).not.toMatch(/^```forged fence/m);
+  });
+
+  it.each([
+    [() => subject().value.createPost(""), "text"],
+    [() => subject().value.createPost("x".repeat(4001)), "text"],
+    [() => subject().value.reply("reply", "https://evil.test"), "id"],
+    [() => subject().value.deletePost("1/../2"), "id"],
+    [() => subject().value.follow("../../1"), "id"],
+  ])("rejects invalid mutation input before queueing", async (operation, message) => {
+    await expect(operation()).rejects.toThrow(new RegExp(message, "i"));
   });
 });

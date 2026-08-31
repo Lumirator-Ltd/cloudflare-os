@@ -10,6 +10,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { X_OAUTH_SCOPES } from "../src/x-api";
 import { isConnectedAccountUrl } from "../src/x";
+import type { XWriteOperation, XWriteResult } from "../src/x-actions";
 
 const BASE_URL = "https://workshop.example/gatekeeper/x";
 const CLIENT_ID = "x-client-id";
@@ -41,6 +42,7 @@ type Callback = Fetcher & {
 
 type UserAccountRpc = {
   performRead(operation: { type: "getMe" }): Promise<unknown>;
+  performWrite(operation: XWriteOperation, generation: number): Promise<XWriteResult>;
   getCredentialGeneration(): Promise<number>;
 };
 
@@ -418,5 +420,79 @@ describe("X connected account OAuth", () => {
     expect(fetchMock).not.toHaveBeenCalled();
     expect(await runInDurableObject(account(initial.doId), (_instance, state) => state.storage.list()))
       .toEqual(new Map());
+  });
+});
+
+describe("X user-funded write dispatch", () => {
+  it("dispatches once with the connected generation and reports applied", async () => {
+    const initial = await completeFlow();
+    const generation = await account(initial.doId).getCredentialGeneration();
+    const calls: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ input, init });
+      return Response.json({
+        data: {
+          id: "1346889436626259968",
+          text: "Announcement",
+          author_id: USER.id,
+        },
+      });
+    }) as typeof fetch);
+
+    await expect(account(initial.doId).performWrite(
+      { type: "createPost", text: "Announcement" },
+      generation,
+    )).resolves.toEqual({ status: "applied" });
+
+    expect(calls).toHaveLength(1);
+    expect(String(calls[0].input)).toBe("https://api.x.com/2/tweets");
+    expect(calls[0].init?.method).toBe("POST");
+  });
+
+  it("rejects a stale credential generation before any X request", async () => {
+    const initial = await completeFlow();
+    const generation = await account(initial.doId).getCredentialGeneration();
+    const fetchMock = vi.fn(async () => { throw new Error("must not fetch"); }) as typeof fetch;
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(account(initial.doId).performWrite(
+      { type: "like", postId: "1346889436626259968" },
+      generation + 1,
+    )).resolves.toEqual({ status: "stale" });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [400, { title: "Invalid Request" }, "failed"],
+    [401, { title: "Unauthorized" }, "failed"],
+    [500, { title: "Provider unavailable" }, "outcome-unknown"],
+    [200, { data: {} }, "outcome-unknown"],
+  ])("classifies dispatched HTTP %s as %s without retry", async (status, body, expected) => {
+    const initial = await completeFlow();
+    const generation = await account(initial.doId).getCredentialGeneration();
+    const fetchMock = vi.fn(async () => Response.json(body, { status })) as typeof fetch;
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(account(initial.doId).performWrite(
+      { type: "like", postId: "1346889436626259968" },
+      generation,
+    )).resolves.toMatchObject({ status: expected });
+    expect(fetchMock).toHaveBeenCalledOnce();
+    if (status === 401) {
+      expect(await callback.read()).toMatchObject({ expiredCount: 1 });
+    }
+  });
+
+  it("treats a transport interruption after dispatch as outcome unknown", async () => {
+    const initial = await completeFlow();
+    const generation = await account(initial.doId).getCredentialGeneration();
+    const fetchMock = vi.fn(async () => { throw new Error("connection reset"); }) as typeof fetch;
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(account(initial.doId).performWrite(
+      { type: "follow", userId: "6253282" },
+      generation,
+    )).resolves.toMatchObject({ status: "outcome-unknown" });
+    expect(fetchMock).toHaveBeenCalledOnce();
   });
 });

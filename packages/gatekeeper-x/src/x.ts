@@ -2,6 +2,7 @@ import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:
 import { validateRpc } from "capnweb-validate";
 import type {
   AccountDescription,
+  ActionDescription,
   ActionKind,
   ApprovalQueue,
   Gatekeeper,
@@ -33,6 +34,12 @@ import {
   type XUserPage,
 } from "./x-api-client";
 import type { XAccountSession } from "./types";
+import {
+  XActionStore,
+  queueXAction,
+  type XWriteOperation,
+  type XWriteResult,
+} from "./x-actions";
 import {
   buildXConnectUrl,
   parseXCredentialForm,
@@ -539,6 +546,56 @@ export class UserAccount extends DurableObject<Env> {
     });
   }
 
+  async performWrite(
+    operation: XWriteOperation,
+    expectedGeneration: number,
+  ): Promise<XWriteResult> {
+    const before = this.ctx.storage.kv.get<StoredCredentials>("credentials");
+    if (!before || before.generation !== expectedGeneration) return { status: "stale" };
+
+    let accessToken: string;
+    try {
+      accessToken = await this.#getAccessToken();
+    } catch {
+      return {
+        status: "failed",
+        message: "X credentials are unavailable. Reconnect the account before trying again.",
+      };
+    }
+    const credentials = this.ctx.storage.kv.get<StoredCredentials>("credentials");
+    if (!credentials || credentials.generation !== expectedGeneration) return { status: "stale" };
+    const api = new XApi({ accessToken, userId: credentials.user.id });
+
+    try {
+      switch (operation.type) {
+        case "createPost": await api.createPost(operation.text); break;
+        case "reply": await api.reply(operation.text, operation.postId); break;
+        case "deletePost": await api.deletePost(operation.postId); break;
+        case "like": await api.like(operation.postId); break;
+        case "unlike": await api.unlike(operation.postId); break;
+        case "bookmark": await api.bookmark(operation.postId); break;
+        case "removeBookmark": await api.removeBookmark(operation.postId); break;
+        case "follow": await api.follow(operation.userId); break;
+        case "unfollow": await api.unfollow(operation.userId); break;
+      }
+      return { status: "applied" };
+    } catch (error) {
+      if (error instanceof XApiError && error.kind === "credentials-expired") {
+        await this.#noteCredentialsExpired();
+      }
+      if (error instanceof XApiError && error.status >= 400 && error.status < 500) {
+        return {
+          status: "failed",
+          message: "X rejected the approved action. Review the account, permissions, and credits before trying a new action.",
+        };
+      }
+      return {
+        status: "outcome-unknown",
+        message: "X may have applied the approved action, but Cloudflare OS could not confirm the result. Check X before taking another action.",
+      };
+    }
+  }
+
   async performRead(operation: XReadOperation): Promise<unknown> {
     const accessToken = await this.#getAccessToken();
     const credentials = this.ctx.storage.kv.get<StoredCredentials>("credentials");
@@ -689,6 +746,36 @@ type XReadAccount = {
   performRead(operation: XReadOperation): Promise<unknown>;
 };
 
+type XActionHost = {
+  queueAction(
+    queue: RpcStub<ApprovalQueue>,
+    operation: XWriteOperation,
+    description: ActionDescription,
+  ): Promise<void>;
+};
+
+const X_ACTION_TEXT_LIMIT = 4000;
+const X_ACTION_ID_PATTERN = /^[0-9]{1,19}$/;
+
+function xActionId(value: string): string {
+  if (!X_ACTION_ID_PATTERN.test(value)) throw new TypeError("id must be a numeric X id.");
+  return value;
+}
+
+function xActionText(value: string): string {
+  if (!value || value.length > X_ACTION_TEXT_LIMIT || [...value].some(character => {
+    const code = character.charCodeAt(0);
+    return code === 0 || (code < 32 && character !== "\n" && character !== "\t");
+  })) {
+    throw new TypeError(`text must contain 1 to ${X_ACTION_TEXT_LIMIT} safe characters.`);
+  }
+  return value;
+}
+
+function inertText(value: string): string {
+  return value.split("\n").map(line => `    ${line}`).join("\n");
+}
+
 function countedTitle(count: number, singular: string, plural: string): string {
   return `Read ${count} ${count === 1 ? singular : plural}`;
 }
@@ -698,6 +785,7 @@ export class XAccountSessionImpl extends RpcTarget implements XAccountSession {
   constructor(
     private readonly account: XReadAccount,
     private readonly approvalQueue: RpcStub<ApprovalQueue>,
+    private readonly actionHost?: XActionHost,
   ) {
     super();
   }
@@ -782,46 +870,108 @@ export class XAccountSessionImpl extends RpcTarget implements XAccountSession {
     }));
   }
 
-  async createPost(_text: string): Promise<void> {
-    throw new Error("X mutations are not available yet.");
+  async #queue(operation: XWriteOperation, description: ActionDescription): Promise<void> {
+    if (!this.actionHost) throw new Error("X action host is unavailable.");
+    await this.actionHost.queueAction(this.approvalQueue, operation, description);
   }
 
-  async reply(_text: string, _postId: string): Promise<void> {
-    throw new Error("X mutations are not available yet.");
+  async createPost(text: string): Promise<void> {
+    const normalized = xActionText(text);
+    await this.#queue({ type: "createPost", text: normalized }, {
+      title: "Create X post",
+      description: `Create this text-only X post using the connected account:\n\n${inertText(normalized)}`,
+      implementsRevert: false,
+      awaitDecision: true,
+    });
   }
 
-  async deletePost(_postId: string): Promise<void> {
-    throw new Error("X mutations are not available yet.");
+  async reply(text: string, postId: string): Promise<void> {
+    const normalized = xActionText(text);
+    const target = xActionId(postId);
+    await this.#queue({ type: "reply", text: normalized, postId: target }, {
+      title: `Reply to X post ${target}`,
+      description: `Reply to X post ${target} with this text:\n\n${inertText(normalized)}`,
+      implementsRevert: false,
+      awaitDecision: true,
+    });
   }
 
-  async like(_postId: string): Promise<void> {
-    throw new Error("X mutations are not available yet.");
+  async deletePost(postId: string): Promise<void> {
+    const target = xActionId(postId);
+    await this.#queue({ type: "deletePost", postId: target }, {
+      title: `Delete X post ${target}`,
+      description: `Permanently delete X post ${target} from the connected account.`,
+      implementsRevert: false,
+      awaitDecision: true,
+    });
   }
 
-  async unlike(_postId: string): Promise<void> {
-    throw new Error("X mutations are not available yet.");
+  async like(postId: string): Promise<void> {
+    const target = xActionId(postId);
+    await this.#queue({ type: "like", postId: target }, {
+      title: `Like X post ${target}`,
+      description: `Like X post ${target} using the connected account.`,
+      implementsRevert: false,
+      awaitDecision: true,
+    });
   }
 
-  async bookmark(_postId: string): Promise<void> {
-    throw new Error("X mutations are not available yet.");
+  async unlike(postId: string): Promise<void> {
+    const target = xActionId(postId);
+    await this.#queue({ type: "unlike", postId: target }, {
+      title: `Unlike X post ${target}`,
+      description: `Remove the connected account's like from X post ${target}.`,
+      implementsRevert: false,
+      awaitDecision: true,
+    });
   }
 
-  async removeBookmark(_postId: string): Promise<void> {
-    throw new Error("X mutations are not available yet.");
+  async bookmark(postId: string): Promise<void> {
+    const target = xActionId(postId);
+    await this.#queue({ type: "bookmark", postId: target }, {
+      title: `Bookmark X post ${target}`,
+      description: `Add X post ${target} to the connected account's bookmarks.`,
+      implementsRevert: false,
+      awaitDecision: true,
+    });
   }
 
-  async follow(_userId: string): Promise<void> {
-    throw new Error("X mutations are not available yet.");
+  async removeBookmark(postId: string): Promise<void> {
+    const target = xActionId(postId);
+    await this.#queue({ type: "removeBookmark", postId: target }, {
+      title: `Remove X bookmark ${target}`,
+      description: `Remove X post ${target} from the connected account's bookmarks.`,
+      implementsRevert: false,
+      awaitDecision: true,
+    });
   }
 
-  async unfollow(_userId: string): Promise<void> {
-    throw new Error("X mutations are not available yet.");
+  async follow(userId: string): Promise<void> {
+    const target = xActionId(userId);
+    await this.#queue({ type: "follow", userId: target }, {
+      title: `Follow X user ${target}`,
+      description: `Follow X user ${target} using the connected account.`,
+      implementsRevert: false,
+      awaitDecision: true,
+    });
+  }
+
+  async unfollow(userId: string): Promise<void> {
+    const target = xActionId(userId);
+    await this.#queue({ type: "unfollow", userId: target }, {
+      title: `Unfollow X user ${target}`,
+      description: `Unfollow X user ${target} using the connected account.`,
+      implementsRevert: false,
+      awaitDecision: true,
+    });
   }
 }
 
 @validateRpc()
 export class XAccountGatekeeperImpl extends DurableObject<Env, XGatekeeperProps>
   implements Gatekeeper<XAccountSession> {
+  readonly #actions = new XActionStore(this.ctx.storage.kv);
+
   #account(): DurableObjectStub<UserAccount> {
     return this.ctx.exports.UserAccount.get(
       this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId),
@@ -848,7 +998,15 @@ export class XAccountGatekeeperImpl extends DurableObject<Env, XGatekeeperProps>
   }
 
   async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<XAccountSession> {
-    return new XAccountSessionImpl(this.#account(), approvalQueue.dup());
+    return new XAccountSessionImpl(
+      this.#account(),
+      approvalQueue.dup(),
+      {
+        queueAction: async (queue, operation, description) => {
+          await queueXAction(this.#actions, this.#account(), queue, operation, description);
+        },
+      },
+    );
   }
 
   async addObserver(_id: string, _user: Fetcher<GatekeeperUserVerifier>): Promise<void> {
@@ -857,12 +1015,14 @@ export class XAccountGatekeeperImpl extends DurableObject<Env, XGatekeeperProps>
 
   async removeObserver(_id: string): Promise<void> {}
 
-  async applyAction(_action: number): Promise<void> {
-    throw new Error("Unknown X action.");
+  async applyAction(action: number): Promise<void> {
+    const account = this.#account();
+    await this.#actions.apply(action, async ({ operation, generation }) =>
+      await account.performWrite(operation, generation));
   }
 
-  async rejectAction(_action: number): Promise<void> {
-    throw new Error("Unknown X action.");
+  async rejectAction(action: number): Promise<void> {
+    this.#actions.reject(action);
   }
 
   async revertAction(_action: number): Promise<void> {
