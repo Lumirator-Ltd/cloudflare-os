@@ -1717,7 +1717,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   async getGatekeeperClassFor(accountId: number, url: string)
       : Promise<{class: DurableObjectClass<Gatekeeper<any>>, vendorId: string,
-                  typeUrlPattern: string}> {
+                  typeUrlPattern: string, workspaceAccess?: SupportedResource["workspaceAccess"]}> {
     let account = this.storage.connectedAccounts.get(accountId);
     if (!account) throw new Error("No such account.");
     let {class: cls, resource} = await account.account.getGatekeeperClassFor(url);
@@ -1743,7 +1743,12 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
           `The "${resource.title}" resource is disabled on this deployment by an administrator.`);
     }
 
-    return {class: cls, vendorId: account.vendorId, typeUrlPattern: resource.urlPattern};
+    return {
+      class: cls,
+      vendorId: account.vendorId,
+      typeUrlPattern: resource.urlPattern,
+      workspaceAccess: resource.workspaceAccess,
+    };
   }
 
   /**

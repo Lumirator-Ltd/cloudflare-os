@@ -108,7 +108,8 @@ Assert that while any owner-only record or creation transition exists:
 - `addCollaborator()` fails;
 - `createShareLink()` and `newShareLinkKey()` fail;
 - share-key redemption and non-owner `open()` fail;
-- removing the final owner-only gatekeeper re-enables sharing;
+- successful creation durably marks the workspace owner-only;
+- removing the final owner-only gatekeeper does not re-enable sharing because history may retain data and drafts;
 - owner actions and `getWebFetchEnv()` remain available.
 
 Run:
@@ -140,7 +141,7 @@ Before approve/reject/apply and auto-approval paths, load the action's gatekeepe
 
 - [ ] **Step 9: Write failing English/Japanese owner-only UI tests**
 
-When the selected resource has `workspaceAccess: "owner-only"`, the modal must replace shared-user verification copy with localized text explaining that the workspace cannot be shared until the connection is removed.
+When the selected resource has `workspaceAccess: "owner-only"`, the modal must replace shared-user verification copy with localized text warning that adding it permanently makes the workspace private, even after removing the connection.
 
 - [ ] **Step 10: Implement localized UI and catalog parity**
 

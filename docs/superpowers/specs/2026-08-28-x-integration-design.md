@@ -9,7 +9,7 @@ Cloudflare OS will add an installable `gatekeeper-x` Worker that gives a Gadget 
 
 The first release supports account and profile reads, post lookup and timelines, mentions, recent search, likes, bookmarks, followers, and following. It queues create/reply/delete post, like/unlike, bookmark/unbookmark, and follow/unfollow operations for manual approval. It excludes Direct Messages, media, reposts, Lists, streams, webhooks, and resource-level grants.
 
-Because an X account is a high-authority, billable resource, X bindings are owner-only. They can only be added by the workspace owner to a workspace with no active shares. The workspace cannot be shared while an X binding exists. X actions cannot be auto-approved and only the workspace owner can approve or reject them.
+Because an X account is a high-authority, billable resource, X bindings are owner-only. They can only be added by the workspace owner to a workspace with no active shares. Adding one permanently makes that workspace private because removing a binding cannot remove previously read X data or draft actions from workspace history. X actions cannot be auto-approved and only the workspace owner can approve or reject them.
 
 ## Requirements
 
@@ -186,14 +186,14 @@ An owner-only resource means:
 
 - only the workspace owner using their own connected account may create the binding;
 - the binding cannot be added while any collaborator or active share link exists;
-- no collaborator or share-link redemption may be added while the binding exists;
+- adding the binding durably marks the workspace owner-only;
+- no collaborator or share-link redemption may be added afterward, including after the binding is removed;
 - non-owner opens fail closed;
 - only the workspace owner may approve or reject its actions;
 - auto-approval catalog/rules are disabled for the binding;
-- actions and public web fetches otherwise remain available to the owner;
-- removing the final owner-only binding permits future sharing again.
+- actions and public web fetches otherwise remain available to the owner.
 
-The Overseer persists `ownerOnly: true` on the internal `GatekeeperRecord`. It derives the credential owner from the authenticated user creating the binding and requires that user to equal the immutable workspace owner. Owner identity is not exported in blueprints.
+The Overseer persists `ownerOnly: true` on the internal `GatekeeperRecord` and a separate sticky `ownerOnlyWorkspace` singleton after successful creation. It derives the credential owner from the authenticated user creating the binding and requires that user to equal the immutable workspace owner. Owner identity and policy history are not exported in blueprints.
 
 Owner-only binding creation and access-granting sharing changes participate in opposing in-memory transition counters around every await. Creation checks `SharingManager.hasAnyShares()` before committing the record. Sharing checks for committed owner-only records and active owner-only creation. This closes add/share and share/redeem races.
 
@@ -201,7 +201,7 @@ Blueprints may declare an X connection requirement but never contain account cre
 
 ### User interface
 
-Connection UI describes X as an owner-only account. The generic shared-user verification promise is replaced with English/Japanese text explaining that a workspace using the connection cannot be shared until the X binding is removed. Server errors remain authoritative if UI state is stale or bypassed.
+Connection UI describes X as an owner-only account. The generic shared-user verification promise is replaced with English/Japanese text warning that adding the connection permanently makes the workspace private, even after removal. Server errors remain authoritative if UI state is stale or bypassed.
 
 ## Agent-facing API
 
@@ -326,7 +326,7 @@ After the runtime PR merges:
 - Only owner can approve or reject actions.
 - Auto-approval catalog and rule mutation reject owner-only bindings.
 - Owner actions and public web fetch remain available.
-- Removing the final owner-only binding permits sharing again.
+- Removing the final owner-only binding does not re-enable sharing because workspace history may retain X data and drafts.
 - Blueprints preserve the requirement but not owner identity or credentials.
 
 ### OAuth and credential security

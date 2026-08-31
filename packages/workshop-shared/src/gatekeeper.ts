@@ -269,6 +269,9 @@ export type ResourceDescription = {
   hookTsType?: string;
 }
 
+/** Limits which workspace may hold a resource binding. */
+export type WorkspaceAccessPolicy = "owner-only";
+
 /**
  * Describes a kind of resource that a vendor can provide access to (e.g. "Jira Issue", "Gmail
  * Mailbox") rather than a specific instance.
@@ -285,6 +288,9 @@ export type SupportedResource = {
 
   /** Optional icon for display in Workshop UI. */
   icon?: AvatarImage;
+
+  /** Optional workspace-level access restriction enforced by the Workshop. */
+  workspaceAccess?: WorkspaceAccessPolicy;
 
   /**
    * Whether callers may mint new bindings for this resource type. Defaults to true. Existing

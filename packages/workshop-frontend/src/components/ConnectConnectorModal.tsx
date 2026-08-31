@@ -98,6 +98,11 @@ export default function ConnectConnectorModal({
   }, [open, isManage, grantableKey, grantedKey])
 
   const noneSelected = granular && selected.size === 0
+  const ownerOnlySelected = supportedResources.some(
+    (resource) =>
+      resource.workspaceAccess === 'owner-only' &&
+      (!resource.grantable || selected.has(resource.urlPattern)),
+  )
 
   const pendingPatterns = isManage
     ? [...selected].filter((p) => !isGranted(p))
@@ -303,7 +308,7 @@ export default function ConnectConnectorModal({
             </div>
           )}
 
-          {!isManage && !autoProvisions && (
+          {!isManage && (!autoProvisions || ownerOnlySelected) && (
             <div
               className="relative mt-5 overflow-hidden rounded-lg border border-kumo-line px-4 py-3"
               style={{
@@ -322,7 +327,9 @@ export default function ConnectConnectorModal({
                     {t('gatekeepers.connectorModal.securityTitle', { vendor: vendorDescription.displayName })}
                   </span>{' '}
                   <span className="text-kumo-subtle">
-                    {t('gatekeepers.connectorModal.securityDescription')}
+                    {t(ownerOnlySelected
+                      ? 'gatekeepers.connectorModal.ownerOnlyDescription'
+                      : 'gatekeepers.connectorModal.securityDescription')}
                   </span>
                 </div>
               </div>
@@ -331,7 +338,9 @@ export default function ConnectConnectorModal({
 
           {isManage && (
             <div className="mt-5 rounded-lg border border-kumo-line bg-kumo-elevated px-4 py-3 text-[12px] leading-[17px] font-normal tracking-[-0.2px] text-kumo-subtle">
-              {t('gatekeepers.connectorModal.accountDescription')}
+              {t(ownerOnlySelected
+                ? 'gatekeepers.connectorModal.ownerOnlyDescription'
+                : 'gatekeepers.connectorModal.accountDescription')}
             </div>
           )}
         </div>
