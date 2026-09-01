@@ -16,14 +16,7 @@ function publicApi(
     env: Cloudflare.Env,
     accessPayload?: JWTPayload,
 ): PublicApiImpl {
-  return new PublicApiImpl(
-    ctx,
-    env,
-    vi.fn(),
-    new AbortController().signal,
-    vi.fn() as never,
-    accessPayload as never,
-  );
+  return new PublicApiImpl(ctx, env, vi.fn(), accessPayload);
 }
 
 function accessIdentity(email: string): JWTPayload {
@@ -80,15 +73,9 @@ describe("email-keyed user identity", () => {
         return user;
       }),
     };
-    const registry = {
-      getByName: vi.fn(() => {
-        throw new Error("IdentityRegistry must not be used for Access authentication");
-      }),
-    };
     const ctx = {
       exports: {
         UserDurableObject: users,
-        IdentityRegistry: registry,
         OverseerDurableObject: {},
         AdminSettings: { getByName: vi.fn().mockReturnValue({}) },
       },
@@ -103,7 +90,6 @@ describe("email-keyed user identity", () => {
     expect(users.idFromName).toHaveBeenCalledExactlyOnceWith(EMAIL);
     expect(authenticateFromCfAccess).toHaveBeenCalledExactlyOnceWith(EMAIL, true);
     expect(profileStore.put).not.toHaveBeenCalled();
-    expect(registry.getByName).not.toHaveBeenCalled();
   });
 
   it("round-trips pre-registry and new workspace routes through the canonical User DO ID", async () => {

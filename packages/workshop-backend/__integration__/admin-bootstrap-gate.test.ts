@@ -135,12 +135,16 @@ function externalMessageGateway(
     workerExports: GatewayExports,
     config?: InitialAdminConfigV1): ExternalMessageGateway {
   const ctx = createExecutionContext();
+  const gatewayExports = {
+    UserDurableObject: exports.UserDurableObject,
+    ...workerExports,
+  };
   const gatewayContext = new Proxy(ctx, {
     get(target, property) {
       if (property === "props") {
         return {source: "test-source", identityMode: "trustedEmail"};
       }
-      if (property === "exports") return workerExports;
+      if (property === "exports") return gatewayExports;
       return Reflect.get(target, property, target);
     },
   });

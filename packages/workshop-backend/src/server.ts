@@ -1,7 +1,7 @@
 import { RpcStub, RpcTarget, newHttpBatchRpcResponse, newWebSocketRpcSession, RpcSessionOptions } from "capnweb";
 import type { JWTPayload } from "jose";
 import { validateRpc } from "capnweb-validate";
-import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, LanguagePreference, ClerkAuthentication, TelegramLinkStatus, TelegramLinkStart, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, GATEKEEPER_SESSION_LOGOUT_PATH } from '@gadgets/workshop-shared/api';
+import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, LanguagePreference, TelegramLinkStatus, TelegramLinkStart, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError } from '@gadgets/workshop-shared/api';
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
 import { getServerConfig, isPasswordAuthAvailable } from "./deployment-config.js";
 import { getAuthGatekeeperAllowlist } from "./auth/config.js";
@@ -11,9 +11,6 @@ import { listConnectedAccounts, selectAccount } from "./ai-gateway-billing/cloud
 import { PendingLogin, LoginConnectCallbackImpl } from "./auth/login-flow.js";
 import { deploymentOutputForBlueprint, listFormatOffers, readAdminConfig } from "./admin-config.js";
 import { IdentityRegistry } from "./identity-registry.js";
-import { verifyClerkIdentity } from "./clerk-auth.js";
-import { createClerkSession } from "./clerk-session.js";
-import type { VerifiedAuthorityContext } from "./identity-authority.js";
 import { assertAdminBootstrap } from "./admin-bootstrap-gate.js";
 
 // Re-export the optional-feature Durable Objects + entrypoints so they can be bound in wrangler.
@@ -41,7 +38,6 @@ import { resolveUiFeatureFlags } from "./feature-flags";
 import { serveSiteLogo, SITE_LOGO_PATH } from "./site-logo.js";
 import { createWorkshopLogger } from "./observability";
 import { wrapDoStubForTelemetry } from "./do-telemetry";
-import { handleGatekeeperSessionLogoutRequest } from "./gatekeeper-session-logout.js";
 
 const logger = createWorkshopLogger("workshop.server");
 function adminBootstrapMaintenanceResponse(): Response {
@@ -50,12 +46,6 @@ function adminBootstrapMaintenanceResponse(): Response {
     headers: {"content-type": "text/plain; charset=utf-8"},
   });
 }
-
-type PublicApiCleanup = {
-  run(): Promise<void>;
-  failureMessage: string;
-  failureEvent: "clerk.session.dispose.failed";
-};
 
 // Set once we've asked the AdminSettings DO to install the bundled format blueprints (see the
 // fetch handler), so later requests skip the call. The DO holds the real answer.
@@ -104,8 +94,7 @@ type Env = Cloudflare.Env & {
 class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   constructor(private ctx: ExecutionContext, private env: Env,
       userId: DurableObjectId,
-      private abortSession: (reason: Error) => void,
-      private authority?: VerifiedAuthorityContext) {
+      private abortSession: (reason: Error) => void) {
     super();
 
     this.#userId = userId;
@@ -686,55 +675,15 @@ class LoginAttemptImpl extends RpcTarget implements LoginAttempt {
   }
 }
 
-/** Per-connection public RPC implementation that owns retained authentication lifecycles. */
 @validateRpc()
 export class PublicApiImpl extends RpcTarget implements PublicApi {
   users: DurableObjectNamespace<UserDurableObject>;
-  #clerkSession: "authenticating" | { dispose(): Promise<void> } | undefined;
 
   constructor(private ctx: ExecutionContext, private env: Env,
       private abortSession: (reason: Error) => void,
-      private abortSignal: AbortSignal,
-      private verifyClerk: (token: string) => ReturnType<typeof verifyClerkIdentity>,
       private accessPayload?: JWTPayload) {
     super();
     this.users = this.ctx.exports.UserDurableObject;
-    this.abortSignal.addEventListener("abort", () => this.#dispose(), { once: true });
-  }
-
-  [Symbol.dispose](): void {
-    this.#dispose();
-  }
-
-  #dispose(): void {
-    const cleanup = this.#takeClerkSessionCleanup();
-
-    if (cleanup.length > 0) {
-      this.ctx.waitUntil(Promise.allSettled(
-        cleanup.map(operation => Promise.resolve().then(() => operation.run())),
-      ).then(results => {
-        for (const [index, result] of results.entries()) {
-          if (result.status === "rejected") {
-            const operation = cleanup[index];
-            logger.warn(operation.failureMessage, {
-              event: operation.failureEvent,
-              error: result.reason,
-            });
-          }
-        }
-      }));
-    }
-  }
-
-  #takeClerkSessionCleanup(): PublicApiCleanup[] {
-    const session = this.#clerkSession;
-    this.#clerkSession = undefined;
-    if (!session || session === "authenticating") return [];
-    return [{
-      run: () => session.dispose(),
-      failureMessage: "failed to dispose Clerk session",
-      failureEvent: "clerk.session.dispose.failed",
-    }];
   }
 
   async getServerConfig(): Promise<ServerConfig> {
@@ -779,76 +728,6 @@ export class PublicApiImpl extends RpcTarget implements PublicApi {
       source: "session_token",
     });
     return new AuthenticatedApiImpl(this.ctx, this.env, userId, this.abortSession);
-  }
-
-  async authenticateWithClerk(token: string): Promise<ClerkAuthentication> {
-    if (this.#clerkSession !== undefined) {
-      throw new Error("This API socket is already authenticated with Clerk.");
-    }
-    if (this.abortSignal.aborted) throw new Error("This API socket is closed.");
-    this.#clerkSession = "authenticating";
-
-    try {
-      const verified = await this.verifyClerk(token);
-      const signupsEnabled = (await readAdminConfig(this.env)).signupsEnabled;
-      const registry = this.ctx.exports.IdentityRegistry.getByName("");
-      const resolved = await registry.resolveClerkIdentity(
-        verified.subject,
-        verified.email,
-        signupsEnabled,
-      );
-      if (verified.expiresAt.getTime() <= Date.now()) {
-        const error = new Error("Clerk session expired.");
-        this.abortSession(error);
-        throw error;
-      }
-
-      const clerkSession = await createClerkSession({
-        initialIdentity: verified,
-        initialResolution: resolved,
-        signupsEnabled,
-        abortSession: this.abortSession,
-        verify: replacement => this.verifyClerk(replacement),
-        resolve: (subject, email, allowSignups) =>
-          registry.resolveClerkIdentity(subject, email, allowSignups),
-        register: async (subscriberId, identity, invalidate) => {
-          await registry.registerIdentitySession(
-            identity.internalUserId,
-            identity.identityVersion,
-            subscriberId,
-            async () => invalidate(),
-          );
-        },
-        unregister: async (subscriberId, internalUserId) => {
-          await registry.unregisterIdentitySession(internalUserId, subscriberId);
-        },
-      });
-      if (this.#clerkSession !== "authenticating" || this.abortSignal.aborted) {
-        await clerkSession.dispose();
-        throw new Error("This API socket is closed.");
-      }
-      this.#clerkSession = clerkSession;
-
-      const userId = this.users.idFromName(resolved.internalUserId);
-      if (resolved.created) {
-        recordAnalytics(this.ctx, this.env, {
-          event_name: "account_created",
-          user_id: resolved.internalUserId,
-          source: "clerk",
-        });
-      }
-      return {
-        api: new AuthenticatedApiImpl(this.ctx, this.env, userId, this.abortSession, {
-          canonicalVerifiedEmail: resolved.canonicalVerifiedEmail,
-          identityVersion: resolved.identityVersion,
-        }) as unknown as RpcStub<AuthenticatedApi>,
-        session: clerkSession.control as unknown as ClerkAuthentication["session"],
-        expiresAt: new Date(verified.expiresAt.getTime()),
-      };
-    } catch (error) {
-      if (this.#clerkSession === "authenticating") this.#clerkSession = undefined;
-      throw error;
-    }
   }
 
   async authenticateFromCfAccess(): Promise<AuthenticatedApi> {
@@ -950,11 +829,7 @@ export class PublicApiImpl extends RpcTarget implements PublicApi {
 }
 
 export default {
-  async fetch(
-      req: Request,
-      env: Env,
-      ctx: ExecutionContext,
-      verifyClerk = (token: string) => verifyClerkIdentity(token, env)) {
+  async fetch(req: Request, env: Env, ctx: ExecutionContext) {
     try {
       await assertAdminBootstrap(env, ctx);
     } catch {
@@ -983,10 +858,6 @@ export default {
 
     if (url.pathname === "/api/client-errors") {
       return handleClientErrorRequest(req, env, ctx);
-    }
-
-    if (url.pathname === GATEKEEPER_SESSION_LOGOUT_PATH) {
-      return handleGatekeeperSessionLogoutRequest(req, ctx.exports.UserDurableObject);
     }
 
     if (url.pathname === "/api") {
@@ -1039,8 +910,7 @@ export default {
       };
 
       return await newWorkersRpcResponse(req,
-          new PublicApiImpl(
-            ctx, env, abortSession, abortController.signal, verifyClerk, accessPayload),
+          new PublicApiImpl(ctx, env, abortSession, accessPayload),
           { abortSignal: abortController.signal });
     }
 
@@ -1063,17 +933,13 @@ type ExtendedRpcSessionOptions = RpcSessionOptions & {
 async function newWorkersRpcResponse(
     request: Request, localMain: any, options?: ExtendedRpcSessionOptions) {
   if (request.method === "POST") {
-    try {
-      let response = await newHttpBatchRpcResponse(request, localMain, options);
-      // Since we're exposing the same API over WebSocket, too, and WebSocket always allows
-      // cross-origin requests, the API necessarily must be safe for cross-origin use (e.g. because
-      // it uses in-band authorization, as recommended in the readme). So, we might as well allow
-      // batch requests to be made cross-origin as well.
-      response.headers.set("Access-Control-Allow-Origin", "*");
-      return response;
-    } finally {
-      localMain?.[Symbol.dispose]?.();
-    }
+    let response = await newHttpBatchRpcResponse(request, localMain, options);
+    // Since we're exposing the same API over WebSocket, too, and WebSocket always allows
+    // cross-origin requests, the API necessarily must be safe for cross-origin use (e.g. because
+    // it uses in-band authorization, as recommended in the readme). So, we might as well allow
+    // batch requests to be made cross-origin as well.
+    response.headers.set("Access-Control-Allow-Origin", "*");
+    return response;
   } else if (request.headers.get("Upgrade")?.toLowerCase() === "websocket") {
     return newWorkersWebSocketRpcResponse(request, localMain, options);
   } else {

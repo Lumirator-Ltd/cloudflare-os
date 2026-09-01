@@ -9,13 +9,6 @@ function environment(defaultLanguage?: string): Cloudflare.Env {
 }
 
 describe("deployment configuration", () => {
-  it("does not publish Clerk configuration through sign-in discovery", async () => {
-    const env = environment();
-    env.CLERK_PUBLISHABLE_KEY = "pk_test_private-compatibility-value";
-
-    await expect(getServerConfig(env)).resolves.not.toHaveProperty("clerkPublishableKey");
-  });
-
   it("defaults to English when DEFAULT_LANGUAGE is absent", async () => {
     await expect(getServerConfig(environment())).resolves.toMatchObject({
       defaultLanguage: "en",

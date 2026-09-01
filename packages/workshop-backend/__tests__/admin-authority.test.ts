@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import type { JWTPayload } from "jose";
 import type { AdminSettings } from "../src/admin-settings.js";
 import { PublicApiImpl } from "../src/server.js";
 
@@ -16,7 +17,6 @@ function harness(admins: unknown = [ADMIN_NAME]) {
   const admin = {
     getSettings: vi.fn(async () => settings),
   } as unknown as DurableObjectStub<AdminSettings>;
-  const registryGet = vi.fn(() => { throw new Error("IdentityRegistry must not authorize admins"); });
   const ctx = {
     exports: {
       UserDurableObject: {
@@ -26,7 +26,6 @@ function harness(admins: unknown = [ADMIN_NAME]) {
         }),
         get: vi.fn(() => user),
       },
-      IdentityRegistry: { getByName: registryGet },
       OverseerDurableObject: {},
       AdminSettings: { getByName: vi.fn(() => admin) },
     },
@@ -37,14 +36,9 @@ function harness(admins: unknown = [ADMIN_NAME]) {
     BLUEPRINTS: { get: vi.fn(async () => null) },
   } as unknown as Cloudflare.Env;
   const publicApi = new PublicApiImpl(
-    ctx,
-    env,
-    vi.fn(),
-    new AbortController().signal,
-    vi.fn() as never,
-    { email: ADMIN_NAME },
+    ctx, env, vi.fn(), { email: ADMIN_NAME } as JWTPayload,
   );
-  return { admin, env, publicApi, registryGet, user };
+  return { admin, env, publicApi, user };
 }
 
 async function authenticated(admins: unknown = [ADMIN_NAME]) {
@@ -66,13 +60,12 @@ describe("upstream admin matching", () => {
       .resolves.toBe(true);
   });
 
-  it("does not consult IdentityRegistry or the mutable user profile", async () => {
-    const { api, registryGet, user } = await authenticated([ADMIN_NAME]);
+  it("does not consult the mutable user profile", async () => {
+    const { api, user } = await authenticated([ADMIN_NAME]);
 
     await api.setOwnDisplayName("not-an-admin@example.com");
     await expect(api.amIAdmin()).resolves.toBe(true);
     expect(user.whoami).not.toHaveBeenCalled();
-    expect(registryGet).not.toHaveBeenCalled();
   });
 
   it("rejects non-array ADMINS without exposing its value", async () => {
@@ -85,14 +78,13 @@ describe("upstream admin matching", () => {
     expect(error.message).not.toContain(marker);
   });
 
-  it("retains minted AdminApi authority without registry or allowlist revalidation", async () => {
-    const { admin, api, env, registryGet } = await authenticated([ADMIN_NAME]);
+  it("retains minted AdminApi authority without allowlist revalidation", async () => {
+    const { admin, api, env } = await authenticated([ADMIN_NAME]);
     const retained = await api.getAdminApi();
     expect(retained).not.toBeNull();
 
     env.ADMINS = [];
     await expect(retained!.getSettings()).resolves.toEqual({ signupsEnabled: true });
     expect(admin.getSettings).toHaveBeenCalledExactlyOnceWith(ADMIN_NAME);
-    expect(registryGet).not.toHaveBeenCalled();
   });
 });

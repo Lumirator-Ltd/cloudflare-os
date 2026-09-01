@@ -33,18 +33,6 @@ export const SERVICE_SALT = new Uint8Array([
 ]);
 
 /**
- * Same-origin POST endpoint for idempotently revoking one local Gatekeeper bearer.
- *
- * Send an exact `application/json` body shaped as `{ token: string }`. A 204 confirms that the
- * bearer is durably deleted, so replay fails, and that every live subscriber known to the current
- * User Durable Object instance has finished invalidating. A restart loses ephemeral subscribers;
- * any such graph closes through its token watchdog within 30 seconds rather than necessarily before
- * the 204. The response intentionally does not distinguish an already-revoked, otherwise missing,
- * or newly revoked well-formed bearer. This affects only the deployment-local Workshop session.
- */
-export const GATEKEEPER_SESSION_LOGOUT_PATH = "/api/gatekeeper-session/logout";
-
-/**
  * A pending gatekeeper sign-in attempt, returned by `PublicApi.startGatekeeperLogin()`. Holding this
  * stub is the capability to receive the resulting session token; dispose it to abandon the attempt.
  */
@@ -56,25 +44,6 @@ export interface LoginAttempt extends RpcTarget {
    */
   wait(): Promise<string>;
 }
-
-/** Controls the verified Clerk lease associated with one authenticated WebSocket session. */
-export interface ClerkSessionControl extends RpcTarget {
-  /** Replaces the lease with a fully verified token and returns its exact server-verified expiry. */
-  refresh(token: string): Promise<Date>;
-
-  /** Aborts the whole WebSocket session and all capabilities descended from it. */
-  logout(): Promise<void>;
-}
-
-/** Capabilities and verified deadline returned by Clerk authentication. */
-export type ClerkAuthentication = {
-  /** The authenticated Workshop API capability governed by this Clerk lease. */
-  api: RpcStub<AuthenticatedApi>;
-  /** The sole capability through which the Clerk lease can be refreshed or logged out. */
-  session: RpcStub<ClerkSessionControl>;
-  /** The exact expiry accepted by the backend verifier; clients should refresh before this time. */
-  expiresAt: Date;
-};
 
 /** Public API exposed to the internet. */
 export interface PublicApi extends RpcTarget {
@@ -97,12 +66,6 @@ export interface PublicApi extends RpcTarget {
 
   /** Authenticates the user using an auth token (typically stored in localStorage). */
   authenticate(token: string): Promise<AuthenticatedApi>;
-
-  /**
-   * Authenticates a verified Clerk session and returns sibling API/session-control capabilities
-   * governed by the same hard WebSocket deadline.
-   */
-  authenticateWithClerk(token: string): Promise<ClerkAuthentication>;
 
   /**
    * Like authenticate() but the server is expected to be sitting behind Cloudflare Access, and the
@@ -1144,8 +1107,6 @@ export type AuthVendorInfo = {
   displayName: string;
   logo?: AvatarImage;
   color?: string;
-  /** False when the connector cannot start a new sign-in authorization flow. */
-  configured: boolean;
 };
 
 /**
@@ -1153,15 +1114,12 @@ export type AuthVendorInfo = {
  * Returned by `PublicApi.getServerConfig()`. Contains no secrets.
  */
 export type ServerConfig = {
-  /** Clerk frontend publishable key for normal auth mode; absent in Cloudflare Access mode. */
-  clerkPublishableKey?: string;
-
   /** Default language for signed-out users and users whose language preference is `"auto"`. */
   defaultLanguage: SupportedLanguage;
 
   /**
-   * Auth-capable, allowlisted gatekeeper vendors shown as sign-in methods, including unconfigured
-   * vendors with disabled buttons. Empty when no allowlisted bound vendor provides authentication.
+   * Auth-capable, allowlisted gatekeeper vendors offered as sign-in methods. Empty when none are
+   * configured (password-only).
    */
   authVendors: AuthVendorInfo[];
 

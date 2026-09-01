@@ -48,13 +48,7 @@ function publicApi(env: Cloudflare.Env) {
     },
     waitUntil: vi.fn(),
   } as unknown as ExecutionContext;
-  return { api: new PublicApiImpl(
-    ctx,
-    env,
-    vi.fn(),
-    new AbortController().signal,
-    vi.fn() as never,
-  ), ctx };
+  return { api: new PublicApiImpl(ctx, env, vi.fn()), ctx };
 }
 
 describe("upstream authentication policy", () => {

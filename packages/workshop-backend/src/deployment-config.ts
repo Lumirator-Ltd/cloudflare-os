@@ -33,7 +33,7 @@ export async function getAuthVendors(env: Cloudflare.Env): Promise<AuthVendorInf
         displayName: desc.displayName,
         logo: desc.logo,
         color: desc.color,
-      } as AuthVendorInfo;
+      };
     } catch (err) {
       logger.error("failed to describe auth gatekeeper", {
         event: "auth.gatekeeper.describe.failed", vendorId, error: err,

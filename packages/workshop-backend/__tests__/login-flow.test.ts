@@ -10,11 +10,6 @@ function callbackContext(vendorId: string, user: object, pending: object) {
         idFromString: vi.fn().mockReturnValue("pending-id"),
         get: vi.fn().mockReturnValue(pending),
       },
-      IdentityRegistry: {
-        getByName: vi.fn(() => {
-          throw new Error("IdentityRegistry must not be used for Gatekeeper login");
-        }),
-      },
       UserDurableObject: {
         idFromName: vi.fn((email: string) => email),
         get: vi.fn().mockReturnValue(user),
@@ -40,12 +35,7 @@ function callback(vendorId: string, user: object, pending: object): {
 }
 
 function gatekeeperAccount(email: string | null) {
-  return {
-    getAuthenticatedEmail: vi.fn().mockResolvedValue(email),
-    getAuthenticationIdentity: vi.fn(() => {
-      throw new Error("stable identity method must not be called");
-    }),
-  };
+  return { getAuthenticatedEmail: vi.fn().mockResolvedValue(email) };
 }
 
 function pendingLogin() {
@@ -69,7 +59,6 @@ describe("Gatekeeper login completion", () => {
     await login.complete(account as unknown as Fetcher<GatekeeperUser>);
 
     expect(account.getAuthenticatedEmail).toHaveBeenCalledOnce();
-    expect(account.getAuthenticationIdentity).not.toHaveBeenCalled();
     expect(ctx.exports.UserDurableObject.idFromName).toHaveBeenCalledExactlyOnceWith(email);
     expect(user.loginOrCreateViaGatekeeper).toHaveBeenCalledExactlyOnceWith(email, true);
     expect(user.linkConnectedAccountFromLogin).not.toHaveBeenCalled();
@@ -110,7 +99,6 @@ describe("Gatekeeper login completion", () => {
     await login.complete(account as unknown as Fetcher<GatekeeperUser>);
 
     expect(account.getAuthenticatedEmail).toHaveBeenCalledOnce();
-    expect(account.getAuthenticationIdentity).not.toHaveBeenCalled();
     expect(ctx.exports.UserDurableObject.idFromName).not.toHaveBeenCalled();
     expect(user.loginOrCreateViaGatekeeper).not.toHaveBeenCalled();
     expect(pending.deliver).not.toHaveBeenCalled();

@@ -116,14 +116,7 @@ function overseer(hasAnyShares: boolean): SharingPolicyOverseer {
   const target = Reflect.construct(OverseerImpl, [{
     id: { toString: () => "workspace-id" },
     storage: makeMockStorage(),
-    exports: {
-      UserDurableObject: {},
-      IdentityRegistry: {
-        getByName: () => ({
-          findInternalUserIdByVerifiedEmail: async (email: string) => email,
-        }),
-      },
-    },
+    exports: { UserDurableObject: {} },
   }, {}]) as SharingPolicyOverseer;
   target.getSharingManager = async () => ({ hasAnyShares: () => hasAnyShares });
   return target;
@@ -462,9 +455,6 @@ describe("Overseer sharing transition concurrency", () => {
     target.users = {
       idFromName,
       get: () => ({ whoamiIfExists: () => profileGate.promise }),
-    };
-    (target.ctx as any).exports.IdentityRegistry.getByName = () => {
-      throw new Error("sharing discovery must not use the identity registry");
     };
     target.getSharingManager = async () => ({ addCollaborator, hasAnyShares: () => true });
 

@@ -23,7 +23,7 @@
 import { DurableObject, RpcTarget, WorkerEntrypoint, type RpcStub } from "cloudflare:workers";
 import type {
   AccountDescription, ActionKind, AppUiContext, ApprovalQueue, Gatekeeper,
-  GatekeeperAuthenticationIdentity, GatekeeperConnectCallback, GatekeeperConnectOptions,
+  GatekeeperConnectCallback, GatekeeperConnectOptions,
   GatekeeperUiFrame, GatekeeperUser, GatekeeperUserVerifier,
   ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
@@ -56,16 +56,14 @@ const AVATAR = {
 // without having to learn any internal id.
 
 type VerifyOutcome = { allow: true } | { allow: false; reason: string };
-type ClerkProfile = { email: string; status: string };
-type GatekeeperLoginIdentity = { subject: string; email: string; expiresAt?: Date };
 
 export class TestControl extends DurableObject<Cloudflare.Env> {
-  setGatekeeperLoginIdentity(identity: GatekeeperLoginIdentity): void {
-    this.ctx.storage.kv.put("gatekeeper-login-identity", identity);
+  setGatekeeperLoginEmail(email: string): void {
+    this.ctx.storage.kv.put("gatekeeper-login-email", email);
   }
 
-  getGatekeeperLoginIdentity(): GatekeeperLoginIdentity | null {
-    return this.ctx.storage.kv.get<GatekeeperLoginIdentity>("gatekeeper-login-identity") ?? null;
+  getGatekeeperLoginEmail(): string | null {
+    return this.ctx.storage.kv.get<string>("gatekeeper-login-email") ?? null;
   }
 
   recordConnectScope(scope: "auth" | "full"): void {
@@ -95,13 +93,6 @@ export class TestControl extends DurableObject<Cloudflare.Env> {
     return this.ctx.storage.kv.get<number>(`ambient-verifications:${label}`) ?? 0;
   }
 
-  setClerkProfile(subject: string, profile: ClerkProfile): void {
-    this.ctx.storage.kv.put(`clerk-profile:${subject}`, profile);
-  }
-
-  getClerkProfile(subject: string): ClerkProfile | null {
-    return this.ctx.storage.kv.get<ClerkProfile>(`clerk-profile:${subject}`) ?? null;
-  }
 }
 
 // ctx.exports is typed via the Cloudflare.GlobalProps declaration in env.d.ts, so loopback bindings
@@ -111,35 +102,9 @@ function control(exports: Cloudflare.Exports): DurableObjectStub<TestControl> {
 }
 
 // ---------------------------------------------------------------------------
-// Clerk profile service used only by the separate Task5 Workshop test entry.
-
-export class ClerkTestProfiles extends WorkerEntrypoint<Cloudflare.Env> {
-  async getSession(sessionId: string): Promise<{ id: string; userId: string; status: string }> {
-    const subject = `user_${sessionId.slice("sess_".length)}`;
-    const profile = await control(this.ctx.exports).getClerkProfile(subject);
-    return { id: sessionId, userId: subject, status: profile?.status ?? "revoked" };
-  }
-
-  async getUser(subject: string): Promise<{
-    id: string;
-    primaryEmailAddress: { emailAddress: string; verification: { status: string } };
-  }> {
-    const profile = await control(this.ctx.exports).getClerkProfile(subject);
-    if (!profile) throw new Error("Clerk test profile is not configured.");
-    return {
-      id: subject,
-      primaryEmailAddress: {
-        emailAddress: profile.email,
-        verification: { status: "verified" },
-      },
-    };
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Vendor
 
-type AccountProps = { label: string; authenticatedSubject?: string; authenticatedEmail?: string };
+type AccountProps = { label: string; authenticatedEmail?: string };
 type BindingProps = AccountProps & { resourceUrl: string; ambient?: true };
 
 export class GatekeeperVendor extends WorkerEntrypoint<Cloudflare.Env> {
@@ -178,16 +143,12 @@ export class GatekeeperVendor extends WorkerEntrypoint<Cloudflare.Env> {
   ): Promise<{ url: string }> {
     const scope = options?.scopes ?? "full";
     await control(this.ctx.exports).recordConnectScope(scope);
-    const identity = await control(this.ctx.exports).getGatekeeperLoginIdentity();
-    if (!identity) throw new Error("The test gatekeeper login identity is not configured.");
+    const email = await control(this.ctx.exports).getGatekeeperLoginEmail();
+    if (!email) throw new Error("The test gatekeeper login email is not configured.");
     const account = this.ctx.exports.TestAccount({
-      props: {
-        label: identity.email,
-        authenticatedSubject: identity.subject,
-        authenticatedEmail: identity.email,
-      },
+      props: { label: email, authenticatedEmail: email },
     });
-    await callback.complete(account, identity.expiresAt);
+    await callback.complete(account);
     return { url: `https://${VENDOR_HOST}/oauth/test-login` };
   }
 }
@@ -245,12 +206,6 @@ export class TestAccount
 
   async ensureResources(_resourceUrlPatterns: string[]): Promise<{ url?: string }> {
     return {};
-  }
-
-  async getAuthenticationIdentity(): Promise<GatekeeperAuthenticationIdentity | null> {
-    const subject = this.ctx.props.authenticatedSubject;
-    const verifiedEmail = this.ctx.props.authenticatedEmail;
-    return subject && verifiedEmail ? { subject, verifiedEmail } : null;
   }
 
   async getAuthenticatedEmail(): Promise<string | null> {
@@ -427,23 +382,11 @@ export default {
     }
 
     if (url.pathname === "/control/gatekeeper-login-email" && req.method === "POST") {
-      const { subject, email, expiresAt } = body as Record<string, unknown>;
-      if (!isNonEmptyString(subject) || subject.trim().length === 0) {
-        return badRequest("`subject` must be a non-empty stable id");
-      }
+      const { email } = body as Record<string, unknown>;
       if (!isNonEmptyString(email) || !email.includes("@")) {
         return badRequest("`email` must be a non-empty email");
       }
-      if (expiresAt !== undefined && typeof expiresAt !== "string") {
-        return badRequest("`expiresAt` must be an ISO date string when present");
-      }
-      const parsedExpiresAt = expiresAt === undefined ? undefined : new Date(expiresAt);
-      if (parsedExpiresAt && !Number.isFinite(parsedExpiresAt.getTime())) {
-        return badRequest("`expiresAt` must be a valid ISO date string");
-      }
-      await control(ctx.exports).setGatekeeperLoginIdentity({
-        subject, email, expiresAt: parsedExpiresAt,
-      });
+      await control(ctx.exports).setGatekeeperLoginEmail(email);
       return new Response(null, { status: 204 });
     }
 
@@ -474,18 +417,6 @@ export default {
       return Response.json({ count: await control(ctx.exports).getAmbientVerificationCount(label) });
     }
 
-    if (url.pathname === "/control/clerk-profile" && req.method === "POST") {
-      const { subject, email, status } = body as Record<string, unknown>;
-      if (!isNonEmptyString(subject) || !subject.startsWith("user_")) {
-        return badRequest("`subject` must be a Clerk user id");
-      }
-      if (!isNonEmptyString(email) || !email.includes("@")) {
-        return badRequest("`email` must be a non-empty email");
-      }
-      if (!isNonEmptyString(status)) return badRequest("`status` must be non-empty");
-      await control(ctx.exports).setClerkProfile(subject, { email, status });
-      return new Response(null, { status: 204 });
-    }
 
     // Make this Worker issue a subrequest, so a test can prove that Worker-originated fetches really
     // do route through the interceptor rather than out to the internet.

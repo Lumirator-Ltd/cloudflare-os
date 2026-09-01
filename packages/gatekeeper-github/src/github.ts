@@ -10,7 +10,6 @@ import {
   type Gatekeeper,
   type GatekeeperConnectCallback,
   type GatekeeperConnectOptions,
-  type GatekeeperAuthenticationIdentity,
   type GatekeeperUser,
   type GatekeeperUserVerifier,
   type GatekeeperVendor as GatekeeperVendorIface,
@@ -1321,10 +1320,6 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
         avatar: { url: viewer.user.avatar_url },
       };
     });
-  }
-
-  async getAuthenticationIdentity(): Promise<GatekeeperAuthenticationIdentity | null> {
-    return await this.#withApi(api => api.getAuthenticationIdentity());
   }
 
   async getAuthenticatedEmail(): Promise<string | null> {

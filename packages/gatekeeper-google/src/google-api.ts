@@ -2,10 +2,7 @@
 //
 // This file was largely vibe-coded based on an interface spec.
 
-import {
-  AccountDescription,
-  GatekeeperAuthenticationIdentity,
-} from "@gadgets/workshop-shared/gatekeeper";
+import { AccountDescription } from "@gadgets/workshop-shared/gatekeeper";
 import { GmailThreadInfo, EmailAddress } from "./types";
 import { createMimeMessage } from "mimetext/browser";
 import PostalMime, { addressParser } from "postal-mime";
@@ -160,7 +157,6 @@ export async function getAccessToken(
 }
 
 type GoogleUserInfo = {
-  sub?: unknown;
   email?: unknown;
   email_verified?: unknown;
   name?: unknown;
@@ -193,16 +189,6 @@ export async function getGoogleAccountDescription(accessToken: string)
     uniqueName: typeof data.email === "string" ? data.email : undefined,
     avatar: { url: typeof data.picture === "string" ? data.picture : "" },
   };
-}
-
-/** Returns Google's stable subject and verified email from one validated userinfo response. */
-export async function getGoogleAuthenticationIdentity(
-    accessToken: string): Promise<GatekeeperAuthenticationIdentity | null> {
-  const data = await fetchGoogleUserInfo(accessToken);
-  if (typeof data.sub !== "string" || data.sub.trim().length === 0 ||
-      typeof data.email !== "string" || data.email.trim().length === 0 ||
-      data.email_verified !== true) return null;
-  return { subject: data.sub, verifiedEmail: data.email };
 }
 
 /** Returns the email only when Google marks it as verified. */
