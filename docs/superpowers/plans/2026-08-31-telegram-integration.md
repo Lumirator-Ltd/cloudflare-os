@@ -4,59 +4,60 @@
 
 **Goal:** Add one-click Telegram account linking plus durable private/group text and incoming-photo messaging through normal Cloudflare OS workspaces.
 
-**Architecture:** The Workshop backend owns Telegram ingress, stable external identity links, and a durable per-update queue. It reuses ExternalMessageGateway, Overseer ACLs, and chat attachment validation; Profile exposes connect/status/unlink. Deployment accepts only a BotFather token and derives the remaining Telegram configuration.
+**Architecture:** The Workshop backend owns Telegram ingress, a `TelegramChannel` link store, and a durable per-update queue. Authenticated link methods store the canonical `UserDurableObject` ID; the channel resolves that private link and calls the shared internal message router under normal Overseer ACLs. `ExternalMessageGateway` remains an email-keyed compatibility ingress and is not part of Telegram routing. Profile exposes connect/status/unlink. Deployment accepts only a BotFather token and derives the remaining Telegram configuration.
 
 **Tech Stack:** Cloudflare Workers, Durable Objects, native Workers RPC, Cap'n Web, typed-storage, React, Vitest, pnpm.
 
 ---
 
-### Task 1: Stable Telegram identity linking
+### Task 1: Canonical User DO Telegram linking
 
 **Files:**
-- Modify: `packages/workshop-backend/src/identity-registry.ts`
+- Create: `packages/workshop-backend/src/telegram/link-store.ts`
+- Modify: `packages/workshop-backend/src/telegram/channel.ts`
 - Modify: `packages/workshop-backend/src/server.ts`
 - Modify: `packages/workshop-backend/src/env.d.ts`
 - Modify: `packages/workshop-shared/src/api.ts`
-- Test: `packages/workshop-backend/__tests__/identity-registry.test.ts`
-- Test: `packages/workshop-backend/__tests__/server-identity-authority.test.ts`
+- Test: `packages/workshop-backend/__tests__/telegram-link-store.test.ts`
+- Test: `packages/workshop-backend/__tests__/telegram-channel.test.ts`
 
-- [ ] **Step 1: Write failing registry tests** for latest-only SHA-256 tokens, expiry, single-use atomic completion, source/identity uniqueness, relink, unlink, active version checks, and bounded cleanup.
+- [ ] **Step 1: Write failing link-store tests** for latest-only SHA-256 tokens, expiry, single-use atomic completion, Telegram/User DO uniqueness, relink, unlink, idempotent receipts, and bounded cleanup.
 - [ ] **Step 2: Run the focused tests and verify expected failures.**
 
-Run: `pnpm --filter @gadgets/workshop-backend test:unit -- identity-registry.test.ts`
+Run: `pnpm --filter @gadgets/workshop-backend test:unit -- telegram-link-store.test.ts telegram-channel.test.ts`
 
-- [ ] **Step 3: Implement dedicated external-link/token collections and methods** without adding Telegram to authentication `subjectKeys`.
-- [ ] **Step 4: Write failing AuthenticatedApi tests** proving start/status/unlink derive the current user and reject stale/legacy authority.
-- [ ] **Step 5: Add documented shared RPC result types and authenticated methods.** Use `TELEGRAM_BOT_TOKEN` only as an enablement signal; obtain the verified username through the Telegram channel service implemented in Task 3.
+- [ ] **Step 3: Implement dedicated Telegram link/token/receipt collections in `TelegramChannel`.** Store only the authenticated user's canonical `UserDurableObject` ID string, never an email or provider subject.
+- [ ] **Step 4: Write failing AuthenticatedApi tests** proving start/status/unlink derive that Durable Object ID from the current authenticated capability.
+- [ ] **Step 5: Add documented shared RPC result types and authenticated methods.** Use `TELEGRAM_BOT_TOKEN` only as an enablement signal; obtain the verified username through `TelegramChannel.getBotIdentity()`.
 - [ ] **Step 6: Run focused unit tests and type checks.**
 - [ ] **Step 7: Commit.**
 
 ```bash
-git add packages/workshop-backend/src/identity-registry.ts packages/workshop-backend/src/server.ts packages/workshop-backend/src/env.d.ts packages/workshop-shared/src/api.ts packages/workshop-backend/__tests__/identity-registry.test.ts packages/workshop-backend/__tests__/server-identity-authority.test.ts
-git commit -m "feat: add stable Telegram account links"
+git add packages/workshop-backend/src/telegram/link-store.ts packages/workshop-backend/src/telegram/channel.ts packages/workshop-backend/src/server.ts packages/workshop-backend/src/env.d.ts packages/workshop-shared/src/api.ts packages/workshop-backend/__tests__/telegram-link-store.test.ts packages/workshop-backend/__tests__/telegram-channel.test.ts
+git commit -m "feat: add Telegram account links"
 ```
 
-### Task 2: Linked external messages and incoming attachments
+### Task 2: Private Telegram message routing and incoming attachments
 
 **Files:**
-- Modify: `packages/workshop-shared/src/external-message-gateway.ts`
-- Modify: `packages/workshop-backend/src/external-message-gateway.ts`
+- Modify: `packages/workshop-backend/src/telegram/channel.ts`
+- Modify: `packages/workshop-backend/src/external-message-routing.ts`
 - Modify: `packages/workshop-backend/src/overseer.ts`
-- Test: `packages/workshop-backend/__tests__/external-message-gateway.test.ts`
-- Test: `packages/workshop-backend/__integration__/stable-user-identity.test.ts`
+- Test: `packages/workshop-backend/__tests__/telegram-channel.test.ts`
+- Test: `packages/workshop-backend/__integration__/external-message-gateway.test.ts`
 
-- [ ] **Step 1: Write failing gateway tests** proving linked-subject mode cannot downgrade to email, unlinked subjects reveal no account information, and resolved internal identities are revalidated.
+- [ ] **Step 1: Write failing channel tests** proving an unlinked Telegram user reveals no account information and a linked user is routed only by the stored canonical User DO ID.
 - [ ] **Step 2: Write failing attachment/callback tests** for one image, photo-only prompts, authoritative size/signature validation, deduplication, and callback workspace path.
 - [ ] **Step 3: Run focused tests and verify expected failures.**
-- [ ] **Step 4: Add a discriminated identity mode and external attachment contract** with doc comments on every exported member.
-- [ ] **Step 5: Extract one internal attachment staging helper** and reuse it from browser upload and external submission.
+- [ ] **Step 4: Route Telegram privately from `TelegramChannel` through the shared internal message router.** Do not add a linked-subject mode to `ExternalMessageGateway`.
+- [ ] **Step 5: Extract one internal attachment staging helper** and reuse it from browser upload and private Telegram submission.
 - [ ] **Step 6: Extend response delivery with the workspace path and preserve existing retry/disposal behavior.**
 - [ ] **Step 7: Run focused unit/integration tests and type checks.**
 - [ ] **Step 8: Commit.**
 
 ```bash
-git add packages/workshop-shared/src/external-message-gateway.ts packages/workshop-backend/src/external-message-gateway.ts packages/workshop-backend/src/overseer.ts packages/workshop-backend/__tests__/external-message-gateway.test.ts packages/workshop-backend/__integration__/stable-user-identity.test.ts
-git commit -m "feat: route linked external messages"
+git add packages/workshop-backend/src/telegram/channel.ts packages/workshop-backend/src/external-message-routing.ts packages/workshop-backend/src/overseer.ts packages/workshop-backend/__tests__/telegram-channel.test.ts packages/workshop-backend/__integration__/external-message-gateway.test.ts
+git commit -m "feat: route Telegram messages privately"
 ```
 
 ### Task 3: Durable Telegram webhook and Bot API transport

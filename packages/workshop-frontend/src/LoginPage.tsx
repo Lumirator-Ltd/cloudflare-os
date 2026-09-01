@@ -162,7 +162,7 @@ export default function LoginPage({ rpcStub, onLoginSuccess }: LoginPageProps) {
           </>
         )}
 
-        {/* Gatekeeper sign-in options, shown whenever any auth vendor is configured. */}
+        {/* Gatekeeper sign-in options, shown whenever the deployment advertises an auth vendor. */}
         {authVendors.length > 0 && (
           <div className={passwordAuthEnabled ? 'mt-6' : ''}>
             {passwordAuthEnabled && (

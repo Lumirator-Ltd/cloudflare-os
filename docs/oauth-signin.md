@@ -1,7 +1,7 @@
 # Sign-in via authentication gatekeepers
 
 Sign-in is provided by **authentication gatekeepers** — gatekeepers that advertise `providesAuth`
-and can return a provider-stable subject plus provider-verified email. Each such gatekeeper uses a
+and can return a provider-verified email. Each such gatekeeper uses a
 single OAuth app for both
 sign-in and (when the user later connects it) its capabilities, so there's only one OAuth app per
 provider — no separate "login" vs. "gatekeeper" apps.
@@ -14,64 +14,34 @@ The deployment opts gatekeepers into sign-in via the `AUTH_GATEKEEPERS` allowlis
 vendor ids). Set `DISABLE_PASSWORD_AUTH=true` to hide username/password and offer gatekeeper sign-in
 only (ignored unless the allowlist is non-empty, to avoid locking everyone out).
 
-## Identity: stable internal ID resolved from verified authority
+## Identity: keyed by verified email
 
-A provider-verified email is an identity claim, not a durable account key. The deployment-local
-`IdentityRegistry` resolves Clerk subjects and Cloudflare Access subjects (scoped by configured
-issuer and audience) to random opaque internal user IDs; `UserDurableObject` is addressed by
-`idFromName(internalUserId)`. Every canonical email ever presented by a stable subject remains a
-durable claim of that internal identity. A new stable subject cannot take over or silently merge
-with a current or historical claim: authentication fails until an explicit linking or deployment
-operator resolution flow exists. The owning subject may move back to one of its historical emails.
-Session records capture the registry's exact canonical email and identity version so a moved or
-collision-locked identity fails closed.
+The primary account key for authentication gatekeepers is the user's **provider-verified email**.
+Signing in with any allowlisted gatekeeper that returns the same email resolves to the same account:
+its `UserDurableObject` is addressed directly by `idFromName(email)`. Gatekeepers must return only an
+email their provider has verified (Google `email_verified`, a GitHub primary and verified email, or
+the Cloudflare account email); otherwise sign-in fails.
 
-Authentication Gatekeepers resolve a provider-stable opaque subject scoped by vendor ID together
-with its current provider-verified email. Email moves preserve the internal identity, tombstone the
-old email, increment the identity version, and invalidate retained sessions. An unseen Gatekeeper
-subject cannot claim a current or historical email owned by any Gatekeeper, Clerk, or Access identity.
-It fails closed regardless of signup policy. A proof-based user linking UI and operator resolution
-workflow remain future LUM-73 work; sign-in never invents an email-only merge while those flows are
-absent.
-
-Retained local Gatekeeper sessions have an absolute expiry at the earlier of the provider's valid
-future credential expiry and a fixed one-hour local maximum. Missing or stale provider expiry uses
-the one-hour maximum. Expired and legacy subjectless/unbounded records are rejected and removed, and
-the complete capability graph is aborted at the retained session deadline.
-
-Same-origin `POST /api/gatekeeper-session/logout` revokes only the local bearer supplied in its
-strict, bounded `application/json` body (`{ "token": "<opaque-internal-id>:<secret>" }`). A 204
-confirms that the User DO durably deleted that exact token, so bearer replay fails, and finished every
-live subscriber invalidation known to that User DO instance, including the requesting browser's graph
-when its subscriber is still registered there. A syntactically valid missing or already-revoked
-bearer is idempotently acknowledged with the same 204 so the endpoint does not disclose token
-existence; malformed requests are rejected before Durable Object lookup. Subscribers are ephemeral:
-a User DO restart can lose them before revocation, so a pre-existing graph is not guaranteed closed
-at 204 in that case. Each graph also polls the exact durable token behind an independent absolute
-30-second deadline and closes within that bound after durable revocation. Socket disposal unregisters
-its ephemeral subscriber but does not revoke the token, so closing a tab is not logout. Logout is
-deployment-local: the sign-in grant is transient and never retained, so there is no provider OAuth
-credential to revoke.
-
-The strict stable-subject cutover rejects legacy subjectless Gatekeeper sessions instead of upgrading
-them by email. This release assumes a greenfield deployment with no existing users. Any deployment
-that previously enabled Gatekeeper sign-in must ship a separate proof-based migration or operator
-recovery flow before adopting this cutover.
-
-Cloudflare Access WebSocket capability graphs have both one non-refreshable absolute deadline at the
-assertion's verified `exp` and exact registry-authority invalidation. The browser must reconnect with
-a fresh assertion after expiry.
+Cloudflare Access uses the same email-keyed route. When `CF_ACCESS_AUD` is set, the backend requires a
+same-origin API request, verifies the Access JWT against the configured `CF_ACCESS_ISS` and
+`CF_ACCESS_AUD`, requires its email claim, and passes that claim unchanged to
+`UserDurableObject.idFromName(email)`. This raw routing preserves compatibility with existing User DO
+names; do not lowercase or otherwise canonicalize an Access or gatekeeper email in the Workshop.
+Built-in password accounts remain keyed by their normalized username.
 
 ## Incremental scopes
 
-Sign-in requests only the **minimal scopes** needed to verify the user's email (e.g. GitHub
-`read:user user:email`, Google `openid email profile`, Cloudflare `offline_access user-details.read`),
-and the gatekeeper grant created for login is **transient** — it self-destructs shortly after the
-email is read, so signing in never leaves a broad authorization lying around. The fuller capability
-scopes (repos, Gmail/Docs, AI Gateway billing) are requested only later, when the user explicitly
-**connects the gatekeeper** (`connectAccount(vendorId)` with the default `scopes: "full"`), which is
-what persists a usable connected account. `GatekeeperVendor.connectAccount` takes
-`{ scopes: "auth" | "full" }` to choose between the two.
+Google and GitHub sign-in request only the **minimal scopes** needed to verify the user's email
+(e.g. GitHub `read:user user:email` and Google `openid email profile`). Their login grants are
+**transient** and are not retained as connected accounts. Fuller capability scopes are requested
+later when the user explicitly connects the gatekeeper (`connectAccount(vendorId)` with the default
+`scopes: "full"`). `GatekeeperVendor.connectAccount` takes `{ scopes: "auth" | "full" }` to choose
+between the two.
+
+Cloudflare sign-in is the fork-specific exception: it requests full scope with no resource patterns
+and persists the resulting account for AI Gateway billing before completing login. Connector
+readiness remains separate from authentication-vendor advertisement; every auth vendor returned by
+`ServerConfig.authVendors` is offered on the sign-in screen.
 
 ## Sign-in flow
 
@@ -82,17 +52,15 @@ what persists a usable connected account. `GatekeeperVendor.connectAccount` take
 2. The client opens `url` in a pop-up (the gatekeeper's self-closing OAuth window) and calls
    `attempt.wait()`, which blocks on the `PendingLogin` DO.
 3. When the gatekeeper finishes, it calls `complete(user)`. The callback reads
-   `user.getAuthenticationIdentity()`, resolves the vendor-scoped stable subject and verified email,
-   initializes its `UserDurableObject`, and mints an exact-version, bounded session. A missing,
-   throwing, null, or blank stable identity fails sign-in without falling back to the deprecated
-   email-only method. It delivers the
-   `"<opaque-internal-id>:<secret>"` token to the `PendingLogin` DO, which resolves the awaiting RPC.
+   `user.getAuthenticatedEmail()`, resolves or creates the email-keyed `UserDurableObject`, and
+   delivers the `"<email>:<secret>"` session token to the `PendingLogin` DO, which resolves the
+   awaiting RPC.
 4. The client stores the token and authenticates as usual.
 
-Sign-in does **not** persist a connected account: the minimal-scope grant is only used to read the
-email and is then discarded by the gatekeeper. To use a gatekeeper's capabilities (repos, Gmail/Docs)
-or Cloudflare AI Gateway billing, the user explicitly **connects** it afterward (which requests the
-full scopes and persists the connection).
+Google and GitHub sign-in do **not** persist a connected account: their minimal-scope grants are
+used only to read the verified email and then discarded. Users connect those gatekeepers separately
+to use repositories, Gmail, or Docs. Cloudflare sign-in persists its full-scope account for the
+billing flow described above.
 
 ## Configuration
 

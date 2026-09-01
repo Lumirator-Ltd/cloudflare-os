@@ -307,7 +307,7 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
   toastsRef.current = toasts
   const [collaborators, setCollaborators] = useState<CollaboratorInfo[]>([])
   const [shareLinks, setShareLinks] = useState<ShareLinkInfo[]>([])
-  const [addEmail, setAddEmail] = useState('')
+  const [addUsername, setAddUsername] = useState('')
   const [addRole, setAddRole] = useState<CollaboratorRole>('use')
   const [adding, setAdding] = useState(false)
   const [newLinkRole, setNewLinkRole] = useState<CollaboratorRole>('use')
@@ -433,7 +433,7 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
     if (open) {
       loadData()
       if (!wasOpenRef.current) {
-        setAddEmail('')
+        setAddUsername('')
         setNewShareLink(null)
         setNewShareLinkId(null)
         setNewShareLinkCopied(false)
@@ -571,18 +571,18 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
   }
 
   const handleAddCollaborator = async () => {
-    const verifiedEmail = addEmail.trim()
-    if (!verifiedEmail || sharingProhibited || addingRef.current) return
+    const username = addUsername.trim()
+    if (!username || sharingProhibited || addingRef.current) return
 
     addingRef.current = true
     setAdding(true)
     try {
-      const result = await overseer.addCollaborator(verifiedEmail, addRole, undefined)
+      const result = await overseer.addCollaborator(username, addRole, undefined)
       if (result === null) {
         toasts.add({ title: t('workspace.sharing.accountNotFound'), variant: 'error' })
       } else {
         const landedId = result.profile.id
-        setAddEmail('')
+        setAddUsername('')
         setInvitedName(result.profile.name)
         setInvitedLinkCopied(false)
         await loadData()
@@ -821,11 +821,15 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
             </div>
             <input
               type="search"
-              placeholder={t('workspace.sharing.verifiedEmail')}
-              aria-label={t('workspace.sharing.verifiedEmail')}
-              value={addEmail}
-              onChange={(e) => setAddEmail(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter') handleAddCollaborator() }}
+              placeholder={t('workspace.sharing.username')}
+              aria-label={t('workspace.sharing.username')}
+              value={addUsername}
+              onChange={(e) => setAddUsername(e.target.value)}
+              onKeyDown={(e) => {
+                if (!e.nativeEvent.isComposing && e.nativeEvent.keyCode !== 229 && e.key === 'Enter') {
+                  handleAddCollaborator()
+                }
+              }}
               name="gadget-share-people-search"
               autoComplete="off"
               autoCorrect="off"
@@ -850,7 +854,7 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
               tone="primary"
               className="col-span-3 w-full !rounded-xl sm:col-span-1 sm:w-auto sm:min-w-[68px]"
               onClick={handleAddCollaborator}
-              disabled={!addEmail.trim() || adding || sharingProhibited}
+              disabled={!addUsername.trim() || adding || sharingProhibited}
             >
               {adding ? t('workspace.sharing.inviting') : t('workspace.sharing.invite')}
             </WorkshopButton>
@@ -927,7 +931,11 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
                       ref={linkNameRef}
                       value={newLinkNote}
                       onChange={(e) => setNewLinkNote(e.target.value)}
-                      onKeyDown={(e) => { if (e.key === 'Enter') handleCreateShareLink() }}
+                      onKeyDown={(e) => {
+                        if (!e.nativeEvent.isComposing && e.nativeEvent.keyCode !== 229 && e.key === 'Enter') {
+                          handleCreateShareLink()
+                        }
+                      }}
                       placeholder={t('workspace.sharing.optionalName')}
                       aria-label={t('workspace.sharing.optionalNameLabel')}
                       className="h-9 min-w-0 flex-1 border-0 bg-transparent p-0 text-[14px] leading-5 tracking-[-0.25px] text-kumo-default outline-none placeholder:text-kumo-inactive"
@@ -1065,6 +1073,7 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
                               value={editingShareLinkNote}
                               onChange={(e) => setEditingShareLinkNote(e.target.value)}
                               onKeyDown={(e) => {
+                                if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return
                                 if (e.key === 'Enter') handleSaveShareLinkNote()
                                 if (e.key === 'Escape') cancelRenameShareLink()
                               }}

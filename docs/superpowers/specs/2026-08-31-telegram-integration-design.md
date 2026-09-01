@@ -36,17 +36,15 @@ Telegram lives inside `workshop-backend` for the MVP. The public router already 
 
 ### Identity linking
 
-`IdentityRegistry` remains the singleton identity authority but stores channel links separately from authentication `subjectKeys`:
+`TelegramChannel` owns a private link store in its Durable Object storage:
 
-- `externalLinks`: unique by `(source, externalSubject)` and `(source, internalUserId)`;
-- `externalLinkTokens`: keyed by SHA-256 digest, with source, internal user ID, identity version, creation, and expiry;
-- at most one pending token per user/source.
+- `telegramLinks`: unique by Telegram user ID and canonical User DO ID;
+- `telegramLinkTokens`: latest-only per User DO ID and indexed by SHA-256 digest and expiry;
+- `telegramLinkReceipts`: token-digest-bound completion receipts indexed by expiry.
 
-Authenticated link methods derive the user from `AuthenticatedApiImpl.#userId`, revalidate current registry authority, and use the literal source `telegram`. Starting a link invalidates the previous token. Completion atomically checks digest, expiry, latest token, active identity/version, and reverse uniqueness before consuming the token and replacing that user's previous Telegram link. Unlink removes the mapping and pending token. A Telegram identity already linked to another user fails closed.
+Authenticated link methods derive the canonical `UserDurableObject` ID string from `AuthenticatedApiImpl.#userId`. Starting a link invalidates the previous token. Completion atomically checks digest, expiry, latest token, and reverse uniqueness before consuming the token and replacing that User DO's previous Telegram link. Unlink removes the mapping and pending token. A Telegram identity already linked to another User DO fails closed.
 
-Telegram completion is idempotent by source and `update_id`: the registry retains a token-digest-bound, external-subject-bound result receipt for 24 hours, so a lost RPC acknowledgement can replay the original success without consuming the token again. Receipts never contain the raw token and expire through bounded alarm cleanup.
-
-Legacy password identities without an active registry record cannot link Telegram. This preserves the stable-identity boundary.
+Telegram completion is idempotent by `update_id`: `TelegramChannel` retains a token-digest-bound, Telegram-user-bound result receipt for 24 hours, so a lost RPC acknowledgement can replay the original success without consuming the token again. Receipts never contain the raw token and expire through bounded alarm cleanup.
 
 ### Backend API
 
@@ -58,9 +56,9 @@ Legacy password identities without an active registry record cannot link Telegra
 
 `ServerConfig` exposes only `telegramEnabled`. The bot username is returned only after backend `getMe` verification and is used to construct the deep link.
 
-The existing `ExternalMessageGateway` gains a binding-owned linked-subject mode and optional external attachments. Telegram calls it internally with fixed props `{source: "telegram", identityMode: "linkedExternalSubject"}`. It resolves Telegram user ID through `IdentityRegistry`, then passes only the stable internal user ID to Overseer. The existing trusted-email mode remains a separate explicit compatibility path and cannot be selected by Telegram input.
+Telegram routing is private to `TelegramChannel`. It resolves the Telegram user ID through its link store, parses the stored canonical User DO ID with `UserDurableObject.idFromString()`, and calls the shared internal `routeExternalMessage()` helper directly. It never accepts an email or provider subject from Telegram and does not pass through `ExternalMessageGateway`; that gateway retains its email-keyed compatibility contract for separately bound callers.
 
-Overseer revalidates that identity as active, applies existing owner/build-collaborator checks, stages incoming images through the existing attachment validator/storage helper, and uses the normal `newChat` / `sendChatMessage` turn path. `GadgetResponse` includes the workspace path so delivery has no submission-result race.
+The internal router applies existing owner/build-collaborator checks, stages incoming images through the existing attachment validator/storage helper, and uses the normal `newChat` / `sendChatMessage` turn path. `GadgetResponse` includes the workspace path so delivery has no submission-result race.
 
 ### Telegram ingress and durable processing
 
@@ -69,7 +67,7 @@ Overseer revalidates that identity as active, applies existing owner/build-colla
 1. requires exact `X-Telegram-Bot-Api-Secret-Token` equality;
 2. rejects bodies over 256 KiB before parsing;
 3. parses a bounded ordinary `message` update;
-4. handles a private `/start` synchronously through the identity registry without writing its bearer token to channel storage, or durably inserts a normalized message record by `update_id`;
+4. handles a private `/start` synchronously through the `TelegramChannel` link store without writing its raw bearer token to durable storage, or durably inserts a normalized message record by `update_id`;
 5. returns 200 only after synchronous link handling or message insertion.
 
 The DO processes records serially and resumes queued work from an alarm. Pending records use a due index separate from 24-hour update-ID tombstones. Delivered, ignored, and terminal records delete prompts, file IDs, responses, and other payload before retaining a tombstone. Alarm cleanup and draining operate in bounded batches.
@@ -85,7 +83,7 @@ The parser selects the largest declared `PhotoSize` at or below 1 MiB and turns 
 - Bot token, webhook secret, and raw link bearer are never written to channel durable storage or included in logs, errors, traces, or user-visible URLs beyond the one intended Telegram deep link.
 - Prompt text, image bytes, Telegram request bodies, Telegram profiles, and token-bearing Bot API URLs are not logged.
 - Link tokens use 32 random bytes, are stored only by digest, expire after ten minutes, are latest-only and single-use, and are invalidated by link/unlink.
-- Telegram IDs and chat/topic IDs are treated as identifiers, not authorization. Authorization always resolves the linked stable Workshop identity and then uses existing workspace ACLs.
+- Telegram IDs and chat/topic IDs are treated as identifiers, not authorization. Authorization always resolves the privately stored canonical User DO ID and then uses existing workspace ACLs.
 - Group membership never grants Workshop access automatically.
 - Telegram API responses and updates are runtime-validated and bounded.
 
@@ -101,10 +99,10 @@ The parser selects the largest declared `PhotoSize` at or below 1 MiB and turns 
 
 ## Testing
 
-- Identity registry tests cover expiry, latest-only replacement, atomic consume, collisions, relink, unlink, inactive identities, and concurrent completion.
+- Telegram link-store tests cover expiry, latest-only replacement, atomic consume, collisions, relink, unlink, idempotent receipts, and concurrent completion.
 - Telegram parser tests cover private/group activation, UTF-16 entities, commands for other bots, anonymous/bot/channel senders, topics, photo captions, and malformed input.
 - Transport tests cover webhook secret, body bounds, `getMe`, fixed origins, streamed photo cap, duplicate updates, restart states, response truncation, and permanent/transient Telegram failures.
-- Backend integration tests prove linked-subject-only identity, normal workspace ACLs, image staging/signature checks, attachment-only input, idempotency, and callback workspace paths.
+- Backend integration tests prove canonical User DO routing, normal workspace ACLs, image staging/signature checks, attachment-only input, idempotency, and callback workspace paths.
 - Frontend tests cover hidden, disconnected, linking, connected, and unlink states.
 - Release/deployment verification proves only the bot token is customer-supplied, the webhook secret is generated, `getMe` binds bot identity, and `setWebhook` succeeds.
 
