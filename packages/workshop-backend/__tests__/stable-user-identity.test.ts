@@ -4,8 +4,12 @@ import type { GatekeeperVendor } from "@gadgets/workshop-shared/gatekeeper";
 import type { JWTPayload } from "jose";
 import { PublicApiImpl } from "../src/server.js";
 import { UserDurableObject } from "../src/user.js";
+import { FORMAT_BLUEPRINTS } from "../src/generated/format-blueprints.js";
 
 const EMAIL = "owner@example.com";
+const USER_DO_ID = "a".repeat(64);
+const WORKSPACE_ID = "b".repeat(64);
+const NEW_WORKSPACE_ID = "c".repeat(64);
 
 function publicApi(
     ctx: ExecutionContext,
@@ -102,6 +106,119 @@ describe("email-keyed user identity", () => {
     expect(registry.getByName).not.toHaveBeenCalled();
   });
 
+  it("round-trips pre-registry and new workspace routes through the canonical User DO ID", async () => {
+    const profile = { type: "user", id: EMAIL, name: "Owner" } as const;
+    const seededWorkspace = {
+      id: WORKSPACE_ID,
+      title: "Pre-registry workspace",
+      created: new Date("2026-01-01T00:00:00Z"),
+      lastActive: new Date("2026-01-02T00:00:00Z"),
+    };
+    const setTitle = vi.fn();
+    const workspace = { setTitle };
+    const open = vi.fn().mockResolvedValue(workspace);
+    const newGadget = vi.fn();
+    const user = {
+      authenticateFromCfAccess: vi.fn(),
+      whoami: vi.fn().mockResolvedValue(profile),
+      listGadgets: vi.fn().mockResolvedValue([seededWorkspace]),
+      newGadget,
+    };
+    const emailUserId = {
+      name: EMAIL,
+      toString: () => USER_DO_ID,
+    } as DurableObjectId;
+    const users = {
+      idFromName: vi.fn().mockReturnValue(emailUserId),
+      get: vi.fn().mockReturnValue(user),
+    };
+    const overseers = {
+      idFromString: vi.fn((id: string) => id),
+      newUniqueId: vi.fn(() => ({ toString: () => NEW_WORKSPACE_ID })),
+      get: vi.fn(() => ({ open })),
+    };
+    const ctx = {
+      exports: {
+        UserDurableObject: users,
+        OverseerDurableObject: overseers,
+        AdminSettings: { getByName: vi.fn().mockReturnValue({}) },
+      },
+      waitUntil: vi.fn(),
+    } as unknown as ExecutionContext;
+
+    const api = await publicApi(ctx, baseEnv(), accessIdentity(EMAIL))
+      .authenticateFromCfAccess();
+
+    await expect(api.listGadgets()).resolves.toEqual([seededWorkspace]);
+    const existing = await api.openGadget(WORKSPACE_ID);
+    await existing.setTitle("Edited pre-registry workspace");
+    await api.newGadget();
+
+    expect(setTitle).toHaveBeenCalledExactlyOnceWith("Edited pre-registry workspace");
+    expect(newGadget).toHaveBeenCalledExactlyOnceWith(NEW_WORKSPACE_ID, "Untitled Workspace");
+    expect(open).toHaveBeenNthCalledWith(
+      1,
+      USER_DO_ID,
+      EMAIL,
+      expect.any(Function),
+      undefined,
+      undefined,
+    );
+    expect(open).toHaveBeenNthCalledWith(
+      2,
+      USER_DO_ID,
+      EMAIL,
+      expect.any(Function),
+      undefined,
+      undefined,
+    );
+    expect(await api.whoami()).toEqual(profile);
+  });
+
+  it("persists imported blueprint ownership as the canonical User DO ID", async () => {
+    const blueprintWrites = new Map<string, string>();
+    const user = {
+      authenticateFromCfAccess: vi.fn(),
+      importBlueprint: vi.fn(),
+    };
+    const emailUserId = {
+      name: EMAIL,
+      toString: () => USER_DO_ID,
+    } as DurableObjectId;
+    const ctx = {
+      exports: {
+        UserDurableObject: {
+          idFromName: vi.fn().mockReturnValue(emailUserId),
+          get: vi.fn().mockReturnValue(user),
+        },
+        OverseerDurableObject: {},
+        AdminSettings: { getByName: vi.fn().mockReturnValue({}) },
+      },
+      waitUntil: vi.fn(),
+    } as unknown as ExecutionContext;
+    const env = baseEnv({
+      BLUEPRINTS: {
+        get: vi.fn().mockResolvedValue(null),
+        put: vi.fn(async (key: string, value: string) => blueprintWrites.set(key, value)),
+        delete: vi.fn(),
+      },
+      BLUEPRINT_CONTENT: {
+        put: vi.fn(async (_key: string, value: ReadableStream<Uint8Array>) => {
+          await new Response(value).arrayBuffer();
+        }),
+        delete: vi.fn(),
+      },
+    });
+    const api = await publicApi(ctx, env, accessIdentity(EMAIL)).authenticateFromCfAccess();
+    const archive = new Response(
+      Uint8Array.fromBase64(FORMAT_BLUEPRINTS[0].archive) as BufferSource,
+    ).body!;
+
+    const blueprintId = await api.importBlueprint(archive);
+
+    expect(JSON.parse(blueprintWrites.get(blueprintId)!)).toMatchObject({ ownerId: USER_DO_ID });
+  });
+
   it("keeps username/password login keyed by the normalized username", async () => {
     const user = { login: vi.fn().mockResolvedValue("password-secret") };
     const userId = { name: "mixed_user", toString: () => "password-user-id" } as DurableObjectId;
@@ -118,6 +235,36 @@ describe("email-keyed user identity", () => {
       .resolves.toBe("mixed_user:password-secret");
 
     expect(users.idFromName).toHaveBeenCalledExactlyOnceWith("mixed_user");
+  });
+});
+
+describe("persisted User DO route references", () => {
+  it("passes the canonical User DO ID through the Gatekeeper callback route", async () => {
+    let callbackProps: { userId: string; accountId: number; vendorId: string } | undefined;
+    const user = Object.assign(Object.create(UserDurableObject.prototype), {
+      ctx: {
+        id: { name: EMAIL, toString: () => USER_DO_ID },
+        exports: {
+          GatekeeperConnectCallbackImpl: ({ props }: any) => {
+            callbackProps = props;
+            return {};
+          },
+        },
+      },
+      env: baseEnv(),
+      vendors: new Map([["provider", {
+        describe: vi.fn().mockResolvedValue({ configuration: { configured: true } }),
+        connectAccount: vi.fn().mockResolvedValue({ url: "https://provider.example/connect" }),
+      }]]),
+      storage: {
+        nextAccountId: { get: vi.fn(() => 7), put: vi.fn() },
+        languagePreference: { get: vi.fn(() => "auto") },
+      },
+    }) as UserDurableObject;
+
+    await user.connectAccount("provider");
+
+    expect(callbackProps).toEqual({ userId: USER_DO_ID, accountId: 7, vendorId: "provider" });
   });
 });
 

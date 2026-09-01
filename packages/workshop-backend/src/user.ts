@@ -1145,7 +1145,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     }
     let done = examined < OUTPUTS_BACKFILL_PAGE;
 
-    let ownerId = this.ctx.id.name!;
+    let ownerId = this.ctx.id.toString();
     let overseers = this.ctx.exports.OverseerDurableObject;
     let results = await Promise.allSettled(targets.map(id =>
         overseers.get(overseers.idFromString(id)).getOutputsForOwnerBackfill(ownerId)));
@@ -1303,7 +1303,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     }
 
     if (kvRecord) {
-      if (kvRecord.ownerId !== this.ctx.id.name) {
+      if (kvRecord.ownerId !== this.ctx.id.toString()) {
         throw new Error("You don't own this blueprint.");
       }
 
@@ -1463,7 +1463,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     this.storage.nextAccountId.put(accountId + 1);
 
     let props = {
-      userId: this.ctx.id.name!,
+      userId: this.ctx.id.toString(),
       accountId,
       vendorId,
     };
@@ -2053,7 +2053,7 @@ export class GatekeeperConnectCallbackImpl
     extends WorkerEntrypoint<Cloudflare.Env, GatekeeperConnectCallbackProps>
     implements GatekeeperConnectCallback {
   #getUserStub() {
-    let userId = this.ctx.exports.UserDurableObject.idFromName(this.ctx.props.userId);
+    let userId = this.ctx.exports.UserDurableObject.idFromString(this.ctx.props.userId);
     return this.ctx.exports.UserDurableObject.get(userId);
   }
 

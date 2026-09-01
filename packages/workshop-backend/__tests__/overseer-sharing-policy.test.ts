@@ -25,6 +25,7 @@ type SharingPolicyOverseer = {
   };
   users: {
     idFromName(name: string): unknown;
+    idFromString?(id: string): unknown;
     get(id: unknown): { whoamiIfExists(): Promise<AiChatAuthorInfo | null> };
   };
   joinPresence(
@@ -77,6 +78,10 @@ type SharingPolicyClient = {
 };
 
 const RESOLVER: AiChatAuthorInfo = { type: "user", id: "owner", name: "Owner" };
+const OWNER_DO_ID = "a".repeat(64);
+const COLLABORATOR_DO_ID = "b".repeat(64);
+const OWNER_EMAIL = "owner@example.com";
+const COLLABORATOR_EMAIL = "collaborator@example.com";
 
 function pendingAction(): ActionRecord & { type: "action" } {
   return {
@@ -348,7 +353,7 @@ describe("Overseer sharing transition concurrency", () => {
       ensureAmbientCapsules: async () => undefined,
       markOutputsDirty: () => undefined,
       users: {
-        idFromName: (id: string) => id,
+        idFromString: (id: string) => id,
         get: () => ({ whoami: async () => (
           { type: "user", id: "collaborator", name: "Collaborator" } as AiChatAuthorInfo
         ) }),
@@ -393,7 +398,7 @@ describe("Overseer sharing transition concurrency", () => {
       ensureAmbientCapsules: async () => undefined,
       markOutputsDirty: () => undefined,
       users: {
-        idFromName: (id: string) => id,
+        idFromString: (id: string) => id,
         get: () => ({ whoami: async () => (
           { type: "user", id: "collaborator", name: "Collaborator" } as AiChatAuthorInfo
         ) }),
@@ -445,28 +450,44 @@ describe("Overseer sharing transition concurrency", () => {
     expect(target.storage.prohibitAllSharing.get()).toBe(true);
   });
 
-  it("lets addCollaborator finish when it starts before a sensitive observation", async () => {
+  it("lets direct email-based collaborator discovery finish before a sensitive observation", async () => {
     const target = overseer(false);
     const profileGate = deferred<AiChatAuthorInfo | null>();
-    const addCollaborator = vi.fn(() => ({
-      profile: { type: "user", id: "collaborator", name: "Collaborator" },
+    const addCollaborator = vi.fn(({ profile }) => ({
+      profile,
       role: "build" as const,
       addedBy: [],
     }));
+    const idFromName = vi.fn((name: string) => name);
     target.users = {
-      idFromName: name => name,
+      idFromName,
       get: () => ({ whoamiIfExists: () => profileGate.promise }),
+    };
+    (target.ctx as any).exports.IdentityRegistry.getByName = () => {
+      throw new Error("sharing discovery must not use the identity registry");
     };
     target.getSharingManager = async () => ({ addCollaborator, hasAnyShares: () => true });
 
-    const sharing = ownerClient(target).addCollaborator("collaborator", "build");
+    const sharing = ownerClient(target).addCollaborator(COLLABORATOR_EMAIL, "build");
+    const sharingResult = expect(sharing).resolves.toMatchObject({
+      profile: expect.objectContaining({ id: COLLABORATOR_EMAIL }),
+      role: "build",
+    });
 
     await expect(sensitiveObservation(target)).rejects.toThrow("sharing access is being granted");
     expect(target.storage.prohibitAllSharing.get()).toBe(false);
 
-    profileGate.resolve({ type: "user", id: "collaborator", name: "Collaborator" });
-    await expect(sharing).resolves.toMatchObject({ role: "build" });
-    expect(addCollaborator).toHaveBeenCalledOnce();
+    const collaboratorProfile = {
+      type: "user",
+      id: COLLABORATOR_EMAIL,
+      name: "Collaborator",
+    } as const;
+    profileGate.resolve(collaboratorProfile);
+    await sharingResult;
+    expect(idFromName).toHaveBeenCalledExactlyOnceWith(COLLABORATOR_EMAIL);
+    expect(addCollaborator).toHaveBeenCalledWith(expect.objectContaining({
+      profile: collaboratorProfile,
+    }));
   });
 
   it("adds no collaborator when sensitive-observation lockdown starts first", async () => {
@@ -662,6 +683,144 @@ describe("Overseer sharing transition concurrency", () => {
     expect(target.scheduleRevocationRestart).not.toHaveBeenCalled();
     await expect(sensitiveObservation(target)).resolves.toBeUndefined();
     expect(target.storage.prohibitAllSharing.get()).toBe(true);
+  });
+});
+
+describe("canonical User DO route persistence", () => {
+  it("routes workspace owner and client by canonical IDs while preserving profile IDs", async () => {
+    const target = overseer(false);
+    const ownerProfile = { type: "user", id: OWNER_EMAIL, name: "Owner" } as const;
+    const collaboratorProfile = {
+      type: "user",
+      id: COLLABORATOR_EMAIL,
+      name: "Collaborator",
+    } as const;
+    const recordSharedGadgetOpen = vi.fn();
+    const owner = { whoami: vi.fn().mockResolvedValue(ownerProfile) };
+    const collaborator = {
+      whoami: vi.fn().mockResolvedValue(collaboratorProfile),
+      recordSharedGadgetOpen,
+    };
+    const idFromString = vi.fn((id: string) => id);
+    Object.assign(target, {
+      ownerId: OWNER_DO_ID,
+      ensureAmbientCapsules: async () => undefined,
+      ensureObserver: async () => undefined,
+      hasOwnerOnlyRestriction: () => false,
+      syncOutputsTo: async () => true,
+      users: {
+        idFromString,
+        idFromName: () => { throw new Error("presentation lookup used for persisted route"); },
+        get: (id: string) => id === OWNER_DO_ID ? owner : collaborator,
+      },
+    });
+    target.storage.prohibitAllSharing.put(false);
+    target.getSharingManager = async () => ({
+      getEffectiveRole: (profileId: string) => profileId === COLLABORATOR_EMAIL ? "build" : null,
+    });
+    const notifyClosed = Object.assign(() => undefined, {
+      dup() { return notifyClosed; },
+      [Symbol.dispose]() {},
+    });
+    const durable = {
+      impl: target,
+      ctx: { id: { toString: () => "workspace-id" } },
+    };
+
+    await Reflect.apply(overseerModule.OverseerDurableObject.prototype.open, durable, [
+      COLLABORATOR_DO_ID,
+      COLLABORATOR_EMAIL,
+      notifyClosed,
+    ]);
+    await vi.waitFor(() => expect(recordSharedGadgetOpen).toHaveBeenCalledOnce());
+
+    expect(idFromString).toHaveBeenCalledWith(OWNER_DO_ID);
+    expect(idFromString).toHaveBeenCalledWith(COLLABORATOR_DO_ID);
+    expect(recordSharedGadgetOpen).toHaveBeenCalledWith(
+      "workspace-id",
+      "Untitled Workspace",
+      ownerProfile,
+      "build",
+    );
+  });
+
+  it("routes output-index fanout through canonical User DO IDs", async () => {
+    const target = overseer(false) as any;
+    const syncWorkspaceOutputs = vi.fn();
+    const idFromString = vi.fn((id: string) => id);
+    const idFromName = vi.fn((id: string) => id);
+    Object.assign(target, {
+      ownerId: OWNER_DO_ID,
+      users: {
+        idFromString,
+        idFromName,
+        get: () => ({ syncWorkspaceOutputs }),
+      },
+    });
+
+    target.markOutputsDirty();
+
+    await vi.waitFor(() => expect(idFromString).toHaveBeenCalledWith(OWNER_DO_ID));
+    expect(syncWorkspaceOutputs).toHaveBeenCalledWith("workspace-id", []);
+  });
+
+  it("persists canonical initiator routes without changing chat-author snapshots", async () => {
+    const target = overseer(false) as any;
+    const startAgent = vi.fn();
+    target.startAgent = startAgent;
+    const profile = { type: "user", id: OWNER_EMAIL, name: "Owner" } as const;
+    const aiModel = {
+      profile: { type: "agent", id: "provider:model", name: "Model" },
+      config: { provider: "provider", apiKey: "test" },
+    };
+    const clientUser = { id: { toString: () => OWNER_DO_ID } };
+
+    const chatId = await target.newChat(clientUser, { profile, aiModel }, "Build an app");
+
+    expect(startAgent).toHaveBeenCalledWith(
+      chatId,
+      aiModel,
+      profile,
+      OWNER_DO_ID,
+      false,
+      false,
+    );
+    expect(target.storage.chats.list().find((entry: any) => entry.chatId === chatId)?.author)
+      .toEqual(profile);
+  });
+
+  it("persists canonical callback initiator routes without changing the callback author", async () => {
+    const target = overseer(false) as any;
+    let tailProps: { executionId: string } | undefined;
+    const agentSelfLoopback = vi.fn().mockReturnValue({});
+    const idFromName = vi.fn(() => ({ toString: () => OWNER_DO_ID }));
+    target.users = { idFromName };
+    target.ctx.exports.CodeModeTailLoopback = ({ props }: any) => {
+      tailProps = props;
+      return {};
+    };
+    target.ctx.exports.AgentSelfLoopback = agentSelfLoopback;
+    target.env = {
+      LOADER: {
+        load: () => ({
+          getEntrypoint: () => ({
+            verify: async () => undefined,
+            run: async () => {
+              await target.deliverCodeModeTrace(tailProps!.executionId, { logs: [] });
+            },
+          }),
+        }),
+      },
+    };
+    const initiator = { type: "user", id: OWNER_EMAIL, name: "Owner" } as const;
+
+    await target.executeCodeMode(1, "", initiator, "provider:model", {});
+
+    expect(idFromName).toHaveBeenCalledExactlyOnceWith(OWNER_EMAIL);
+    expect(agentSelfLoopback).toHaveBeenCalledWith({ props: expect.objectContaining({
+      initiatorUserId: OWNER_DO_ID,
+    }) });
+    expect(initiator.id).toBe(OWNER_EMAIL);
   });
 });
 

@@ -1,5 +1,26 @@
 import { describe, expect, it, vi } from "vitest";
+import { checkAgentUsageAndBalance } from "../src/overseer.js";
 import { UserDurableObject } from "../src/user.js";
+
+const USER_DO_ID = "a".repeat(64);
+
+describe("user-funded billing route", () => {
+  it("reconstructs the configured model provider's user from the canonical User DO ID", async () => {
+    const user = {};
+    const users = {
+      idFromString: vi.fn().mockReturnValue("user-route"),
+      idFromName: vi.fn(() => { throw new Error("presentation lookup used for persisted route"); }),
+      get: vi.fn().mockReturnValue(user),
+    };
+
+    const result = await checkAgentUsageAndBalance({} as Cloudflare.Env, users as never, USER_DO_ID);
+
+    expect(users.idFromString).toHaveBeenCalledExactlyOnceWith(USER_DO_ID);
+    expect(users.idFromName).not.toHaveBeenCalled();
+    expect(result.userStub).toBe(user);
+    expect(result.usage.allowed).toBe(true);
+  });
+});
 
 describe("UserDurableObject Cloudflare credit cache", () => {
   it("does not update credits after the selected account changes", async () => {
