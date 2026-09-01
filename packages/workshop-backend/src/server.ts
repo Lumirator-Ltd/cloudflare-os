@@ -1,4 +1,5 @@
 import { RpcStub, RpcTarget, newHttpBatchRpcResponse, newWebSocketRpcSession, RpcSessionOptions } from "capnweb";
+import type { JWTPayload } from "jose";
 import { validateRpc } from "capnweb-validate";
 import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, LanguagePreference, ClerkAuthentication, TelegramLinkStatus, TelegramLinkStart, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, GATEKEEPER_SESSION_LOGOUT_PATH } from '@gadgets/workshop-shared/api';
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
@@ -13,10 +14,8 @@ import { canonicalizeVerifiedEmail, IdentityRegistry } from "./identity-registry
 import { verifyClerkIdentity } from "./clerk-auth.js";
 import { createClerkSession } from "./clerk-session.js";
 import {
-  CURRENT_GATEKEEPER_SESSION_REQUIRED,
   CURRENT_IDENTITY_AUTHORITY_REQUIRED,
   assertCurrentIdentityAuthority,
-  startGatekeeperSessionWatchdog,
   startIdentityAuthorityWatchdog,
   type VerifiedAuthorityContext,
 } from "./identity-authority.js";
@@ -30,10 +29,10 @@ import { getAiGatewayConfig } from "./ai-gateway.js";
 import { AdminSettings, AdminApiImpl } from "./admin-settings.js";
 import { BlueprintKvRecord, buildBlueprintArchiveStream, sanitizeBlueprintOutput, listFeaturedBlueprintsFromKv, parseBlueprintArchive, randomBlueprintId, readBlueprintContent, readBlueprintKvRecord } from "./blueprint-archive.js";
 import {
+  CLOUDFLARE_VENDOR_ID,
   GatekeeperConnectCallbackImpl,
   normalizeUsername,
   UserDurableObject,
-  type RegistrySessionAuthentication,
 } from "./user";
 import { OverseerDurableObject, GatekeeperLoopback, CodeModeTailLoopback, AgentSpawnerGatekeeper, GatekeeperHookLoopback, GadgetTailLoopback, AgentSelfLoopback, TransientStubLoopback } from "./overseer";
 import { ExternalMessageGateway } from "./external-message-gateway";
@@ -42,16 +41,11 @@ import { handleTelegramWebhook } from "./telegram/webhook.js";
 import { RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { recordAnalytics } from "./analytics";
 import { handleClientErrorRequest } from "./client-errors.js";
-import {
-  verifiedCfAccessIdentity,
-  verifyCfAccessJwt,
-  type VerifiedCfAccessIdentity,
-} from "./access.js";
+import { verifyCfAccessJwt } from "./access.js";
 import { resolveUiFeatureFlags } from "./feature-flags";
 import { serveSiteLogo, SITE_LOGO_PATH } from "./site-logo.js";
 import { createWorkshopLogger } from "./observability";
 import { wrapDoStubForTelemetry } from "./do-telemetry";
-import { armAbsoluteDeadline, type AbsoluteDeadline } from "./absolute-deadline.js";
 import { handleGatekeeperSessionLogoutRequest } from "./gatekeeper-session-logout.js";
 
 const logger = createWorkshopLogger("workshop.server");
@@ -65,18 +59,7 @@ function adminBootstrapMaintenanceResponse(): Response {
 type PublicApiCleanup = {
   run(): Promise<void>;
   failureMessage: string;
-  failureEvent:
-    | "clerk.session.dispose.failed"
-    | "identity.session.dispose.failed"
-    | "gatekeeper.session.dispose.failed";
-};
-
-type GatekeeperPublicApiSession = {
-  user: DurableObjectStub<UserDurableObject>;
-  token: string;
-  subscriberId: string;
-  authentication: RegistrySessionAuthentication;
-  watchdog: { dispose(): void };
+  failureEvent: "clerk.session.dispose.failed";
 };
 
 // Set once we've asked the AdminSettings DO to install the bundled format blueprints (see the
@@ -124,10 +107,6 @@ type Env = Cloudflare.Env & {
 
 const ADMINS_CONFIG_ERROR =
   "ADMINS must be configured as an array of verified email strings.";
-const COLLISION_LOCKED = "Identity collision requires deployment operator assistance.";
-const ACCESS_SESSION_EXPIRED = "Cloudflare Access session expired.";
-const GATEKEEPER_SESSION_EXPIRED = "Gatekeeper session expired.";
-const MAX_TIMEOUT_MILLISECONDS = 0x7fffffff;
 const TELEGRAM_EXTERNAL_SOURCE = "telegram";
 
 function canonicalAdminEmails(value: unknown): string[] {
@@ -795,24 +774,16 @@ class LoginAttemptImpl extends RpcTarget implements LoginAttempt {
 export class PublicApiImpl extends RpcTarget implements PublicApi {
   users: DurableObjectNamespace<UserDurableObject>;
   #clerkSession: "authenticating" | { dispose(): Promise<void> } | undefined;
-  #gatekeeperSession: "authenticating" | GatekeeperPublicApiSession | undefined;
-  #identitySessions = new Map<string, { internalUserId: string; subscriberId: string }>();
   #authorityWatchdogs = new Map<string, { dispose(): void }>();
-  #accessDeadline: ReturnType<typeof setTimeout> | undefined;
-  #accessExpired = false;
-  #gatekeeperDeadline: AbsoluteDeadline | undefined;
-  #gatekeeperExpiresAt: Date | undefined;
-  #gatekeeperExpired = false;
 
   constructor(private ctx: ExecutionContext, private env: Env,
       private abortSession: (reason: Error) => void,
       private abortSignal: AbortSignal,
       private verifyClerk: (token: string) => ReturnType<typeof verifyClerkIdentity>,
-      private accessIdentity?: VerifiedCfAccessIdentity) {
+      private accessPayload?: JWTPayload) {
     super();
     this.users = this.ctx.exports.UserDurableObject;
     this.abortSignal.addEventListener("abort", () => this.#dispose(), { once: true });
-    if (this.accessIdentity) this.#armAccessDeadline();
   }
 
   [Symbol.dispose](): void {
@@ -820,15 +791,7 @@ export class PublicApiImpl extends RpcTarget implements PublicApi {
   }
 
   #dispose(): void {
-    if (this.#accessDeadline !== undefined) clearTimeout(this.#accessDeadline);
-    this.#accessDeadline = undefined;
-    this.#gatekeeperDeadline?.dispose();
-    this.#gatekeeperDeadline = undefined;
-    const cleanup = [
-      ...this.#takeClerkSessionCleanup(),
-      ...this.#takeGatekeeperSessionCleanup(),
-      ...this.#takeIdentitySessionCleanup(),
-    ];
+    const cleanup = this.#takeClerkSessionCleanup();
     for (const watchdog of this.#authorityWatchdogs.values()) watchdog.dispose();
     this.#authorityWatchdogs.clear();
 
@@ -849,59 +812,6 @@ export class PublicApiImpl extends RpcTarget implements PublicApi {
     }
   }
 
-  #armAccessDeadline(): void {
-    const run = () => {
-      this.#accessDeadline = undefined;
-      if (this.abortSignal.aborted || this.#accessExpired || !this.accessIdentity) return;
-      const remaining = this.accessIdentity.expiresAt.getTime() - Date.now();
-      if (remaining <= 0) {
-        this.#expireAccessSession();
-      } else {
-        this.#accessDeadline = setTimeout(run, Math.min(remaining, MAX_TIMEOUT_MILLISECONDS));
-      }
-    };
-
-    const remaining = this.accessIdentity!.expiresAt.getTime() - Date.now();
-    if (!Number.isFinite(remaining) || remaining <= 0) {
-      this.#expireAccessSession();
-    } else if (!this.abortSignal.aborted) {
-      this.#accessDeadline = setTimeout(run, Math.min(remaining, MAX_TIMEOUT_MILLISECONDS));
-    }
-  }
-
-  #expireAccessSession(): void {
-    if (this.#accessExpired) return;
-    this.#accessExpired = true;
-    if (this.#accessDeadline !== undefined) clearTimeout(this.#accessDeadline);
-    this.#accessDeadline = undefined;
-    this.abortSession(new Error(ACCESS_SESSION_EXPIRED));
-  }
-
-  #requireCurrentAccessIdentity(): VerifiedCfAccessIdentity {
-    if (!this.accessIdentity) {
-      throw createAuthError(AUTH_ERROR_CODES.notAuthenticatedWithAccess);
-    }
-    if (this.#accessExpired || this.accessIdentity.expiresAt.getTime() <= Date.now()) {
-      this.#expireAccessSession();
-      throw new Error(ACCESS_SESSION_EXPIRED);
-    }
-    if (this.abortSignal.aborted) throw new Error("This API socket is closed.");
-    return this.accessIdentity;
-  }
-
-  #armGatekeeperDeadline(expiresAt: Date): void {
-    if (this.#gatekeeperExpiresAt && this.#gatekeeperExpiresAt.getTime() <= expiresAt.getTime()) {
-      return;
-    }
-    this.#gatekeeperDeadline?.dispose();
-    this.#gatekeeperExpiresAt = new Date(expiresAt.getTime());
-    this.#gatekeeperDeadline = armAbsoluteDeadline(expiresAt, () => {
-      if (this.#gatekeeperExpired || this.abortSignal.aborted) return;
-      this.#gatekeeperExpired = true;
-      this.abortSession(new Error(GATEKEEPER_SESSION_EXPIRED));
-    });
-  }
-
   #takeClerkSessionCleanup(): PublicApiCleanup[] {
     const session = this.#clerkSession;
     this.#clerkSession = undefined;
@@ -911,92 +821,6 @@ export class PublicApiImpl extends RpcTarget implements PublicApi {
       failureMessage: "failed to dispose Clerk session",
       failureEvent: "clerk.session.dispose.failed",
     }];
-  }
-
-  #takeGatekeeperSessionCleanup(): PublicApiCleanup[] {
-    const session = this.#gatekeeperSession;
-    if (!session || session === "authenticating") {
-      if (session === "authenticating") this.#gatekeeperSession = undefined;
-      return [];
-    }
-    this.#gatekeeperSession = undefined;
-    session.watchdog.dispose();
-    return [{
-      run: () => session.user.unregisterGatekeeperSession(session.token, session.subscriberId),
-      failureMessage: "failed to dispose Gatekeeper session",
-      failureEvent: "gatekeeper.session.dispose.failed",
-    }];
-  }
-
-  #takeIdentitySessionCleanup(): PublicApiCleanup[] {
-    const sessions = [...this.#identitySessions.values()];
-    this.#identitySessions.clear();
-    const registry = this.ctx.exports.IdentityRegistry.getByName("");
-    return sessions.map(session => ({
-      run: () => registry.unregisterIdentitySession(
-        session.internalUserId, session.subscriberId,
-      ),
-      failureMessage: "failed to dispose identity session",
-      failureEvent: "identity.session.dispose.failed",
-    }));
-  }
-
-  async #registerIdentitySession(
-      internalUserId: string, authority: VerifiedAuthorityContext): Promise<void> {
-    const subscriberId = crypto.randomUUID();
-    const registry = this.ctx.exports.IdentityRegistry.getByName("");
-    try {
-      await registry.registerIdentitySession(
-        internalUserId,
-        authority.identityVersion,
-        subscriberId,
-        async () => this.abortSession(new Error(CURRENT_IDENTITY_AUTHORITY_REQUIRED)),
-      );
-    } catch {
-      const error = new Error(CURRENT_IDENTITY_AUTHORITY_REQUIRED);
-      this.abortSession(error);
-      throw error;
-    }
-
-    if (this.abortSignal.aborted) {
-      await registry.unregisterIdentitySession(internalUserId, subscriberId);
-      throw new Error("This API socket is closed.");
-    }
-    this.#identitySessions.set(subscriberId, { internalUserId, subscriberId });
-  }
-
-  #abortGatekeeperSession(reason = new Error(CURRENT_GATEKEEPER_SESSION_REQUIRED)): void {
-    if (!this.abortSignal.aborted) this.abortSession(reason);
-  }
-
-  async #registerGatekeeperSession(
-      user: DurableObjectStub<UserDurableObject>,
-      token: string,
-      authentication: RegistrySessionAuthentication): Promise<void> {
-    const subscriberId = crypto.randomUUID();
-    try {
-      await user.registerGatekeeperSession(
-        token,
-        authentication,
-        subscriberId,
-        async () => this.#abortGatekeeperSession(),
-      );
-    } catch {
-      const error = new Error(CURRENT_GATEKEEPER_SESSION_REQUIRED);
-      this.#abortGatekeeperSession(error);
-      throw error;
-    }
-
-    const watchdog = startGatekeeperSessionWatchdog(
-      () => user.assertGatekeeperSession(token, authentication),
-      reason => this.#abortGatekeeperSession(reason),
-    );
-    if (this.abortSignal.aborted || this.#gatekeeperSession !== "authenticating") {
-      watchdog.dispose();
-      await user.unregisterGatekeeperSession(token, subscriberId);
-      throw new Error("This API socket is closed.");
-    }
-    this.#gatekeeperSession = { user, token, authentication, subscriberId, watchdog };
   }
 
   #startAuthorityWatchdog(
@@ -1035,122 +859,32 @@ export class PublicApiImpl extends RpcTarget implements PublicApi {
     const pending = this.ctx.exports.PendingLogin.get(pendingId);
     const callback = this.ctx.exports.LoginConnectCallbackImpl(
         { props: { pendingId: pendingId.toString(), vendorId } });
-    // Sign-in needs only minimal scopes to verify the user's stable identity. Capability scopes and
-    // billing authority are requested later through the explicit connected-account flow.
-    const { url } = await vendor.connectAccount(callback, { scopes: "auth" });
+    const options = vendorId === CLOUDFLARE_VENDOR_ID
+      ? { scopes: "full" as const, resourceUrlPatterns: [] }
+      : { scopes: "auth" as const };
+    const { url } = await vendor.connectAccount(callback, options);
     // @ts-expect-error Cap'n Web RPC stubs and native RPC targets are compatible but the type
     //     system doesn't know this.
     return { url, attempt: new LoginAttemptImpl(pending) };
   }
 
   async authenticate(token: string): Promise<AuthenticatedApi> {
-    if (this.accessIdentity) {
-      throw new Error("This Cloudflare Access socket cannot authenticate a Gatekeeper session.");
-    }
-    if (this.#clerkSession !== undefined) {
-      throw new Error("This API socket is already authenticating or authenticated with Clerk.");
-    }
-    if (this.#gatekeeperSession !== undefined) {
-      throw new Error("This API socket is already authenticating or authenticated with Gatekeeper.");
-    }
-    if (this.abortSignal.aborted) throw new Error("This API socket is closed.");
-    this.#gatekeeperSession = "authenticating";
-    try {
-      return await this.#authenticateGatekeeperToken(token);
-    } catch (error) {
-      if (this.#gatekeeperSession === "authenticating") this.#gatekeeperSession = undefined;
-      throw error;
-    }
-  }
-
-  async #authenticateGatekeeperToken(token: string): Promise<AuthenticatedApi> {
     let split = token.split(':');
     if (split.length !== 2) {
       throw createAuthError(AUTH_ERROR_CODES.invalidSessionToken);
     }
 
-    const internalUserId = split[0];
-    const userId = this.users.idFromName(internalUserId);
-    const user = this.users.get(userId);
-    const sessionAuthentication = await user.authenticate(split[1]);
-    const rejectStaleSession = async (error: Error): Promise<never> => {
-      try {
-        await user.revokeGatekeeperSession(split[1]);
-      } catch {
-        // Rejection is authoritative even when best-effort stale-token cleanup is unavailable.
-      }
-      throw error;
-    };
-
-    // A registry-backed local token carries the exact authority captured at issuance. Never upgrade
-    // an old unversioned token to whatever registry version happens to be current; only legacy
-    // password users (which have no registry identity) retain that compatibility until Task 7.
-    if (sessionAuthentication) {
-      if (sessionAuthentication.expiresAt.getTime() <= Date.now()) {
-        this.#gatekeeperExpired = true;
-        this.abortSession(new Error(GATEKEEPER_SESSION_EXPIRED));
-        return rejectStaleSession(new Error(GATEKEEPER_SESSION_EXPIRED));
-      }
-      this.#armGatekeeperDeadline(sessionAuthentication.expiresAt);
-    }
-
-    const registry = this.ctx.exports.IdentityRegistry.getByName("");
-    const identity = await registry.getIdentity(internalUserId);
-    let authority: VerifiedAuthorityContext | undefined;
-    if (sessionAuthentication) {
-      if (identity?.status === "collisionLocked") {
-        return rejectStaleSession(new Error(COLLISION_LOCKED));
-      }
-      authority = {
-        canonicalVerifiedEmail: sessionAuthentication.canonicalVerifiedEmail,
-        identityVersion: sessionAuthentication.identityVersion,
-      };
-      try {
-        await assertCurrentIdentityAuthority(registry, internalUserId, authority);
-      } catch {
-        return rejectStaleSession(new Error(CURRENT_IDENTITY_AUTHORITY_REQUIRED));
-      }
-    } else if (identity) {
-      const error = identity.status === "collisionLocked"
-        ? new Error(COLLISION_LOCKED)
-        : new Error(CURRENT_IDENTITY_AUTHORITY_REQUIRED);
-      return rejectStaleSession(error);
-    }
-
-    if (authority && sessionAuthentication) {
-      await this.#registerIdentitySession(internalUserId, authority);
-      await this.#registerGatekeeperSession(user, split[1], sessionAuthentication);
-      this.#startAuthorityWatchdog(internalUserId, authority);
-      if (this.#gatekeeperExpired || !this.#gatekeeperExpiresAt ||
-          this.#gatekeeperExpiresAt.getTime() <= Date.now() || this.abortSignal.aborted) {
-        if (!this.#gatekeeperExpired) {
-          this.#gatekeeperExpired = true;
-          this.abortSession(new Error(GATEKEEPER_SESSION_EXPIRED));
-        }
-        return rejectStaleSession(new Error(GATEKEEPER_SESSION_EXPIRED));
-      }
-    } else if (this.#gatekeeperSession === "authenticating") {
-      // Legacy local-password sessions do not own Gatekeeper token revocation state.
-      this.#gatekeeperSession = undefined;
-    }
-
+    let userId = this.users.idFromName(split[0]);
+    await this.users.get(userId).authenticate(split[1]);
     recordAnalytics(this.ctx, this.env, {
       event_name: "user_authenticated",
-      user_id: userId.name!,
+      user_id: userId.toString(),
       source: "session_token",
     });
-    return new AuthenticatedApiImpl(
-      this.ctx, this.env, userId, this.abortSession, authority,
-      (id, currentAuthority) => this.#startAuthorityWatchdog(id, currentAuthority));
+    return new AuthenticatedApiImpl(this.ctx, this.env, userId, this.abortSession);
   }
 
   async authenticateWithClerk(token: string): Promise<ClerkAuthentication> {
-    if (this.#gatekeeperSession !== undefined) {
-      throw new Error("This API socket is already authenticating or authenticated with Gatekeeper.");
-    }
-    if (this.accessIdentity) {
-      throw new Error("This Cloudflare Access socket cannot authenticate with Clerk.");
-    }
     if (this.#clerkSession !== undefined) {
       throw new Error("This API socket is already authenticated with Clerk.");
     }
@@ -1222,52 +956,28 @@ export class PublicApiImpl extends RpcTarget implements PublicApi {
   }
 
   async authenticateFromCfAccess(): Promise<AuthenticatedApi> {
-    if (this.#gatekeeperSession !== undefined) {
-      throw new Error("This API socket is already authenticating or authenticated with Gatekeeper.");
+    if (!this.accessPayload) {
+      throw createAuthError(AUTH_ERROR_CODES.notAuthenticatedWithAccess);
     }
-    if (this.#clerkSession !== undefined) {
-      throw new Error("This API socket is already authenticating or authenticated with Clerk.");
-    }
-    const accessIdentity = this.#requireCurrentAccessIdentity();
 
-    // The handshake verified every value in this context. Apply deployment signup policy at this
-    // trust boundary before resolving the provider-scoped stable subject and current verified email.
-    const signupsEnabled = (await readAdminConfig(this.env)).signupsEnabled;
-    this.#requireCurrentAccessIdentity();
-    const registry = this.ctx.exports.IdentityRegistry.getByName("");
-    const resolved = await registry.resolveAccessIdentity(
-      accessIdentity.issuer,
-      accessIdentity.audience,
-      accessIdentity.subject,
-      accessIdentity.email,
-      signupsEnabled,
-    );
-    this.#requireCurrentAccessIdentity();
-    const userId = this.users.idFromName(resolved.internalUserId);
-    if (resolved.created) {
+    let email = this.accessPayload.email as string;
+    let userId = this.users.idFromName(email);
+    let signupsEnabled = (await readAdminConfig(this.env)).signupsEnabled;
+    let accountCreated =
+        await this.users.get(userId).authenticateFromCfAccess(email, signupsEnabled);
+    if (accountCreated) {
       recordAnalytics(this.ctx, this.env, {
         event_name: "account_created",
-        user_id: resolved.internalUserId,
+        user_id: userId.toString(),
         source: "cf_access",
       });
     }
-    const authority = {
-      canonicalVerifiedEmail: resolved.canonicalVerifiedEmail,
-      identityVersion: resolved.identityVersion,
-    };
-    await this.#registerIdentitySession(resolved.internalUserId, authority);
-    this.#requireCurrentAccessIdentity();
-    this.#startAuthorityWatchdog(resolved.internalUserId, authority);
     recordAnalytics(this.ctx, this.env, {
       event_name: "user_authenticated",
-      user_id: resolved.internalUserId,
+      user_id: userId.toString(),
       source: "cf_access",
     });
-    const api = new AuthenticatedApiImpl(
-      this.ctx, this.env, userId, this.abortSession, authority,
-      (id, currentAuthority) => this.#startAuthorityWatchdog(id, currentAuthority));
-    this.#requireCurrentAccessIdentity();
-    return api;
+    return new AuthenticatedApiImpl(this.ctx, this.env, userId, this.abortSession);
   }
 
   async login(username: string, passwordHash: Uint8Array): Promise<string | null> {
@@ -1407,7 +1117,7 @@ export default {
             }));
       }
 
-      let accessIdentity: VerifiedCfAccessIdentity | undefined;
+      let accessPayload: JWTPayload | undefined;
 
       if (env.CF_ACCESS_AUD) {
         if (req.headers.get("Origin") !== url.origin) {
@@ -1416,13 +1126,11 @@ export default {
 
         const payload = await verifyCfAccessJwt(req, env);
         if (!payload) return new Response("Invalid CF access JWT.", { status: 403 });
-
-        const verifiedIdentity = verifiedCfAccessIdentity(payload, env);
-        if (!verifiedIdentity) {
-          return new Response("Access JWT lacks required identity claims.", { status: 403 });
+        if (!payload.email) {
+          return new Response("Access JWT lacks email claim.", { status: 403 });
         }
 
-        accessIdentity = verifiedIdentity;
+        accessPayload = payload;
       }
 
       // HACK: Implement `abortSession` callback by closing the websocket.
@@ -1436,7 +1144,7 @@ export default {
 
       return await newWorkersRpcResponse(req,
           new PublicApiImpl(
-            ctx, env, abortSession, abortController.signal, verifyClerk, accessIdentity),
+            ctx, env, abortSession, abortController.signal, verifyClerk, accessPayload),
           { abortSignal: abortController.signal });
     }
 

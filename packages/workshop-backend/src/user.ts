@@ -460,15 +460,36 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     };
   }
 
-  /** Authenticates a local token and returns its captured registry authority when present. */
-  async authenticate(token: string): Promise<RegistrySessionAuthentication | null> {
-    const tokenId = await this.#gatekeeperTokenId(token);
-    const session = this.storage.sessions.get(tokenId);
-    if (!session) throw createAuthError(AUTH_ERROR_CODES.invalidSessionToken);
-    if (session.kind !== "gatekeeper") return null;
-    const authentication = this.#exactGatekeeperSession(tokenId);
-    if (!authentication) throw createAuthError(AUTH_ERROR_CODES.invalidSessionToken);
-    return authentication;
+  async authenticate(token: string): Promise<void> {
+    let tokenBytes: Uint8Array;
+    try {
+      tokenBytes = Uint8Array.fromBase64(token);
+    } catch {
+      throw createAuthError(AUTH_ERROR_CODES.invalidSessionToken);
+    }
+    let hash = await crypto.subtle.digest('SHA-256', tokenBytes);
+    let tokenId = new Uint8Array(hash).toHex();
+    let session = this.storage.sessions.get(tokenId);
+    if (!session) {
+      throw createAuthError(AUTH_ERROR_CODES.invalidSessionToken);
+    }
+  }
+
+  async authenticateFromCfAccess(email: string, allowCreate: boolean): Promise<boolean> {
+    if (!this.storage.created.get()) {
+      if (!allowCreate) {
+        throw new Error("New sign-ups are currently disabled on this deployment.");
+      }
+      this.storage.created.put(true);
+      this.storage.profile.put({
+        type: "user",
+        name: email.split("@")[0],
+        id: email,
+      });
+      return true;
+    }
+
+    return false;
   }
 
   /**
@@ -575,6 +596,19 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     let passwordHashHash = new Uint8Array(await crypto.subtle.digest('SHA-256', passwordHash));
     this.storage.passwordHashHash.put(passwordHashHash);
 
+    return this.#newSessionToken();
+  }
+
+  async loginOrCreateViaGatekeeper(email: string, allowCreate: boolean): Promise<string | null> {
+    if (!this.storage.created.get()) {
+      if (!allowCreate) return null;
+      this.storage.created.put(true);
+      this.storage.profile.put({
+        type: "user",
+        name: email.split("@")[0],
+        id: email,
+      });
+    }
     return this.#newSessionToken();
   }
 

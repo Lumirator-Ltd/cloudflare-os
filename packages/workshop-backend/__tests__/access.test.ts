@@ -1,9 +1,6 @@
-import { describe, expect, it, vi } from "vitest";
-import {
-  accessRateLimitKey,
-  verifiedCfAccessIdentity,
-  verifyCfAccessJwt,
-} from "../src/access.js";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { accessRateLimitKey, verifyCfAccessJwt } from "../src/access.js";
+import workshop from "../src/server.js";
 
 const joseMocks = vi.hoisted(() => ({
   createRemoteJWKSet: vi.fn(() => vi.fn()),
@@ -17,8 +14,39 @@ const accessEnv = {
   CF_ACCESS_ISS: "https://team.cloudflareaccess.com",
 };
 
+function workshopRequest(payload: Record<string, unknown>): Promise<Response> {
+  joseMocks.jwtVerify.mockResolvedValueOnce({ payload });
+  const request = new Request("https://workshop.example/api", {
+    headers: {
+      Origin: "https://workshop.example",
+      "cf-access-jwt-assertion": "signed-token",
+    },
+  });
+  const env = {
+    ...accessEnv,
+    BLUEPRINTS: { get: vi.fn().mockResolvedValue(null) },
+  } as unknown as Cloudflare.Env;
+  const ctx = {
+    exports: {
+      AdminSettings: {
+        getByName: vi.fn().mockReturnValue({
+          ensureFormatBlueprintsInstalled: vi.fn().mockResolvedValue(true),
+        }),
+      },
+      UserDurableObject: {},
+    },
+    waitUntil: vi.fn(),
+  } as unknown as ExecutionContext;
+  return workshop.fetch(request, env, ctx);
+}
+
+beforeEach(() => {
+  joseMocks.jwtVerify.mockReset();
+});
+
 describe("verifyCfAccessJwt", () => {
   it("passes the exact configured issuer and audience to JWT verification", async () => {
+    joseMocks.jwtVerify.mockResolvedValueOnce({ payload: { sub: "user-1" } });
     const request = new Request("https://workshop.example/api", {
       headers: { "cf-access-jwt-assertion": "signed-token" },
     });
@@ -40,6 +68,7 @@ describe("verifyCfAccessJwt", () => {
   });
 
   it("reuses the remote JWK set for requests with the same issuer", async () => {
+    joseMocks.jwtVerify.mockResolvedValue({ payload: { sub: "user-1" } });
     joseMocks.createRemoteJWKSet.mockClear();
     const request = new Request("https://workshop.example/api", {
       headers: { "cf-access-jwt-assertion": "signed-token" },
@@ -91,46 +120,19 @@ describe("verifyCfAccessJwt", () => {
   });
 });
 
-describe("verifiedCfAccessIdentity", () => {
-  const now = Date.UTC(2026, 0, 1);
-  const validClaims = {
-    sub: "access-user-1",
-    email: "Person@Example.com",
-    exp: Math.floor(now / 1_000) + 60,
-  };
-
-  it("preserves only a complete verified Access identity context", () => {
-    expect(verifiedCfAccessIdentity(validClaims, accessEnv, now)).toEqual({
-      subject: validClaims.sub,
-      email: validClaims.email,
-      expiresAt: new Date(validClaims.exp * 1_000),
-      issuer: accessEnv.CF_ACCESS_ISS,
-      audience: accessEnv.CF_ACCESS_AUD,
-    });
-  });
-
+describe("Workshop Access boundary", () => {
   it.each([
-    ["missing subject", { ...validClaims, sub: undefined }],
-    ["blank subject", { ...validClaims, sub: "  " }],
-    ["missing email", { ...validClaims, email: undefined }],
-    ["blank email", { ...validClaims, email: "\t" }],
-    ["missing expiry", { ...validClaims, exp: undefined }],
-    ["non-numeric expiry", { ...validClaims, exp: "later" }],
-    ["fractional expiry", { ...validClaims, exp: validClaims.exp + 0.5 }],
-    ["infinite expiry", { ...validClaims, exp: Number.POSITIVE_INFINITY }],
-    ["expiry outside the JavaScript Date range", { ...validClaims, exp: 8_640_000_000_001 }],
-    ["expired assertion", { ...validClaims, exp: Math.floor(now / 1_000) }],
-  ])("rejects a verified payload with %s", (_name, claims) => {
-    expect(verifiedCfAccessIdentity(claims, accessEnv, now)).toBeNull();
+    ["missing", {}],
+    ["empty", { email: "" }],
+    ["null", { email: null }],
+    ["zero", { email: 0 }],
+    ["false", { email: false }],
+  ])("rejects a signed payload with %s email", async (_label, payload) => {
+    expect((await workshopRequest(payload)).status).toBe(403);
   });
 
-  it("rejects identity context without configured issuer and audience", () => {
-    expect(verifiedCfAccessIdentity(validClaims, {
-      CF_ACCESS_ISS: accessEnv.CF_ACCESS_ISS,
-    }, now)).toBeNull();
-    expect(verifiedCfAccessIdentity(validClaims, {
-      CF_ACCESS_AUD: accessEnv.CF_ACCESS_AUD,
-    }, now)).toBeNull();
+  it("passes a truthy non-canonical email string through without extra validation", async () => {
+    expect((await workshopRequest({ email: "  Not An Email  " })).status).toBe(400);
   });
 });
 
