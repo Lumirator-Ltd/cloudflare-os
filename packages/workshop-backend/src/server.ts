@@ -13,11 +13,7 @@ import { deploymentOutputForBlueprint, listFormatOffers, readAdminConfig } from 
 import { IdentityRegistry } from "./identity-registry.js";
 import { verifyClerkIdentity } from "./clerk-auth.js";
 import { createClerkSession } from "./clerk-session.js";
-import {
-  CURRENT_IDENTITY_AUTHORITY_REQUIRED,
-  assertCurrentIdentityAuthority,
-  type VerifiedAuthorityContext,
-} from "./identity-authority.js";
+import type { VerifiedAuthorityContext } from "./identity-authority.js";
 import { assertAdminBootstrap } from "./admin-bootstrap-gate.js";
 
 // Re-export the optional-feature Durable Objects + entrypoints so they can be bound in wrangler.
@@ -104,8 +100,6 @@ type Env = Cloudflare.Env & {
 
 // =======================================================================================
 
-const TELEGRAM_EXTERNAL_SOURCE = "telegram";
-
 @validateRpc()
 class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   constructor(private ctx: ExecutionContext, private env: Env,
@@ -149,22 +143,6 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     return admins.includes(name);
   }
 
-  async #requireCurrentRegistryAuthority(): Promise<{
-    internalUserId: string;
-    authority: VerifiedAuthorityContext;
-  }> {
-    const internalUserId = this.#userId.name;
-    if (!this.authority || !internalUserId) {
-      throw new Error(CURRENT_IDENTITY_AUTHORITY_REQUIRED);
-    }
-    await assertCurrentIdentityAuthority(
-      this.ctx.exports.IdentityRegistry.getByName(""),
-      internalUserId,
-      this.authority,
-    );
-    return { internalUserId, authority: this.authority };
-  }
-
   whoami(): Promise<AiChatAuthorInfo> {
     return this.#user.whoami();
   }
@@ -185,23 +163,14 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   }
 
   async getTelegramLinkStatus(): Promise<TelegramLinkStatus> {
-    const { internalUserId, authority } = await this.#requireCurrentRegistryAuthority();
-    const status = await this.ctx.exports.IdentityRegistry.getByName("").getExternalLinkStatus(
-      internalUserId,
-      authority.identityVersion,
-      TELEGRAM_EXTERNAL_SOURCE,
-    );
-    return { connected: status.connected };
+    return await this.ctx.exports.TelegramChannel.getByName("")
+      .getLinkStatus(this.#userId.toString());
   }
 
   async startTelegramLink(): Promise<TelegramLinkStart> {
-    const { internalUserId, authority } = await this.#requireCurrentRegistryAuthority();
-    const bot = await this.ctx.exports.TelegramChannel.getByName("").getBotIdentity();
-    const link = await this.ctx.exports.IdentityRegistry.getByName("").startExternalLink(
-      internalUserId,
-      authority.identityVersion,
-      TELEGRAM_EXTERNAL_SOURCE,
-    );
+    const channel = this.ctx.exports.TelegramChannel.getByName("");
+    const bot = await channel.getBotIdentity();
+    const link = await channel.startLink(this.#userId.toString());
     return {
       url: `https://t.me/${bot.username}?start=${encodeURIComponent(link.token)}`,
       expiresAt: link.expiresAt,
@@ -209,12 +178,8 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   }
 
   async unlinkTelegram(): Promise<void> {
-    const { internalUserId, authority } = await this.#requireCurrentRegistryAuthority();
-    await this.ctx.exports.IdentityRegistry.getByName("").unlinkExternalIdentity(
-      internalUserId,
-      authority.identityVersion,
-      TELEGRAM_EXTERNAL_SOURCE,
-    );
+    await this.ctx.exports.TelegramChannel.getByName("")
+      .unlink(this.#userId.toString());
   }
 
   listModels(): Promise<AiChatAuthorInfo[]> {

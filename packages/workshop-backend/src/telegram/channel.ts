@@ -23,6 +23,8 @@ import type {
   TelegramUpdateStatus,
 } from "./types.js";
 import { createWorkshopLogger } from "../observability.js";
+import { routeExternalMessage } from "../external-message-routing.js";
+import { TelegramLinkStore } from "./link-store.js";
 
 const logger = createWorkshopLogger("workshop.telegram.channel");
 const PENDING_RECORD_PREFIX = "telegram:pending:record:";
@@ -238,11 +240,32 @@ export class TelegramUpdateStore {
 
 export class TelegramChannel extends DurableObject<Cloudflare.Env> {
   readonly #store: TelegramUpdateStore;
+  readonly #links: TelegramLinkStore;
   #draining = false;
 
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
     this.#store = new TelegramUpdateStore(ctx.storage);
+    this.#links = new TelegramLinkStore(ctx.storage);
+  }
+
+  async getLinkStatus(userDurableObjectId: string): Promise<{ connected: boolean }> {
+    const status = this.#links.status(userDurableObjectId);
+    await this.#scheduleAlarm();
+    return status;
+  }
+
+  async startLink(
+    userDurableObjectId: string,
+  ): Promise<{ token: string; expiresAt: Date }> {
+    const link = await this.#links.start(userDurableObjectId);
+    await this.#scheduleAlarm();
+    return link;
+  }
+
+  async unlink(userDurableObjectId: string): Promise<void> {
+    this.#links.unlink(userDurableObjectId);
+    await this.#scheduleAlarm();
   }
 
   async enqueueUpdate(rawUpdate: unknown): Promise<void> {
@@ -264,18 +287,19 @@ export class TelegramChannel extends DurableObject<Cloudflare.Env> {
     }
     const inserted = this.#store.enqueue(update);
     if (!inserted && !this.#store.get(update.updateId)) return;
-    await this.ctx.storage.setAlarm(Date.now());
+    await this.#scheduleAlarm();
     this.ctx.waitUntil(this.#drain());
   }
 
   async receiveResponse(updateId: string, response: GadgetResponse): Promise<void> {
     this.#store.storeResponse(updateId, { text: response.text, chatPath: response.chatPath });
-    await this.ctx.storage.setAlarm(Date.now());
+    await this.#scheduleAlarm();
     this.ctx.waitUntil(this.#drain());
   }
 
   async alarm(): Promise<void> {
     this.#store.cleanupExpiredTombstones();
+    this.#links.cleanup();
     await this.#drain();
   }
 
@@ -297,8 +321,7 @@ export class TelegramChannel extends DurableObject<Cloudflare.Env> {
 
   async #completeStart(update: TelegramStartUpdate): Promise<void> {
     if (this.#store.isDuplicate(update.updateId)) return;
-    const result = await this.ctx.exports.IdentityRegistry.getByName("").completeExternalLink(
-      "telegram",
+    const result = await this.#links.complete(
       update.token,
       update.userId,
       update.updateId,
@@ -330,8 +353,7 @@ export class TelegramChannel extends DurableObject<Cloudflare.Env> {
       }
     } finally {
       this.#draining = false;
-      if (processed === DRAIN_BATCH_SIZE) await this.ctx.storage.setAlarm(Date.now());
-      else await this.#scheduleAlarm();
+      await this.#scheduleAlarm();
     }
   }
 
@@ -359,20 +381,36 @@ export class TelegramChannel extends DurableObject<Cloudflare.Env> {
       const responseTarget = this.ctx.exports.TelegramResponseTarget({
         props: { updateId: record.update.updateId },
       });
-      const gateway = this.ctx.exports.ExternalMessageGateway({
-        props: { source: "telegram", identityMode: "linkedExternalSubject" },
-      });
-      const result = await gateway.submitExternalMessage({
-        identityMode: "linkedExternalSubject",
-        externalSubject: record.update.userId,
-        gadgetKey: record.update.workspaceKey,
-        chatKey: record.update.chatKey,
-        messageKey: record.update.updateId,
-        gadgetTitle: record.update.title,
-        prompt: record.update.prompt,
-        attachments,
-        chatGatewayRpcTarget: responseTarget,
-      });
+      const linkedUserId = this.#links.findUserDurableObjectId(record.update.userId);
+      let result: Awaited<ReturnType<typeof routeExternalMessage>>;
+      if (linkedUserId === null) {
+        result = { accepted: false, message: "Please link your account to continue." };
+      } else {
+        let userId: DurableObjectId;
+        try {
+          userId = this.ctx.exports.UserDurableObject.idFromString(linkedUserId);
+        } catch {
+          result = { accepted: false, message: "Please link your account to continue." };
+          this.#store.storeResponse(record.update.updateId, {
+            text: result.message,
+            chatPath: "",
+          });
+          return true;
+        }
+        result = await routeExternalMessage(
+          this.ctx.exports.OverseerDurableObject,
+          userId,
+          {
+            gadgetKey: `telegram:${record.update.workspaceKey}`,
+            externalChatKey: `telegram:${record.update.chatKey}`,
+            idempotencyKey: `telegram:${record.update.updateId}`,
+            title: record.update.title,
+            prompt: record.update.prompt,
+            attachments,
+            chatGatewayRpcTarget: responseTarget,
+          },
+        );
+      }
       if (result.accepted) {
         this.#store.markSubmitted(record.update.updateId);
       } else {
@@ -439,7 +477,13 @@ export class TelegramChannel extends DurableObject<Cloudflare.Env> {
   }
 
   async #scheduleAlarm(): Promise<void> {
-    const next = this.#store.nextAlarmAt();
+    const updateAt = this.#store.nextAlarmAt();
+    const linkAt = this.#links.nextAlarmAt();
+    const next = updateAt === null
+      ? linkAt
+      : linkAt === null
+        ? updateAt
+        : Math.min(updateAt, linkAt);
     if (next === null) await this.ctx.storage.deleteAlarm();
     else await this.ctx.storage.setAlarm(next);
   }

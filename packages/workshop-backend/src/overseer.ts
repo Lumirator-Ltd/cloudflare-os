@@ -679,12 +679,23 @@ type ExternalMessageResponseTargetRegistrationDecision =
       record: ExternalMessageRecord;
     };
 
+type NativeChatGatewayCallback = Extract<
+  ChatGatewayCallback,
+  { dup(): ChatGatewayCallback }
+>;
+
+function isNativeChatGatewayCallback(
+  callback: ChatGatewayCallback,
+): callback is NativeChatGatewayCallback {
+  return callback instanceof NativeRpcStub;
+}
+
 function retainChatGatewayCallback(callback: ChatGatewayCallback): ChatGatewayCallback {
-  return "dup" in callback ? callback.dup() : callback;
+  return isNativeChatGatewayCallback(callback) ? callback.dup() : callback;
 }
 
 function releaseChatGatewayCallback(callback: ChatGatewayCallback): void {
-  if (Symbol.dispose in callback) callback[Symbol.dispose]();
+  if (isNativeChatGatewayCallback(callback)) callback[Symbol.dispose]();
 }
 
 type ExternalMessageSubmitInput = {
@@ -694,10 +705,7 @@ type ExternalMessageSubmitInput = {
   attachments?: ChatAttachmentUpload[];
   chatGatewayRpcTarget: ChatGatewayCallback;
   title: string;
-} & (
-  | { identityMode: "trustedEmail"; callerEmail: string }
-  | { identityMode: "internalUserId"; internalUserId: string }
-);
+};
 
 type ExternalChatRecord = {
   externalChatKey: string;
@@ -7044,26 +7052,16 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   async receiveExternalMessage(
+    callerUserId: string,
     input: ExternalMessageSubmitInput,
   ): Promise<SubmitExternalMessageResult> {
     if (!input.prompt.trim() && !input.attachments?.length) {
       return { accepted: false, message: "Please include a prompt or attachment." };
     }
 
-    let registry = this.impl.ctx.exports.IdentityRegistry.getByName("");
-    let callerId: string;
-    if (input.identityMode === "internalUserId") {
-      let identity = await registry.getIdentity(input.internalUserId);
-      if (identity?.status !== "active" || identity.canonicalVerifiedEmail === null) {
-        return { accepted: false, message: "Please link an active account to continue." };
-      }
-      callerId = identity.internalUserId;
-    } else {
-      let internalUserId = await registry.findInternalUserIdByVerifiedEmail(input.callerEmail);
-      callerId = internalUserId ?? input.callerEmail;
-    }
-    let caller = this.impl.users.getByName(callerId);
-    callerId = caller.id.toString();
+    const callerObjectId = this.impl.users.idFromString(callerUserId);
+    const callerId = callerObjectId.toString();
+    const caller = this.impl.users.get(callerObjectId);
     let callerProfile = await caller.whoamiIfExists();
     if (!callerProfile) {
       let siteName = resolveSiteName((await readAdminConfig(this.impl.env)).siteName);
