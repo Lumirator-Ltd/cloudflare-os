@@ -16,6 +16,38 @@ function stubGitHub(...bodies: unknown[]): void {
   })));
 }
 
+describe("GitHubApi.getAuthenticatedEmail", () => {
+  it("returns the primary verified email", async () => {
+    stubGitHub([
+      { email: "secondary@example.com", primary: false, verified: true },
+      { email: "verified@example.com", primary: true, verified: true },
+    ]);
+    const account = new GitHubApi(async () => "test-token");
+
+    expect(await account.getAuthenticatedEmail()).toBe("verified@example.com");
+  });
+
+  it("falls back to a verified email when the primary email is unverified", async () => {
+    stubGitHub([
+      { email: "unverified@example.com", primary: true, verified: false },
+      { email: "verified@example.com", primary: false, verified: true },
+    ]);
+    const account = new GitHubApi(async () => "test-token");
+
+    expect(await account.getAuthenticatedEmail()).toBe("verified@example.com");
+  });
+
+  it("rejects emails GitHub reports as unverified", async () => {
+    stubGitHub([
+      { email: "unverified@example.com", primary: true, verified: false },
+      { email: "also-unverified@example.com", primary: false, verified: false },
+    ]);
+    const account = new GitHubApi(async () => "test-token");
+
+    await expect(account.getAuthenticatedEmail()).resolves.toBeNull();
+  });
+});
+
 describe("GitHubApi.getAuthenticationIdentity", () => {
   it("uses the immutable numeric viewer id rather than mutable login or email", async () => {
     stubGitHub(

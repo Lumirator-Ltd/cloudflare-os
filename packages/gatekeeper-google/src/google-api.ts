@@ -205,9 +205,12 @@ export async function getGoogleAuthenticationIdentity(
   return { subject: data.sub, verifiedEmail: data.email };
 }
 
-/** @deprecated Use `getGoogleAuthenticationIdentity()` for sign-in. */
+/** Returns the email only when Google marks it as verified. */
 export async function getGoogleVerifiedEmail(accessToken: string): Promise<string | null> {
-  return (await getGoogleAuthenticationIdentity(accessToken))?.verifiedEmail ?? null;
+  const data = await fetchGoogleUserInfo(accessToken);
+  if (typeof data.email !== "string" || data.email.trim().length === 0 ||
+      data.email_verified !== true) return null;
+  return data.email;
 }
 
 /** `signal` lets the caller bound the round trip; UserAccount holds the credential mutex across this. */

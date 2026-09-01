@@ -1328,7 +1328,7 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
   }
 
   async getAuthenticatedEmail(): Promise<string | null> {
-    return (await this.getAuthenticationIdentity())?.verifiedEmail ?? null;
+    return await this.#withApi(api => api.getAuthenticatedEmail());
   }
 
   async getSupportedResources(): Promise<SupportedResource[]> {

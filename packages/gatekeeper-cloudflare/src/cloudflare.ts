@@ -11,7 +11,7 @@ import {
   getOAuthConfig, buildAuthorizeUrl, generatePkce, exchangeCode, refreshTokens,
   AUTH_SCOPES, BILLING_SCOPES, persistentScopesForResources,
 } from "./oauth";
-import { fetchIdentity } from "./cloudflare-api";
+import { fetchAuthenticatedEmail, fetchIdentity } from "./cloudflare-api";
 import {
   OBSERVABILITY_RESOURCES,
   ACCOUNT_OBSERVABILITY_RESOURCE,
@@ -411,7 +411,8 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
   }
 
   async getAuthenticatedEmail(): Promise<string | null> {
-    return (await this.getAuthenticationIdentity())?.verifiedEmail ?? null;
+    const token = await this.#account().getAccessToken();
+    return token ? fetchAuthenticatedEmail(token) : null;
   }
 
   async ensureResources(resourceUrlPatterns: string[]): Promise<{url?: string}> {

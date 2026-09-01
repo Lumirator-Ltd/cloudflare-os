@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import * as cloudflareApi from "../src/cloudflare-api";
 import { fetchIdentity, listAccounts } from "../src/cloudflare-api";
 
 const TOKEN = "test-token";
@@ -10,6 +11,37 @@ afterEach(() => {
 function stubIdentity(result: unknown): void {
   vi.stubGlobal("fetch", vi.fn(async () => Response.json({ success: true, result })));
 }
+
+describe("fetchAuthenticatedEmail", () => {
+  it("returns the email from Cloudflare's verified /user identity", async () => {
+    let requestPath: string | undefined;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      requestPath = new URL(String(input)).pathname;
+      return Response.json({
+        success: true,
+        result: {
+          id: "stable-cloudflare-user-id",
+          email: "verified@example.com",
+        },
+      });
+    }));
+
+    expect(await cloudflareApi.fetchAuthenticatedEmail(TOKEN)).toBe("verified@example.com");
+    expect(requestPath).toBe("/client/v4/user");
+  });
+
+  it("rejects email data outside a successful Cloudflare identity envelope", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({
+      success: false,
+      result: {
+        id: "stable-cloudflare-user-id",
+        email: "unverified@example.com",
+      },
+    })));
+
+    await expect(cloudflareApi.fetchAuthenticatedEmail(TOKEN)).resolves.toBeNull();
+  });
+});
 
 describe("fetchIdentity", () => {
   it("returns the immutable Cloudflare user id and verified account email", async () => {

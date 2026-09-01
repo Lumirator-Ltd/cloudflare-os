@@ -487,20 +487,28 @@ export class GitHubApi {
     return await this.#conditionalGet<GitHubSimpleUser>("/user", undefined, options);
   }
 
-  /**
-   * Returns the account's primary, verified email (for use as a sign-in identity), or null if the
-   * account has no verified email. Requires the `user:email` scope.
-   */
-  async getPrimaryVerifiedEmail(): Promise<string | null> {
+  async #getVerifiedEmail(requirePrimary: boolean): Promise<string | null> {
     const result = await this.#request<unknown>("GET", "/user/emails", {});
     if (!Array.isArray(result.data)) return null;
-    const primary = result.data.find((candidate: unknown) => {
+    const emails = result.data.filter((candidate: unknown): candidate is Record<string, unknown> => {
       if (typeof candidate !== "object" || candidate === null) return false;
       const email = candidate as Record<string, unknown>;
-      return email.primary === true && email.verified === true &&
-        typeof email.email === "string" && email.email.trim().length > 0;
-    }) as Record<string, unknown> | undefined;
-    return typeof primary?.email === "string" ? primary.email : null;
+      return email.verified === true && typeof email.email === "string" &&
+        email.email.trim().length > 0;
+    });
+    const selected = emails.find(email => email.primary === true) ??
+      (requirePrimary ? undefined : emails[0]);
+    return typeof selected?.email === "string" ? selected.email : null;
+  }
+
+  /** Returns the account's primary verified email. Requires the `user:email` scope. */
+  async getPrimaryVerifiedEmail(): Promise<string | null> {
+    return this.#getVerifiedEmail(true);
+  }
+
+  /** Returns the primary verified email, or another verified email when no primary is available. */
+  async getAuthenticatedEmail(): Promise<string | null> {
+    return this.#getVerifiedEmail(false);
   }
 
   /** Returns the immutable numeric viewer ID and primary verified email for sign-in. */

@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { getGoogleAuthenticationIdentity } from "../src/google-api.js";
+import {
+  getGoogleAuthenticationIdentity,
+  getGoogleVerifiedEmail,
+} from "../src/google-api.js";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -10,6 +13,26 @@ function stubUserInfo(body: unknown): ReturnType<typeof vi.fn> {
   vi.stubGlobal("fetch", fetch);
   return fetch;
 }
+
+describe("getGoogleVerifiedEmail", () => {
+  it("returns a provider-verified email without requiring a stable subject", async () => {
+    stubUserInfo({
+      email: "verified@example.com",
+      email_verified: true,
+    });
+
+    expect(await getGoogleVerifiedEmail("test-token")).toBe("verified@example.com");
+  });
+
+  it("rejects an email Google reports as unverified", async () => {
+    stubUserInfo({
+      email: "unverified@example.com",
+      email_verified: false,
+    });
+
+    await expect(getGoogleVerifiedEmail("test-token")).resolves.toBeNull();
+  });
+});
 
 describe("getGoogleAuthenticationIdentity", () => {
   it("returns the stable Google subject and verified email from one userinfo fetch", async () => {
