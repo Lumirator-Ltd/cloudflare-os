@@ -694,8 +694,9 @@ export interface GatekeeperUser extends WorkerEntrypoint {
   /**
    * For vendors that advertise `providesAuth`, returns the account's email address for use as the
    * user's sign-in identity. The email MUST be verified by the provider (e.g. Google
-   * `email_verified`, a GitHub primary+verified email, or a Cloudflare account email) — the
-   * Workshop keys accounts by email, so an unverified address would allow account takeover.
+   * `email_verified`, a verified GitHub email that prefers the primary address but intentionally
+   * falls back to another verified address, or a Cloudflare account email) — the Workshop keys
+   * accounts by email, so an unverified address would allow account takeover.
    * Returns null when the account has no verified email or the vendor does not support auth.
    */
   getAuthenticatedEmail(): Promise<string | null>;

@@ -19,8 +19,9 @@ only (ignored unless the allowlist is non-empty, to avoid locking everyone out).
 The primary account key for authentication gatekeepers is the user's **provider-verified email**.
 Signing in with any allowlisted gatekeeper that returns the same email resolves to the same account:
 its `UserDurableObject` is addressed directly by `idFromName(email)`. Gatekeepers must return only an
-email their provider has verified (Google `email_verified`, a GitHub primary and verified email, or
-the Cloudflare account email); otherwise sign-in fails.
+email their provider has verified. GitHub prefers the primary verified address but intentionally
+falls back to another verified address; Google requires `email_verified`, and Cloudflare uses the
+account email. Otherwise sign-in fails.
 
 Cloudflare Access uses the same email-keyed route. When `CF_ACCESS_AUD` is set, the backend requires a
 same-origin API request, verifies the Access JWT against the configured `CF_ACCESS_ISS` and

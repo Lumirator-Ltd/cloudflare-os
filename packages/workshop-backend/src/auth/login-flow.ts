@@ -1,9 +1,9 @@
 // Sign-in via authentication gatekeepers.
 //
 // Unlike the normal connect-account flow (which runs for an already-logged-in user), login happens
-// before we know who the user is. The PublicApi starts a gatekeeper connect flow (in "auth" scope
-// mode) with a `LoginConnectCallbackImpl` as the callback and a `PendingLogin` DO to bridge the
-// result back to the waiting browser:
+// before we know who the user is. The PublicApi starts a gatekeeper connect flow with a
+// `LoginConnectCallbackImpl` as the callback and a `PendingLogin` DO to bridge the result back to the
+// waiting browser:
 //
 //   1. PublicApi.startGatekeeperLogin(vendorId) creates a PendingLogin DO (keyed by a random DO id),
 //      hands the gatekeeper a LoginConnectCallbackImpl, and returns {url, attempt}, where `attempt`
@@ -14,10 +14,9 @@
 //      verified email, resolve/create the email-keyed user DO, mint a session, and deliver the token
 //      to the PendingLogin DO, which resolves the awaiting RPC.
 //
-// Sign-in only requests minimal scopes and the gatekeeper grant is transient (it self-destructs
-// shortly after we read the email) — so login does NOT create a persistent connected account.
-// Capability access (repos, docs, billing) is granted later when the user explicitly connects the
-// gatekeeper, which requests the full scopes and persists the connection.
+// Most provider sign-ins request minimal scopes and use a transient grant that is discarded after
+// reading the email. Cloudflare instead requests full scope and persists the account for AI Gateway
+// billing.
 
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { GatekeeperConnectCallback, GatekeeperUser } from "@gadgets/workshop-shared/gatekeeper";
