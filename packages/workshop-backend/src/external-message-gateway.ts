@@ -14,8 +14,15 @@ export class ExternalMessageGateway extends WorkerEntrypoint<Cloudflare.Env, Ext
   async submitExternalMessage(input: SubmitExternalMessageInput): Promise<SubmitExternalMessageResult> {
     await assertAdminBootstrap(this.env, this.ctx);
 
-    const { source } = this.ctx.props;
+    const { source, identityMode } = this.ctx.props;
     if (!source) throw new Error("ExternalMessageGateway source prop is required.");
+    if (identityMode !== "trustedEmail") {
+      throw new Error("ExternalMessageGateway identityMode prop must be trustedEmail.");
+    }
+    if (input.identityMode !== identityMode) {
+      return { accepted: false, message: "External message identity mode is not allowed." };
+    }
+    if (!input.callerEmail) throw new Error("External message callerEmail is required.");
 
     const externalKeys = {
       gadget: `${source}:${input.gadgetKey}`,

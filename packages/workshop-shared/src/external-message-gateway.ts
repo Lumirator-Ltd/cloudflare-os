@@ -34,6 +34,8 @@ export type ExternalMessageAttachment = ChatAttachmentUpload;
 
 /** External message submission accepted by the trusted-email backend gateway. */
 export type SubmitExternalMessageInput = {
+  /** Selects routing through a gateway-trusted email address. */
+  identityMode: "trustedEmail";
   /** Verified account email trusted from the configured gateway binding. */
   callerEmail: string;
   /** Selects the workspace to create or reuse within the binding-owned source. */
@@ -56,6 +58,8 @@ export type SubmitExternalMessageInput = {
 export type ExternalMessageGatewayProps = {
   /** Stable namespace for external workspace, chat, and message keys. */
   source: string;
+  /** Restricts the binding to routing gateway-trusted email addresses. */
+  identityMode: "trustedEmail";
 };
 
 /** Submission result returned by the backend gateway. */

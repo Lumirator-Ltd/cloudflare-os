@@ -4,6 +4,7 @@ import { RpcTarget } from "capnweb";
 import type {
   ChatGatewayRpcTarget,
   ExternalMessageGateway as ExternalMessageGatewayContract,
+  ExternalMessageGatewayProps,
   SubmitExternalMessageInput,
 } from "@gadgets/workshop-shared/external-message-gateway";
 import { describe, expect, it } from "vitest";
@@ -11,13 +12,13 @@ import sharedGatewaySource from "../../workshop-shared/src/external-message-gate
 
 const SOURCE = "trusted-email";
 
-async function gateway(props: Record<string, unknown> = { source: SOURCE }) {
-  return (await exports.ExternalMessageGateway({ props: props as never })) as unknown as
-    ExternalMessageGatewayContract;
-}
-
-async function baseInput(callerEmail: string): Promise<SubmitExternalMessageInput> {
-  return {
+async function establishedCallerFixture(callerEmail: string) {
+  const props = {
+    source: SOURCE,
+    identityMode: "trustedEmail",
+  } satisfies ExternalMessageGatewayProps;
+  const input = {
+    identityMode: "trustedEmail",
     callerEmail,
     gadgetKey: crypto.randomUUID(),
     chatKey: crypto.randomUUID(),
@@ -27,7 +28,13 @@ async function baseInput(callerEmail: string): Promise<SubmitExternalMessageInpu
     chatGatewayRpcTarget: await exports.TelegramResponseTarget({
       props: { updateId: crypto.randomUUID() },
     }),
-  };
+  } satisfies SubmitExternalMessageInput;
+  return { props, input };
+}
+
+async function gateway(props: ExternalMessageGatewayProps) {
+  return (await exports.ExternalMessageGateway({ props: props as never })) as unknown as
+    ExternalMessageGatewayContract;
 }
 
 async function account(email = `${crypto.randomUUID()}@example.com`) {
@@ -51,24 +58,24 @@ async function addTestModel(
 }
 
 describe("ExternalMessageGateway trusted-email routing", () => {
-  it("keeps caller-selected User DO routing fields out of the shared contract", () => {
+  it("keeps the established trusted-email discriminant without internal routing fields", () => {
+    expect(sharedGatewaySource).toMatch(/identityMode:\s*"trustedEmail"/);
     expect(sharedGatewaySource).not.toMatch(
       /linkedExternalSubject|externalSubject|internalUserId|userDurableObjectId|UserDurableObjectId/,
     );
-    expect(sharedGatewaySource).not.toContain("identityMode");
   });
 
   it("resolves the caller email to the canonical User Durable Object ID", async () => {
     const caller = await account();
     await addTestModel(caller.user);
-    const input = await baseInput(caller.email);
+    const { props, input } = await establishedCallerFixture(caller.email);
     const workspace = exports.OverseerDurableObject.getByName(`${SOURCE}:${input.gadgetKey}`);
     await runInDurableObject(workspace, (instance) => {
       const mutable = instance as unknown as { impl: { newChat(): Promise<number> } };
       mutable.impl.newChat = async () => 7;
     });
 
-    const result = await (await gateway()).submitExternalMessage(input);
+    const result = await (await gateway(props)).submitExternalMessage(input);
 
     expect(result).toEqual({
       accepted: true,
@@ -80,49 +87,17 @@ describe("ExternalMessageGateway trusted-email routing", () => {
     });
   });
 
-  it("does not let input fields or entrypoint props select a User Durable Object ID", async () => {
-    const caller = await account();
-    const victim = await account();
-    await addTestModel(caller.user);
-    const input = await baseInput(caller.email);
-    const workspace = exports.OverseerDurableObject.getByName(`${SOURCE}:${input.gadgetKey}`);
-    await runInDurableObject(workspace, (instance) => {
-      const mutable = instance as unknown as { impl: { newChat(): Promise<number> } };
-      mutable.impl.newChat = async () => 7;
-    });
-
-    const result = await (await gateway({
-      source: SOURCE,
-      identityMode: "linkedExternalSubject",
-      internalUserId: victim.userId,
-      userDurableObjectId: victim.userId,
-    })).submitExternalMessage({
-      ...input,
-      identityMode: "linkedExternalSubject",
-      linkedExternalSubject: victim.userId,
-      internalUserId: victim.userId,
-      userDurableObjectId: victim.userId,
-    } as SubmitExternalMessageInput);
-
-    expect(result.accepted).toBe(true);
-    await runInDurableObject(workspace, (instance) => {
-      const inspected = instance as unknown as { impl: { ownerId?: string } };
-      expect(inspected.impl.ownerId).toBe(caller.userId);
-      expect(inspected.impl.ownerId).not.toBe(victim.userId);
-    });
-  });
-
   it("persists a durable response target through normal chat submission", async () => {
     const caller = await account();
     await addTestModel(caller.user);
-    const input = await baseInput(caller.email);
+    const { props, input } = await establishedCallerFixture(caller.email);
     const workspace = exports.OverseerDurableObject.getByName(`${SOURCE}:${input.gadgetKey}`);
     await runInDurableObject(workspace, (instance) => {
       const mutable = instance as unknown as { impl: { startAgent(): void } };
       mutable.impl.startAgent = () => {};
     });
 
-    await expect((await gateway()).submitExternalMessage(input))
+    await expect((await gateway(props)).submitExternalMessage(input))
       .resolves.toMatchObject({ accepted: true });
 
     await runInDurableObject(workspace, (instance) => {
@@ -138,7 +113,7 @@ describe("ExternalMessageGateway trusted-email routing", () => {
   it("preserves attachments and the backend-computed chat path", async () => {
     const caller = await account();
     await addTestModel(caller.user);
-    const input = await baseInput(caller.email);
+    const { props, input } = await establishedCallerFixture(caller.email);
     const workspace = exports.OverseerDurableObject.getByName(`${SOURCE}:${input.gadgetKey}`);
 
     let submittedPrompt: string | undefined;
@@ -154,7 +129,7 @@ describe("ExternalMessageGateway trusted-email routing", () => {
       };
     });
 
-    const result = await (await gateway()).submitExternalMessage({
+    const result = await (await gateway(props)).submitExternalMessage({
       ...input,
       prompt: "Describe this photo",
       attachments: [{

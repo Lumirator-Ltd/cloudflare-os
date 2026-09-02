@@ -408,10 +408,10 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
    * Read all admin-managed settings for the admin UI in one call: the stored config plus the live
    * resource catalog (every bound gatekeeper's resource types annotated with their enabled state).
    *
-   * `adminUserId` is the requesting admin's deployment-local application identifier, forwarded to
-   * each gatekeeper's getSupportedResources(). Registry-backed auth supplies an opaque stable ID;
-   * the legacy password path supplies its local username. Gatekeepers may use it for deployment-
-   * scoped RBAC but must not interpret it as an email or external-provider identity.
+   * `adminUserId` is the requesting admin's raw User DO route name, forwarded to each gatekeeper's
+   * getSupportedResources(): the normalized username for password auth, or the provider-verified
+   * email for Gatekeeper and Cloudflare Access auth. Gatekeepers may use it for deployment-scoped
+   * RBAC but must not infer which authentication path supplied it.
    */
   async getSettings(adminUserId: string): Promise<AdminSettingsView> {
     let config = this.#config();

@@ -459,9 +459,9 @@ export interface AuthenticatedApi extends RpcTarget {
   getCloudflareUsage(): Promise<CloudflareUsageInfo>;
 
   /**
-   * List the eligible Cloudflare billing accounts available through the explicitly connected grant.
+   * List the eligible Cloudflare billing accounts available through the persisted connection.
    * Returns an empty array when the user has not connected Cloudflare and throws when account
-   * discovery is temporarily unavailable. Cloudflare sign-in alone creates no billing authority.
+   * discovery is temporarily unavailable. Cloudflare sign-in persists this billing connection.
    */
   listCloudflareAccounts(): Promise<CloudflareAccountOption[]>;
 
@@ -733,9 +733,9 @@ export interface AuthenticatedApi extends RpcTarget {
   amIAdmin(): Promise<boolean>;
 
   /**
-   * Returns a capability for managing deployment-wide admin settings, or null when the caller is
-   * not a current admin. Registry-backed authority is revalidated here and by every operation on
-   * the returned capability. Authentication config remains environment-driven.
+   * Returns a capability for managing deployment-wide admin settings, or null when the caller's raw
+   * User DO route name is not authorized. Authorization is checked once when the capability is
+   * minted; authentication config remains environment-driven.
    */
   getAdminApi(): Promise<RpcStub<AdminApi> | null>;
 
@@ -1125,8 +1125,8 @@ export type ServerConfig = {
 
   /**
    * Whether username/password login is available. Defaults to true; an installation can disable it
-   * (DISABLE_PASSWORD_AUTH) to be OAuth-only. Forced true if no auth vendor is configured, to avoid
-   * locking everyone out.
+   * (DISABLE_PASSWORD_AUTH) to be OAuth-only. Forced true when the raw AUTH_GATEKEEPERS allowlist is
+   * empty, to avoid locking everyone out.
    */
   passwordAuthEnabled: boolean;
 

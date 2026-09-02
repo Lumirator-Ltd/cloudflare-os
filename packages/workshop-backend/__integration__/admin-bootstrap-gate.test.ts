@@ -2,6 +2,7 @@ import { env, exports, RpcStub, RpcTarget } from "cloudflare:workers";
 import { abortAllDurableObjects, createExecutionContext, reset } from "cloudflare:test";
 import type {
   ChatGatewayRpcTarget,
+  ExternalMessageGatewayProps,
   SubmitExternalMessageInput,
   SubmitExternalMessageResult,
 } from "@gadgets/workshop-shared/external-message-gateway";
@@ -102,6 +103,11 @@ class TestChatGateway extends RpcTarget implements ChatGatewayRpcTarget {
   async onGadgetResponse(): Promise<void> {}
 }
 
+const EXTERNAL_MESSAGE_PROPS = {
+  source: "test-source",
+  identityMode: "trustedEmail",
+} satisfies ExternalMessageGatewayProps;
+
 const EXTERNAL_MESSAGE: SubmitExternalMessageInput = {
   identityMode: "trustedEmail",
   callerEmail: "private-caller@example.com",
@@ -129,11 +135,15 @@ type GatewayExports = {
       receiveExternalMessage(input: unknown): Promise<SubmitExternalMessageResult>;
     };
   };
+  UserDurableObject?: {
+    idFromName(name: string): DurableObjectId;
+  };
 };
 
 function externalMessageGateway(
     workerExports: GatewayExports,
-    config?: InitialAdminConfigV1): ExternalMessageGateway {
+    config?: InitialAdminConfigV1,
+    props: Record<string, unknown> = EXTERNAL_MESSAGE_PROPS): ExternalMessageGateway {
   const ctx = createExecutionContext();
   const gatewayExports = {
     UserDurableObject: exports.UserDurableObject,
@@ -141,9 +151,7 @@ function externalMessageGateway(
   };
   const gatewayContext = new Proxy(ctx, {
     get(target, property) {
-      if (property === "props") {
-        return {source: "test-source", identityMode: "trustedEmail"};
-      }
+      if (property === "props") return props;
       if (property === "exports") return gatewayExports;
       return Reflect.get(target, property, target);
     },
@@ -299,6 +307,64 @@ describe("Workshop admin bootstrap gate", () => {
 });
 
 describe("ExternalMessageGateway admin bootstrap gate", () => {
+  it.each([
+    {
+      props: {identityMode: "trustedEmail"},
+      message: "ExternalMessageGateway source prop is required.",
+    },
+    {
+      props: {source: "test-source"},
+      message: "ExternalMessageGateway identityMode prop must be trustedEmail.",
+    },
+    {
+      props: {source: "test-source", identityMode: "linkedExternalSubject"},
+      message: "ExternalMessageGateway identityMode prop must be trustedEmail.",
+    },
+  ])("rejects unsupported props before resolving the caller: $props", async ({props, message}) => {
+    const idFromName = vi.fn((name: string) => exports.UserDurableObject.idFromName(name));
+    const getByName = vi.fn(() => ({receiveExternalMessage: async () => ACCEPTED}));
+    const gateway = externalMessageGateway({
+      UserDurableObject: {idFromName},
+      OverseerDurableObject: {getByName},
+    }, undefined, props);
+
+    await expect(gateway.submitExternalMessage(EXTERNAL_MESSAGE)).rejects.toThrow(message);
+    expect(idFromName).not.toHaveBeenCalled();
+    expect(getByName).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {field: "identityMode", input: {...EXTERNAL_MESSAGE, identityMode: undefined}},
+    {field: "identityMode", input: {...EXTERNAL_MESSAGE, identityMode: "linkedExternalSubject"}},
+    {field: "callerEmail", input: {...EXTERNAL_MESSAGE, callerEmail: undefined}},
+    {field: "callerEmail", input: {...EXTERNAL_MESSAGE, callerEmail: ""}},
+  ])("rejects invalid $field before resolving the caller", async ({field, input}) => {
+    const idFromName = vi.fn((name: string) => exports.UserDurableObject.idFromName(name));
+    const getByName = vi.fn(() => ({receiveExternalMessage: async () => ACCEPTED}));
+    const gateway = externalMessageGateway({
+      UserDurableObject: {idFromName},
+      OverseerDurableObject: {getByName},
+    });
+
+    let outcome: SubmitExternalMessageResult | Error;
+    try {
+      outcome = await gateway.submitExternalMessage(input as SubmitExternalMessageInput);
+    } catch (error) {
+      outcome = error as Error;
+    }
+
+    if (outcome instanceof Error) {
+      expect(outcome.message).toContain(field);
+    } else {
+      expect(outcome).toEqual({
+        accepted: false,
+        message: "External message identity mode is not allowed.",
+      });
+    }
+    expect(idFromName).not.toHaveBeenCalled();
+    expect(getByName).not.toHaveBeenCalled();
+  });
+
   it("preserves dispatch when the binding is absent", async () => {
     const receiveExternalMessage = vi.fn(async () => ACCEPTED);
     const getByName = vi.fn(() => ({receiveExternalMessage}));
