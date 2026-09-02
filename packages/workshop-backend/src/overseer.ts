@@ -269,7 +269,7 @@ type QueuedAgentCallback = {
   methodName: string;
   args: unknown[];            // original args (raw, with live transient stubs)
   argsSummary: string;        // depth-limited summary string
-  initiatorUserId: string;    // stable application ID of the initiating user
+  initiatorUserId: string;    // canonical User DO ID of the initiating user
   initiatorModelId: string;
   resolve: (value: unknown) => void;
   reject: (error: unknown) => void;
@@ -679,12 +679,23 @@ type ExternalMessageResponseTargetRegistrationDecision =
       record: ExternalMessageRecord;
     };
 
+type NativeChatGatewayCallback = Extract<
+  ChatGatewayCallback,
+  { dup(): ChatGatewayCallback }
+>;
+
+function isNativeChatGatewayCallback(
+  callback: ChatGatewayCallback,
+): callback is NativeChatGatewayCallback {
+  return callback instanceof NativeRpcStub;
+}
+
 function retainChatGatewayCallback(callback: ChatGatewayCallback): ChatGatewayCallback {
-  return "dup" in callback ? callback.dup() : callback;
+  return isNativeChatGatewayCallback(callback) ? callback.dup() : callback;
 }
 
 function releaseChatGatewayCallback(callback: ChatGatewayCallback): void {
-  if (Symbol.dispose in callback) callback[Symbol.dispose]();
+  if (isNativeChatGatewayCallback(callback)) callback[Symbol.dispose]();
 }
 
 type ExternalMessageSubmitInput = {
@@ -694,10 +705,7 @@ type ExternalMessageSubmitInput = {
   attachments?: ChatAttachmentUpload[];
   chatGatewayRpcTarget: ChatGatewayCallback;
   title: string;
-} & (
-  | { identityMode: "trustedEmail"; callerEmail: string }
-  | { identityMode: "internalUserId"; internalUserId: string }
-);
+};
 
 type ExternalChatRecord = {
   externalChatKey: string;
@@ -706,7 +714,7 @@ type ExternalChatRecord = {
 
 type ActiveAgentRecord = {
   chatId: number;
-  // Stable application ID of the initiator, used to re-resolve their User DO and model config.
+  // Canonical User DO ID of the initiator, used to re-resolve their model config.
   initiatorUserId: string;
   // Model ID, used to re-resolve the model config (matches `chatMeta.activeAgent.id`).
   modelId: string;
@@ -1420,7 +1428,7 @@ class OverseerImpl implements AgentHooks {
   async #resumeAgent(record: ActiveAgentRecord, liveChat: LiveChatContext) {
     let aiModel: UserAiModelRecord | undefined;
     try {
-      let user = this.users.get(this.users.idFromName(record.initiatorUserId));
+      let user = this.users.get(this.users.idFromString(record.initiatorUserId));
       let userMeta = await user.getChatContext(record.modelId);
       aiModel = userMeta.aiModel;
     } catch (err) {
@@ -2995,7 +3003,7 @@ class OverseerImpl implements AgentHooks {
       if (caller.from === "agent") {
         this.#getOrCreateCapturedActions(caller.chatId).actions.push(actionId);
       } else if (caller.from !== "hook" && caller.chatId !== undefined && this.ownerId) {
-        let owner = this.users.get(this.users.idFromName(this.ownerId));
+        let owner = this.users.get(this.users.idFromString(this.ownerId));
         let userMeta = await owner.getChatContext(null);
 
         let author: AiChatAuthorInfo = {
@@ -3437,7 +3445,7 @@ class OverseerImpl implements AgentHooks {
         return;
       }
 
-      let owner = this.users.get(this.users.idFromName(this.ownerId));
+      let owner = this.users.get(this.users.idFromString(this.ownerId));
 
       this.#lastActiveTimeKnownToUserDo = this.#lastActiveTimeKnownToUs!;
       await owner.setGadgetLastActive(this.ctx.id.toString(), this.#lastActiveTimeKnownToUs!,
@@ -3566,7 +3574,7 @@ class OverseerImpl implements AgentHooks {
 
     let userIds = new Set([ownerId, ...this.#connectedIndexes.keys()]);
     let delivered = await Promise.all([...userIds].map(
-        userId => this.syncOutputsTo(this.users.get(this.users.idFromName(userId)), snapshot)));
+        userId => this.syncOutputsTo(this.users.get(this.users.idFromString(userId)), snapshot)));
 
     // Recorded only once every index has it, so that a recipient this failed for is included in
     // the next flush instead of being remembered as up to date. If nothing changes again, their
@@ -3933,7 +3941,7 @@ class OverseerImpl implements AgentHooks {
     if (prepared.message !== undefined && userMeta.aiModel) {
       let needsAgentTurnKeepAlive = responseTargetRegistration !== undefined;
       this.startAgent(chatId, userMeta.aiModel, userMeta.profile,
-                      userMeta.profile.id, false, needsAgentTurnKeepAlive);
+                      clientUser.id.toString(), false, needsAgentTurnKeepAlive);
     }
 
     if (userMeta.quickModel) {
@@ -3947,7 +3955,7 @@ class OverseerImpl implements AgentHooks {
 
     this.recordGadgetAnalytics({
       event_name: "gadget_interaction",
-      user_id: userMeta.profile.id,
+      user_id: clientUser.id.toString(),
       chat_id: chatId,
       interaction_type: "chat_started",
     });
@@ -4014,11 +4022,11 @@ class OverseerImpl implements AgentHooks {
     if (runsAgentTurn && userMeta.aiModel) {
       let needsAgentTurnKeepAlive = responseTargetRegistration !== undefined;
       this.startAgent(chatId, userMeta.aiModel, userMeta.profile,
-                      userMeta.profile.id, false, needsAgentTurnKeepAlive);
+                      clientUser.id.toString(), false, needsAgentTurnKeepAlive);
     }
     this.recordGadgetAnalytics({
       event_name: "gadget_interaction",
-      user_id: userMeta.profile.id,
+      user_id: clientUser.id.toString(),
       chat_id: chatId,
       interaction_type: "chat_message_sent",
     });
@@ -4298,8 +4306,8 @@ class OverseerImpl implements AgentHooks {
 
   // Start an agent turn for the given chat (fire-and-forget). Persists an `ActiveAgentRecord` so
   // the turn can be resumed after a server restart, and tracks the turn so the keep-alive alarm is
-  // held while it runs. `initiatorUserId` is the stable application ID of the user whose
-  // model/account is used, needed to re-resolve the model config on resume.
+  // held while it runs. `initiatorUserId` is the canonical User DO ID whose model/account is used,
+  // needed to re-resolve the model config on resume.
   startAgent(chatId: number, aiModel: UserAiModelRecord,
              initiator: AiChatAuthorInfo, initiatorUserId: string,
              callbackInitiated: boolean = false,
@@ -4668,7 +4676,7 @@ class OverseerImpl implements AgentHooks {
       // Resolve the AI model based on the initiator of the first message. This means this
       // turn gets charged to the first initiator, even if it ends up handling multiple messages.
       // Oh well.
-      let user = this.users.get(this.users.idFromName(callbacks[0].initiatorUserId));
+      let user = this.users.get(this.users.idFromString(callbacks[0].initiatorUserId));
 
       let userMeta = await user.getChatContext(callbacks[0].initiatorModelId);
 
@@ -4786,7 +4794,7 @@ class OverseerImpl implements AgentHooks {
 
   #ownerUserDo() {
     if (!this.ownerId) throw new Error("Workspace is not initialized.");
-    return this.users.get(this.users.idFromName(this.ownerId));
+    return this.users.get(this.users.idFromString(this.ownerId));
   }
 
   // Ensure every singleton account the gadget owner has (e.g. the Context Library) is provisioned
@@ -5544,7 +5552,7 @@ class OverseerImpl implements AgentHooks {
     }
 
     // Propagate to User DO.
-    let owner = this.users.get(this.users.idFromName(this.ownerId));
+    let owner = this.users.get(this.users.idFromString(this.ownerId));
     let isFeatured = await owner.updateBlueprint(
       record.id, record.metadata, this.ctx.id.toString()
     );
@@ -5583,7 +5591,7 @@ class OverseerImpl implements AgentHooks {
     await this.env.BLUEPRINT_CONTENT.delete(`${BLUEPRINT_SCREENSHOT_R2_PREFIX}${record.id}`);
 
     // Delete from User DO.
-    let owner = this.users.get(this.users.idFromName(this.ownerId));
+    let owner = this.users.get(this.users.idFromString(this.ownerId));
     await this.ctx.exports.AdminSettings.getByName("").deleteFeaturedBlueprint(record.id);
     await owner.deleteBlueprint(record.id);
 
@@ -5662,7 +5670,7 @@ class OverseerImpl implements AgentHooks {
       // apply the same title as the chat itself.
       if (chatId === 0 && ["Untitled Gadget", "Untitled Workspace"].includes(this.storage.title.get()) && this.ownerId) {
         this.storage.title.put(result);
-        let owner = this.users.get(this.users.idFromName(this.ownerId));
+        let owner = this.users.get(this.users.idFromString(this.ownerId));
         await owner.updateTitle(this.ctx.id.toString(), result);
       }
 
@@ -5704,7 +5712,7 @@ class OverseerImpl implements AgentHooks {
       let title = gadgetTitle.trim();
       if (title && this.ownerId) {
         this.storage.title.put(title);
-        let owner = this.users.get(this.users.idFromName(this.ownerId));
+        let owner = this.users.get(this.users.idFromString(this.ownerId));
         await owner.updateTitle(this.ctx.id.toString(), title);
       }
     } catch (err) {
@@ -5907,7 +5915,7 @@ class OverseerImpl implements AgentHooks {
       let selfStub = this.ctx.exports.AgentSelfLoopback({props: {
         overseerId: this.ctx.id.toString(),
         chatId,
-        initiatorUserId: initiator.id,
+        initiatorUserId: this.users.idFromName(initiator.id).toString(),
         initiatorModelId,
       }});
 
@@ -5984,7 +5992,7 @@ class OverseerImpl implements AgentHooks {
 
   #ownerUserStub() {
     if (!this.ownerId) throw new Error("Workspace has been deleted.");
-    return this.users.get(this.users.idFromName(this.ownerId));
+    return this.users.get(this.users.idFromString(this.ownerId));
   }
 
   // Short-TTL cache for the gatekeeper vendor list. The list is derived from static
@@ -6711,7 +6719,7 @@ class OverseerImpl implements AgentHooks {
     }
 
     if (!this.ownerId) throw new Error("Workspace is not initialized.");
-    const ownerDo = this.users.get(this.users.idFromName(this.ownerId));
+    const ownerDo = this.users.get(this.users.idFromString(this.ownerId));
     const ownerProfile = await ownerDo.whoami();
     this.ownerProfileId = ownerProfile.id;
     return ownerProfile.id;
@@ -6894,7 +6902,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       await this.ctx.blockConcurrencyWhile(async () => {
         // Verify that the owner believes it exists. The owner account must be initialized with
         // any new gadgets first before the gadget is actually opened.
-        let owner = this.impl.users.get(this.impl.users.idFromName(userId));
+        let owner = this.impl.users.get(this.impl.users.idFromString(userId));
         let meta = await owner.getGadget(this.ctx.id.toString());
         if (!meta) {
           throw createOpenGadgetError(OPEN_GADGET_ERROR_CODES.workspaceNotFound);
@@ -6937,10 +6945,10 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       await ensureCapsules;
     }
 
-    let owner = this.impl.users.get(this.impl.users.idFromName(this.impl.ownerId!));
+    let owner = this.impl.users.get(this.impl.users.idFromString(this.impl.ownerId!));
     let clientUser = isOwner
         ? owner
-        : this.impl.users.get(this.impl.users.idFromName(userId));
+        : this.impl.users.get(this.impl.users.idFromString(userId));
 
     // Refresh the owner's outputs index. Pushes are best-effort, and workspaces predating the
     // index have never pushed at all, so re-syncing on open is what corrects both.
@@ -7044,25 +7052,16 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   async receiveExternalMessage(
+    callerUserId: string,
     input: ExternalMessageSubmitInput,
   ): Promise<SubmitExternalMessageResult> {
     if (!input.prompt.trim() && !input.attachments?.length) {
       return { accepted: false, message: "Please include a prompt or attachment." };
     }
 
-    let registry = this.impl.ctx.exports.IdentityRegistry.getByName("");
-    let callerId: string;
-    if (input.identityMode === "internalUserId") {
-      let identity = await registry.getIdentity(input.internalUserId);
-      if (identity?.status !== "active" || identity.canonicalVerifiedEmail === null) {
-        return { accepted: false, message: "Please link an active account to continue." };
-      }
-      callerId = identity.internalUserId;
-    } else {
-      let internalUserId = await registry.findInternalUserIdByVerifiedEmail(input.callerEmail);
-      callerId = internalUserId ?? input.callerEmail;
-    }
-    let caller = this.impl.users.getByName(callerId);
+    const callerObjectId = this.impl.users.idFromString(callerUserId);
+    const callerId = callerObjectId.toString();
+    const caller = this.impl.users.get(callerObjectId);
     let callerProfile = await caller.whoamiIfExists();
     if (!callerProfile) {
       let siteName = resolveSiteName((await readAdminConfig(this.impl.env)).siteName);
@@ -7103,7 +7102,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
 
     // Complete pending registration in the owner's UserDO.
     if (this.impl.storage.ownerRegistrationPending.get()) {
-      let owner = this.impl.users.get(this.impl.users.idFromName(ownerId));
+      let owner = this.impl.users.get(this.impl.users.idFromString(ownerId));
       await owner.ensureGadgetRegistered(this.ctx.id.toString(), this.impl.storage.title.get());
       this.impl.storage.ownerRegistrationPending.put(false);
     }
@@ -7222,7 +7221,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
 
     // Mark gadget as non-provisional (it has code, so it should appear in the gadget list).
     if (this.impl.ownerId) {
-      let owner = this.impl.users.get(this.impl.users.idFromName(this.impl.ownerId));
+      let owner = this.impl.users.get(this.impl.users.idFromString(this.impl.ownerId));
       await owner.setGadgetLastActive(this.ctx.id.toString(), new Date(), undefined);
     }
   }
@@ -7300,7 +7299,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     // Resolve the model from the creating user's account (falls back to owner for
     // bindings created before collaborator support).
     let resolveUserId = creatorUserId ?? this.impl.ownerId;
-    let user = this.impl.users.get(this.impl.users.idFromName(resolveUserId));
+    let user = this.impl.users.get(this.impl.users.idFromString(resolveUserId));
     let userMeta = await user.getChatContext(config.modelId);
 
     let chatId = this.impl.nextChatId();
@@ -7356,13 +7355,13 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       return this.impl.ctx.exports.AgentSelfLoopback({props: {
         overseerId: this.impl.ctx.id.toString(),
         chatId,
-        initiatorUserId: resolveUserId,
+        initiatorUserId: this.impl.users.idFromString(resolveUserId).toString(),
         initiatorModelId: config.modelId!,
       }}) as any;
     } else if (userMeta.aiModel) {
       // Fire off the agent (asynchronously).
       this.impl.startAgent(chatId, userMeta.aiModel, author,
-                           resolveUserId);
+                           this.impl.users.idFromString(resolveUserId).toString());
     } else {
       // TODO: Flag as needing user attention.
     }
@@ -7723,13 +7722,13 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   get #owner(): DurableObjectStub<UserDurableObject> {
     if (!this.impl.ownerId) throw new Error("Workspace has been deleted.");
     return wrapDoStubForTelemetry(
-        this.impl.users.get(this.impl.users.idFromName(this.impl.ownerId)),
+        this.impl.users.get(this.impl.users.idFromString(this.impl.ownerId)),
         this.impl.logger);
   }
 
   get #clientUser(): DurableObjectStub<UserDurableObject> {
     return wrapDoStubForTelemetry(
-        this.impl.users.get(this.impl.users.idFromName(this.clientUserId)),
+        this.impl.users.get(this.impl.users.idFromString(this.clientUserId)),
         this.impl.logger);
   }
 
@@ -9243,15 +9242,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   async addCollaborator(verifiedEmail: string, role: CollaboratorRole, note?: string)
       : Promise<CollaboratorInfo | null> {
     return await this.impl.runAccessGrantingSharingMutation(async () => {
-      // Verified email is discovery input only. Sharing never routes caller-provided stable IDs or
-      // usernames directly to a User DO.
-      let internalUserId = await this.impl.ctx.exports.IdentityRegistry.getByName("")
-          .findInternalUserIdByVerifiedEmail(verifiedEmail);
-      if (internalUserId === null) {
-        return null;
-      }
-
-      let userDo = this.impl.users.get(this.impl.users.idFromName(internalUserId));
+      let userDo = this.impl.users.get(this.impl.users.idFromName(verifiedEmail));
       let profile = await userDo.whoamiIfExists();
       if (!profile) {
         return null;
@@ -9393,13 +9384,13 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   get #owner(): DurableObjectStub<UserDurableObject> {
     if (!this.impl.ownerId) throw new Error("Workspace has been deleted.");
     return wrapDoStubForTelemetry(
-        this.impl.users.get(this.impl.users.idFromName(this.impl.ownerId)),
+        this.impl.users.get(this.impl.users.idFromString(this.impl.ownerId)),
         this.impl.logger);
   }
 
   get #clientUser(): DurableObjectStub<UserDurableObject> {
     return wrapDoStubForTelemetry(
-        this.impl.users.get(this.impl.users.idFromName(this.clientUserId)),
+        this.impl.users.get(this.impl.users.idFromString(this.clientUserId)),
         this.impl.logger);
   }
 
@@ -9625,7 +9616,7 @@ class GadgetClientImpl extends RpcTarget implements GadgetClient {
   // Fresh stub per call; see OverseerClientInterface.#clientUser.
   get #clientUser(): DurableObjectStub<UserDurableObject> {
     return wrapDoStubForTelemetry(
-        this.impl.users.get(this.impl.users.idFromName(this.clientUserId)),
+        this.impl.users.get(this.impl.users.idFromString(this.clientUserId)),
         this.impl.logger);
   }
 
@@ -9802,7 +9793,7 @@ class GadgetClientImpl extends RpcTarget implements GadgetClient {
     let bindings = this.impl.collectBindingMetadata(this.id);
 
     // Get gadget owner's profile for the author field.
-    let owner = this.impl.users.get(this.impl.users.idFromName(this.impl.ownerId));
+    let owner = this.impl.users.get(this.impl.users.idFromString(this.impl.ownerId));
     let ownerProfile = await owner.whoami();
 
     let codeVersion = this.impl.storage.codeVersion.get();

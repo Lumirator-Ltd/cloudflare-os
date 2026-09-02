@@ -33,18 +33,6 @@ export const SERVICE_SALT = new Uint8Array([
 ]);
 
 /**
- * Same-origin POST endpoint for idempotently revoking one local Gatekeeper bearer.
- *
- * Send an exact `application/json` body shaped as `{ token: string }`. A 204 confirms that the
- * bearer is durably deleted, so replay fails, and that every live subscriber known to the current
- * User Durable Object instance has finished invalidating. A restart loses ephemeral subscribers;
- * any such graph closes through its token watchdog within 30 seconds rather than necessarily before
- * the 204. The response intentionally does not distinguish an already-revoked, otherwise missing,
- * or newly revoked well-formed bearer. This affects only the deployment-local Workshop session.
- */
-export const GATEKEEPER_SESSION_LOGOUT_PATH = "/api/gatekeeper-session/logout";
-
-/**
  * A pending gatekeeper sign-in attempt, returned by `PublicApi.startGatekeeperLogin()`. Holding this
  * stub is the capability to receive the resulting session token; dispose it to abandon the attempt.
  */
@@ -56,25 +44,6 @@ export interface LoginAttempt extends RpcTarget {
    */
   wait(): Promise<string>;
 }
-
-/** Controls the verified Clerk lease associated with one authenticated WebSocket session. */
-export interface ClerkSessionControl extends RpcTarget {
-  /** Replaces the lease with a fully verified token and returns its exact server-verified expiry. */
-  refresh(token: string): Promise<Date>;
-
-  /** Aborts the whole WebSocket session and all capabilities descended from it. */
-  logout(): Promise<void>;
-}
-
-/** Capabilities and verified deadline returned by Clerk authentication. */
-export type ClerkAuthentication = {
-  /** The authenticated Workshop API capability governed by this Clerk lease. */
-  api: RpcStub<AuthenticatedApi>;
-  /** The sole capability through which the Clerk lease can be refreshed or logged out. */
-  session: RpcStub<ClerkSessionControl>;
-  /** The exact expiry accepted by the backend verifier; clients should refresh before this time. */
-  expiresAt: Date;
-};
 
 /** Public API exposed to the internet. */
 export interface PublicApi extends RpcTarget {
@@ -97,12 +66,6 @@ export interface PublicApi extends RpcTarget {
 
   /** Authenticates the user using an auth token (typically stored in localStorage). */
   authenticate(token: string): Promise<AuthenticatedApi>;
-
-  /**
-   * Authenticates a verified Clerk session and returns sibling API/session-control capabilities
-   * governed by the same hard WebSocket deadline.
-   */
-  authenticateWithClerk(token: string): Promise<ClerkAuthentication>;
 
   /**
    * Like authenticate() but the server is expected to be sitting behind Cloudflare Access, and the
@@ -496,9 +459,9 @@ export interface AuthenticatedApi extends RpcTarget {
   getCloudflareUsage(): Promise<CloudflareUsageInfo>;
 
   /**
-   * List the eligible Cloudflare billing accounts available through the explicitly connected grant.
+   * List the eligible Cloudflare billing accounts available through the persisted connection.
    * Returns an empty array when the user has not connected Cloudflare and throws when account
-   * discovery is temporarily unavailable. Cloudflare sign-in alone creates no billing authority.
+   * discovery is temporarily unavailable. Cloudflare sign-in persists this billing connection.
    */
   listCloudflareAccounts(): Promise<CloudflareAccountOption[]>;
 
@@ -518,8 +481,8 @@ export interface AuthenticatedApi extends RpcTarget {
   setAvatar(data: Uint8Array | null): Promise<void>;
 
   /**
-   * Fetches an avatar by stable application user ID. Returns null if none has been set. The opaque
-   * ID is accepted for other users so their avatars can be displayed.
+   * Fetches an avatar by human profile ID (the email or normalized username used as the User DO
+   * route name). Returns null if none has been set.
    */
   getAvatar(userId: string): Promise<Uint8Array | null>;
 
@@ -770,9 +733,9 @@ export interface AuthenticatedApi extends RpcTarget {
   amIAdmin(): Promise<boolean>;
 
   /**
-   * Returns a capability for managing deployment-wide admin settings, or null when the caller is
-   * not a current admin. Registry-backed authority is revalidated here and by every operation on
-   * the returned capability. Authentication config remains environment-driven.
+   * Returns a capability for managing deployment-wide admin settings, or null when the caller's raw
+   * User DO route name is not authorized. Authorization is checked once when the capability is
+   * minted; authentication config remains environment-driven.
    */
   getAdminApi(): Promise<RpcStub<AdminApi> | null>;
 
@@ -1001,10 +964,10 @@ export type AdminConnectorConfigurationValues = Record<string, string>;
 
 /**
  * Capability for managing deployment-wide admin settings, obtained via
- * AuthenticatedApi.getAdminApi() (which is null for non-admins). Every operation revalidates the
- * retained caller's current admin authority. Covers branding, agent instructions, and which
- * gatekeeper connectors/resources are offered — NOT authentication config (that's env-var driven).
- * Each setter throws on invalid input.
+ * AuthenticatedApi.getAdminApi() (which is null for non-admins). Admin authorization is checked when
+ * the capability is minted. Covers branding, agent instructions, and which gatekeeper
+ * connectors/resources are offered — NOT authentication config (that's env-var driven). Each setter
+ * throws on invalid input.
  */
 export interface AdminApi {
   /** Read all admin-managed settings for the admin UI in one call. */
@@ -1144,8 +1107,6 @@ export type AuthVendorInfo = {
   displayName: string;
   logo?: AvatarImage;
   color?: string;
-  /** False when the connector cannot start a new sign-in authorization flow. */
-  configured: boolean;
 };
 
 /**
@@ -1153,22 +1114,19 @@ export type AuthVendorInfo = {
  * Returned by `PublicApi.getServerConfig()`. Contains no secrets.
  */
 export type ServerConfig = {
-  /** Clerk frontend publishable key for normal auth mode; absent in Cloudflare Access mode. */
-  clerkPublishableKey?: string;
-
   /** Default language for signed-out users and users whose language preference is `"auto"`. */
   defaultLanguage: SupportedLanguage;
 
   /**
-   * Auth-capable, allowlisted gatekeeper vendors shown as sign-in methods, including unconfigured
-   * vendors with disabled buttons. Empty when no allowlisted bound vendor provides authentication.
+   * Auth-capable, allowlisted gatekeeper vendors offered as sign-in methods. Empty when none are
+   * configured (password-only).
    */
   authVendors: AuthVendorInfo[];
 
   /**
    * Whether username/password login is available. Defaults to true; an installation can disable it
-   * (DISABLE_PASSWORD_AUTH) to be OAuth-only. Forced true if no auth vendor is configured, to avoid
-   * locking everyone out.
+   * (DISABLE_PASSWORD_AUTH) to be OAuth-only. Forced true when the raw AUTH_GATEKEEPERS allowlist is
+   * empty, to avoid locking everyone out.
    */
   passwordAuthEnabled: boolean;
 
@@ -2119,12 +2077,11 @@ export interface Overseer extends RpcTarget {
   listCollaborators(): Promise<CollaboratorInfo[]>;
 
   /**
-   * Adds a collaborator discovered only by their verified email address.
+   * Adds a collaborator discovered by their verified email address.
    *
-   * The email is canonicalized for lookup and is not durable identity: returned and persisted
-   * references use the resolved stable application user ID. Stable IDs and usernames are not
-   * accepted as discovery input. The caller cannot grant a role higher than their own. Returns
-   * null when no active account resolves.
+   * The email is used unchanged as the User DO route name. Returned and persisted human profile IDs
+   * use that same email/username route-name form, not canonical DO ID strings. The caller cannot
+   * grant a role higher than their own. Returns null when no active account resolves.
    */
   addCollaborator(verifiedEmail: string, role: CollaboratorRole,
                   note?: string): Promise<CollaboratorInfo | null>;
@@ -2284,8 +2241,9 @@ export type AiChatAuthorInfo = {
   type: "user" | "agent" | "gadget";
 
   /**
-   * Stable actor identifier. Human IDs are opaque internal application IDs; agent/model IDs retain
-   * their configured model identity.
+   * Stable actor identifier. Human IDs are presentation-facing User DO route names: a
+   * provider-verified email or normalized username. They are not canonical Durable Object ID
+   * strings used for backend routing; agent/model IDs retain their configured model identity.
    */
   id: string;
 
@@ -3610,7 +3568,7 @@ export type CollaboratorRole = "build" | "use";
 export type PresenceParticipant = {
   /** Opaque key matching this participant across add/remove events. */
   key: string;
-  /** The participant profile, carrying their stable application user ID. */
+  /** The participant profile, carrying their human route-name ID. */
   user: AiChatAuthorInfo;
   role: CollaboratorRole;
 };
@@ -3637,7 +3595,7 @@ export type PermissionEdge = {
 } & ({
   /** Granted directly by another user. */
   type: "user";
-  /** Stable application user ID of the person who shared. */
+  /** Human profile route-name ID of the person who shared. */
   sharer: string;
   note?: string;
 } | {

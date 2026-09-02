@@ -16,42 +16,35 @@ function stubGitHub(...bodies: unknown[]): void {
   })));
 }
 
-describe("GitHubApi.getAuthenticationIdentity", () => {
-  it("uses the immutable numeric viewer id rather than mutable login or email", async () => {
-    stubGitHub(
-      { id: 123456, login: "renameable-login", avatar_url: "https://example.com/avatar", html_url: "https://github.com/renameable-login" },
-      [{ email: "person@example.com", primary: true, verified: true }],
-    );
-    const api = new GitHubApi(async () => "test-token");
+describe("GitHubApi.getAuthenticatedEmail", () => {
+  it("returns the primary verified email", async () => {
+    stubGitHub([
+      { email: "secondary@example.com", primary: false, verified: true },
+      { email: "verified@example.com", primary: true, verified: true },
+    ]);
+    const account = new GitHubApi(async () => "test-token");
 
-    await expect(api.getAuthenticationIdentity()).resolves.toEqual({
-      subject: "123456",
-      verifiedEmail: "person@example.com",
-    });
+    expect(await account.getAuthenticatedEmail()).toBe("verified@example.com");
   });
 
-  it.each([
-    [{ login: "missing-id", avatar_url: "https://example.com/avatar", html_url: "https://github.com/missing-id" }],
-    [{ id: 0, login: "zero-id", avatar_url: "https://example.com/avatar", html_url: "https://github.com/zero-id" }],
-    [{ id: "123456", login: "string-id", avatar_url: "https://example.com/avatar", html_url: "https://github.com/string-id" }],
-  ])("rejects a missing or invalid immutable viewer id", async (viewer) => {
-    stubGitHub(viewer, [{ email: "person@example.com", primary: true, verified: true }]);
-    const api = new GitHubApi(async () => "test-token");
+  it("falls back to a verified email when the primary email is unverified", async () => {
+    stubGitHub([
+      { email: "unverified@example.com", primary: true, verified: false },
+      { email: "verified@example.com", primary: false, verified: true },
+    ]);
+    const account = new GitHubApi(async () => "test-token");
 
-    await expect(api.getAuthenticationIdentity()).resolves.toBeNull();
+    expect(await account.getAuthenticatedEmail()).toBe("verified@example.com");
   });
 
-  it("requires a non-blank primary verified email", async () => {
-    stubGitHub(
-      { id: 123456, login: "person", avatar_url: "https://example.com/avatar", html_url: "https://github.com/person" },
-      [
-        { email: "secondary@example.com", primary: false, verified: true },
-        { email: "", primary: true, verified: true },
-      ],
-    );
-    const api = new GitHubApi(async () => "test-token");
+  it("rejects emails GitHub reports as unverified", async () => {
+    stubGitHub([
+      { email: "unverified@example.com", primary: true, verified: false },
+      { email: "also-unverified@example.com", primary: false, verified: false },
+    ]);
+    const account = new GitHubApi(async () => "test-token");
 
-    await expect(api.getAuthenticationIdentity()).resolves.toBeNull();
+    await expect(account.getAuthenticatedEmail()).resolves.toBeNull();
   });
 });
 

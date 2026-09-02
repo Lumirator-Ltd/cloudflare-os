@@ -2,7 +2,7 @@ import { WorkerEntrypoint, DurableObject, RpcStub } from "cloudflare:workers";
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import {
   GatekeeperVendor as GatekeeperVendorIface, Gatekeeper, GatekeeperUserVerifier, VendorDescription,
-  GatekeeperAuthenticationIdentity, GatekeeperConnectCallback, GatekeeperConnectOptions,
+  GatekeeperConnectCallback, GatekeeperConnectOptions,
   AccountDescription, SupportedResource, ResourceConfiguratorFrame, ResourceDescription,
   ApprovalQueue, ActionKind, staticOauthConnectorConfiguration, stripTrailingSlashes,
 } from "@gadgets/workshop-shared/gatekeeper";
@@ -11,7 +11,7 @@ import {
   getOAuthConfig, buildAuthorizeUrl, generatePkce, exchangeCode, refreshTokens,
   AUTH_SCOPES, BILLING_SCOPES, persistentScopesForResources,
 } from "./oauth";
-import { fetchIdentity } from "./cloudflare-api";
+import { fetchAuthenticatedEmail, fetchIdentity } from "./cloudflare-api";
 import {
   OBSERVABILITY_RESOURCES,
   ACCOUNT_OBSERVABILITY_RESOURCE,
@@ -403,15 +403,9 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
     };
   }
 
-  async getAuthenticationIdentity(): Promise<GatekeeperAuthenticationIdentity | null> {
-    const token = await this.#account().getAccessToken();
-    if (!token) return null;
-    const identity = await fetchIdentity(token);
-    return identity ? { subject: identity.id, verifiedEmail: identity.email } : null;
-  }
-
   async getAuthenticatedEmail(): Promise<string | null> {
-    return (await this.getAuthenticationIdentity())?.verifiedEmail ?? null;
+    const token = await this.#account().getAccessToken();
+    return token ? fetchAuthenticatedEmail(token) : null;
   }
 
   async ensureResources(resourceUrlPatterns: string[]): Promise<{url?: string}> {

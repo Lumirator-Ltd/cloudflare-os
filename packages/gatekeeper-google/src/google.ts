@@ -1,7 +1,7 @@
 import { WorkerEntrypoint, DurableObject, RpcTarget, RpcStub } from "cloudflare:workers";
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
-import { GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor as GatekeeperVendorIface, Gatekeeper, ResourceDescription, ApprovalQueue, ObservationDescription, VendorDescription, GatekeeperAuthenticationIdentity, GatekeeperConnectCallback, GatekeeperConnectOptions, AccountDescription, SupportedResource, ResourceConfiguratorFrame, Cursor, ActionKind, staticOauthConnectorConfiguration, stripTrailingSlashes } from '@gadgets/workshop-shared/gatekeeper';
-import { exchangeAuthCode, getAccessToken, getGoogleAccountDescription, getGoogleAuthenticationIdentity, GmailApi, GmailMessageRaw, GmailOutboundMessage, GoogleAccessToken, normalizeEmailRecipients, revokeGoogleToken } from "./google-api";
+import { GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor as GatekeeperVendorIface, Gatekeeper, ResourceDescription, ApprovalQueue, ObservationDescription, VendorDescription, GatekeeperConnectCallback, GatekeeperConnectOptions, AccountDescription, SupportedResource, ResourceConfiguratorFrame, Cursor, ActionKind, staticOauthConnectorConfiguration, stripTrailingSlashes } from '@gadgets/workshop-shared/gatekeeper';
+import { exchangeAuthCode, getAccessToken, getGoogleAccountDescription, getGoogleVerifiedEmail, GmailApi, GmailMessageRaw, GmailOutboundMessage, GoogleAccessToken, normalizeEmailRecipients, revokeGoogleToken } from "./google-api";
 import {
   GmailSession, GmailThread, GmailMessage,
   GmailThreadInfo, GmailThreadEntry, GmailMessageInfo, GmailLabel, GmailSystemLabel, EmailContent
@@ -817,19 +817,14 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
     return description;
   }
 
-  async getAuthenticationIdentity(): Promise<GatekeeperAuthenticationIdentity | null> {
+  async getAuthenticatedEmail(): Promise<string | null> {
     try {
       const id = this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId);
       const token = await this.ctx.exports.UserAccount.get(id).getAccessToken();
-      if (!token) return null;
-      return await getGoogleAuthenticationIdentity(token.token);
+      return token ? getGoogleVerifiedEmail(token.token) : null;
     } catch {
       return null;
     }
-  }
-
-  async getAuthenticatedEmail(): Promise<string | null> {
-    return (await this.getAuthenticationIdentity())?.verifiedEmail ?? null;
   }
 
   async getSupportedResources(): Promise<SupportedResource[]> {

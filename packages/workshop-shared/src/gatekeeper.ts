@@ -35,14 +35,6 @@ export type AvatarImage = {
   url: string;
 }
 
-/** A stable, provider-verified identity returned by an authentication Gatekeeper. */
-export type GatekeeperAuthenticationIdentity = {
-  /** Provider-stable opaque subject; it must not be an email, display name, or renameable login. */
-  readonly subject: string;
-  /** Email address whose ownership the provider has verified for this subject. */
-  readonly verifiedEmail: string;
-};
-
 /** Describes one write-only deployment input required by a connector. */
 export type ConnectorConfigurationInput = {
   name: string;
@@ -108,11 +100,9 @@ export type VendorDescription = {
   description?: string;
 
   /**
-   * Whether this vendor can authenticate a user for sign-in.
-   *
-   * A vendor that sets this must implement `GatekeeperUser.getAuthenticationIdentity()` and return
-   * both a provider-stable opaque subject and a provider-verified email. The Workshop may offer the
-   * vendor as a login method, subject to its own auth allowlist. Defaults to false.
+   * True if this vendor can authenticate a user for sign-in: i.e. its connect flow yields a
+   * provider-verified email (via GatekeeperUser.getAuthenticatedEmail()). The Workshop may offer
+   * such a vendor as a login method, subject to its own auth allowlist. Defaults to false.
    */
   providesAuth?: boolean;
 
@@ -546,10 +536,9 @@ export interface GatekeeperVendor extends WorkerEntrypoint {
    * `options.scopes` selects how much access to request (default "full"):
    *   - "full": the gatekeeper's full capability scopes (repos, docs, etc.). The resulting
    *     connection is persisted as a usable connected account.
-   *   - "auth": only the minimal scopes needed to verify the user's stable authentication identity
-   *     for sign-in. The grant is transient — after `complete()` lets the caller read
-   *     getAuthenticationIdentity(), the gatekeeper discards it. Vendors without `providesAuth`
-   *     ignore this and always use their full scopes.
+   *   - "auth": only the minimal scopes needed to verify the user's email for sign-in. The grant is
+   *     transient — after `complete()` lets the caller read getAuthenticatedEmail(), the gatekeeper
+   *     discards it. Vendors without `providesAuth` ignore this and always use their full scopes.
    *
    * `options.resourceUrlPatterns`, if given, limits the connection to the authorization needed for
    * those grantable resource types. If omitted, authorization for all of the vendor's resource
@@ -567,11 +556,9 @@ export interface GatekeeperVendor extends WorkerEntrypoint {
    * Get the list of resource types this vendor supports. Each entry describes a category of
    * resource the vendor can provide access to, along with a URL pattern for matching.
    *
-   * `options.userId` specifies a deployment-local application identifier for the user driving the
-   * query. Registry-backed authentication supplies an opaque stable ID; deployments that still
-   * enable legacy password authentication may supply its local username. A gatekeeper may use the
-   * value for deployment-scoped RBAC but must never interpret it as an email address or external-
-   * provider identity. If this method returns an empty list, the gatekeeper is hidden from the user.
+   * `options.userId` specifies the user ID (usually, email address) of the user who is driving the
+   * query, which the gatekeeper can consider in deciding what resources are available. If it
+   * returns an empty list, then the gatekeeper will be totally hidden from the user.
    *
    * TODO: Providing the user ID here is a temporary hack to enable a hidden internal gatekeeper.
    *   Later on we should come up with a better way to manage which users see which gatekeepers.
@@ -705,20 +692,12 @@ export interface GatekeeperUser extends WorkerEntrypoint {
   reconnect(): Promise<{url: string}>;
 
   /**
-   * Returns the stable, provider-verified identity used for Workshop sign-in.
-   *
-   * Vendors advertising `providesAuth` must implement this method. Sign-in fails closed when the
-   * method is absent, throws, returns null, or returns a blank field. Non-authentication vendors do
-   * not need to implement it.
-   */
-  getAuthenticationIdentity?(): Promise<GatekeeperAuthenticationIdentity | null>;
-
-  /**
-   * Returns a provider-verified email when retained integrations still need the legacy claim.
-   *
-   * @deprecated Workshop sign-in uses `getAuthenticationIdentity()` exclusively because an email
-   * address is not a stable provider identity. This method remains for backward compatibility and
-   * must never be used as a sign-in fallback.
+   * For vendors that advertise `providesAuth`, returns the account's email address for use as the
+   * user's sign-in identity. The email MUST be verified by the provider (e.g. Google
+   * `email_verified`, a verified GitHub email that prefers the primary address but intentionally
+   * falls back to another verified address, or a Cloudflare account email) — the Workshop keys
+   * accounts by email, so an unverified address would allow account takeover.
+   * Returns null when the account has no verified email or the vendor does not support auth.
    */
   getAuthenticatedEmail(): Promise<string | null>;
 

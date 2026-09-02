@@ -12,21 +12,22 @@ connect the account's capabilities. There's no single switch — the pieces turn
 
 | Configure | Effect |
 | --- | --- |
-| `AUTH_GATEKEEPERS=cloudflare,google,github` | Allowlists which bound, auth-capable gatekeeper vendors may be used for transient sign-in. Each shows a "Continue with …" button alongside username/password; sign-in neither requires nor creates a connected account. |
+| `AUTH_GATEKEEPERS=cloudflare,google,github` | Allowlists which bound, auth-capable gatekeepers may be used to sign in. Each advertised vendor shows an enabled "Continue with …" button alongside username/password. Google and GitHub login grants are transient; Cloudflare sign-in persists its account for AI Gateway billing. |
 | Each gatekeeper's OAuth credentials (on the gatekeeper Worker) | Required for that gatekeeper to actually authenticate. In dev, seeded from `GOOGLE_*` / `GITHUB_*` / `CLOUDFLARE_OAUTH_*` shell vars (see `scripts/run-dev-server.ts`). |
 | `ENABLE_CLOUDFLARE_LIMITS=true` | Enables the free daily limit + Cloudflare-credits top-up flow. Billing reads a token from the connected Cloudflare gatekeeper. |
 | `REQUIRE_USER_FUNDED_AI=true` | Disables platform-funded inference and requires a connected Cloudflare account with sufficient AI Gateway credits from the first request. Takes precedence over the free-tier flag. |
 | `DISABLE_PASSWORD_AUTH=true` | Hides username/password, leaving gatekeeper sign-in only (ignored unless `AUTH_GATEKEEPERS` is non-empty, to avoid lockout). |
 
-For Gatekeeper, Clerk, and Cloudflare Access authentication, a **verified email is a convergence
-claim, not the durable account key**: the deployment-local Identity Registry maps it to an opaque
-stable internal ID. Access additionally keys its stable subject by the verified issuer and configured
-audience, so two Access deployments cannot collide by subject alone. A verified Access email change
-moves that subject's email mapping and version; a conflicting move locks the identity rather than
-merging accounts. Each Access API WebSocket and all capabilities minted from it expire at the JWT's
-absolute `exp`; extending authority requires reconnecting with a fresh Access assertion. The legacy
-built-in password path remains locally username-keyed until it is disabled or removed; neither
-usernames nor opaque IDs should be interpreted as provider identities.
+The durable account key is a **username or provider-verified email**. Built-in password accounts use
+the normalized username. Authentication gatekeepers route the verified email returned by the
+provider directly to `UserDurableObject.idFromName(email)`, so gatekeepers returning the same exact
+email reach the same account.
+
+Cloudflare Access verifies the request's JWT against the configured issuer and audience, requires its
+email claim, and routes that raw verified email to the same email-keyed User DO. The Workshop does not
+lowercase or otherwise canonicalize Access or gatekeeper emails; changing that route would make
+existing account state unreachable. Direct sharing therefore discovers a User DO by its username or
+email account key.
 
 For local development, set the required variables in a root `.dev.vars` file (gitignored,
 `KEY=VALUE` per line); `pnpm run dev-server` loads it automatically. A minimal example:

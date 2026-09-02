@@ -1,9 +1,9 @@
 // Sign-in via authentication gatekeepers.
 //
 // Unlike the normal connect-account flow (which runs for an already-logged-in user), login happens
-// before we know who the user is. The PublicApi starts a gatekeeper connect flow (in "auth" scope
-// mode) with a `LoginConnectCallbackImpl` as the callback and a `PendingLogin` DO to bridge the
-// result back to the waiting browser:
+// before we know who the user is. The PublicApi starts a gatekeeper connect flow with a
+// `LoginConnectCallbackImpl` as the callback and a `PendingLogin` DO to bridge the result back to the
+// waiting browser:
 //
 //   1. PublicApi.startGatekeeperLogin(vendorId) creates a PendingLogin DO (keyed by a random DO id),
 //      hands the gatekeeper a LoginConnectCallbackImpl, and returns {url, attempt}, where `attempt`
@@ -11,31 +11,20 @@
 //   2. The browser opens `url` (the gatekeeper's self-closing OAuth popup) and calls
 //      `attempt.wait()`, which blocks on the PendingLogin DO.
 //   3. When the gatekeeper finishes, it calls LoginConnectCallbackImpl.complete(user). We read the
-//      stable provider subject and verified email, resolve its internal identity, mint a bounded
-//      local Workshop session, and
-//      deliver the token to the PendingLogin DO, which resolves the awaiting RPC.
+//      verified email, resolve/create the email-keyed user DO, mint a session, and deliver the token
+//      to the PendingLogin DO, which resolves the awaiting RPC.
 //
-// Sign-in only requests minimal scopes and the gatekeeper grant is transient (it self-destructs
-// shortly after we read the email) — so login does NOT create a persistent connected account.
-// Capability access (repos, docs, billing) is granted later when the user explicitly connects the
-// gatekeeper, which requests the full scopes and persists the connection.
+// Most provider sign-ins request minimal scopes and use a transient grant that is discarded after
+// reading the email. Cloudflare instead requests full scope and persists the account for AI Gateway
+// billing.
 
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { GatekeeperConnectCallback, GatekeeperUser } from "@gadgets/workshop-shared/gatekeeper";
 import { createWorkshopLogger } from "../observability";
+import { CLOUDFLARE_VENDOR_ID } from "../user.js";
 import { readAdminConfig } from "../admin-config.js";
-import { recordAnalytics } from "../analytics.js";
-import type { IdentityResolution } from "../identity-registry.js";
-import {
-  assertCurrentIdentityAuthority,
-  mintCurrentIdentitySessionToken,
-} from "../identity-authority.js";
 
 const logger = createWorkshopLogger("workshop.auth");
-
-const SIGNUPS_DISABLED = "New sign-ups are currently disabled on this deployment.";
-const EXPLICIT_LINK_REQUIRED =
-  "Identity ownership requires explicit linking or deployment operator resolution.";
 
 type PendingResult = { token: string } | { error: string };
 
@@ -90,7 +79,6 @@ export class PendingLogin extends DurableObject<Cloudflare.Env> {
 }
 
 type LoginCallbackProps = { pendingId: string; vendorId: string };
-type AuthenticationAccountStub = Required<Pick<GatekeeperUser, "getAuthenticationIdentity">>;
 
 export class LoginConnectCallbackImpl
     extends WorkerEntrypoint<Cloudflare.Env, LoginCallbackProps>
@@ -107,77 +95,39 @@ export class LoginConnectCallbackImpl
     });
     const pending = this.#pending();
     // `account` is a call parameter, so Cap'n Web disposes it automatically when this method
-    // returns — no explicit disposal needed. Sign-in exclusively reads the provider's stable
-    // subject plus verified email; the legacy email-only method is never an authentication fallback.
+    // returns — no explicit disposal needed. We read the verified email to resolve/create the user.
+    // The email's local-part seeds the initial display name, like the Cloudflare Access flow.
     try {
-      // RPC stubs cannot report optional-method presence. The providesAuth declaration says the
-      // method exists; viewing that derived interface as required lets invocation itself fail closed
-      // for a custom vendor that violates the declaration.
-      const providerIdentity = await (account as unknown as AuthenticationAccountStub)
-        .getAuthenticationIdentity();
-      if (!providerIdentity || typeof providerIdentity.subject !== "string" ||
-          providerIdentity.subject.trim().length === 0 ||
-          typeof providerIdentity.verifiedEmail !== "string" ||
-          providerIdentity.verifiedEmail.trim().length === 0) {
-        throw new Error("Authentication Gatekeeper returned an invalid identity.");
-      }
-      // Signup policy is read at the Workshop trust boundary before the verified provider identity
-      // is resolved. The registry canonicalizes the email and initializes the stable User DO.
-      const signupsEnabled = (await readAdminConfig(this.env)).signupsEnabled;
-      const registry = this.ctx.exports.IdentityRegistry.getByName("");
-      let identity: IdentityResolution;
-      try {
-        identity = await registry.resolveGatekeeperIdentity(
-          this.ctx.props.vendorId,
-          providerIdentity.subject,
-          providerIdentity.verifiedEmail,
-          signupsEnabled,
-        );
-      } catch (error) {
-        if (error instanceof Error && error.message === SIGNUPS_DISABLED) {
-          loginLogger.info("gatekeeper login finished", {
-            event: "gatekeeper.login.finished", outcome: "signups_disabled",
-          });
-          await pending.fail(SIGNUPS_DISABLED);
-          return;
-        }
-        if (error instanceof Error && error.message === EXPLICIT_LINK_REQUIRED) {
-          loginLogger.info("gatekeeper login finished", {
-            event: "gatekeeper.login.finished", outcome: "explicit_link_required",
-          });
-          await pending.fail(EXPLICIT_LINK_REQUIRED);
-          return;
-        }
-        throw error;
+      const email = await account.getAuthenticatedEmail();
+      if (!email) {
+        loginLogger.info("gatekeeper login finished", {
+          event: "gatekeeper.login.finished", outcome: "no_email",
+        });
+        await pending.fail("This account has no verified email, so it can't be used to sign in.");
+        return;
       }
       const userStub = this.ctx.exports.UserDurableObject.get(
-        this.ctx.exports.UserDurableObject.idFromName(identity.internalUserId));
-      const authority = {
-        canonicalVerifiedEmail: identity.canonicalVerifiedEmail,
-        identityVersion: identity.identityVersion,
-      };
-      const assertCurrent = () => assertCurrentIdentityAuthority(
-        registry, identity.internalUserId, authority);
-      // Close the issuance race: a Clerk update may move or collision-lock this identity after its
-      // email resolution but before the local token is ready. Re-read exact durable authority and
-      // revoke the just-created token rather than delivering stale authority.
-      const secret = await mintCurrentIdentitySessionToken({
-        mint: () => userStub.createGatekeeperSession(
-          identity, this.ctx.props.vendorId, providerIdentity.subject, expiresAt,
-        ),
-        revoke: token => userStub.revokeGatekeeperSession(token),
-        assertCurrent,
-      });
-      // Session tokens remain "<doName>:<secret>"; the opaque record also retains this exact
-      // registry version/email so a post-check delivery race cannot upgrade it on reconnect.
-      await pending.deliver(`${identity.internalUserId}:${secret}`);
-      if (identity.created) {
-        recordAnalytics(this.ctx, this.env, {
-          event_name: "account_created",
-          user_id: identity.internalUserId,
-          source: "gatekeeper",
+          this.ctx.exports.UserDurableObject.idFromName(email));
+      // Closed signups block first-time account creation here too (not just password signup); an
+      // existing user signing in is unaffected.
+      const signupsEnabled = (await readAdminConfig(this.env)).signupsEnabled;
+      const secret = await userStub.loginOrCreateViaGatekeeper(email, signupsEnabled);
+      if (secret === null) {
+        loginLogger.info("gatekeeper login finished", {
+          event: "gatekeeper.login.finished", outcome: "signups_disabled",
         });
+        await pending.fail("New sign-ups are currently disabled on this deployment.");
+        return;
       }
+      // For Cloudflare, signing in also links the account for AI Gateway billing: startGatekeeperLogin
+      // requested full (non-transient) scopes, so persist the grant as a connected account before
+      // handing back the session. Other providers use minimal, transient sign-in grants (no persist).
+      if (this.ctx.props.vendorId === CLOUDFLARE_VENDOR_ID) {
+        await userStub.linkConnectedAccountFromLogin(account, this.ctx.props.vendorId, expiresAt);
+      }
+      // Session tokens are "<doName>:<secret>"; PublicApi.authenticate() routes via idFromName of
+      // the first part. The user DO is keyed by email, so the prefix must be the email.
+      await pending.deliver(`${email}:${secret}`);
       loginLogger.info("gatekeeper login finished", {
         event: "gatekeeper.login.finished", outcome: "ok",
       });
@@ -192,9 +142,13 @@ export class LoginConnectCallbackImpl
     }
   }
 
-  /** Transient sign-in grants do not retain credential state. */
+  /**
+   * No-ops: for transient sign-in grants there's nothing persisted to update. For the Cloudflare
+   * billing connection (persisted on login) these would ideally flip the account's credential flag,
+   * but the callback doesn't carry the user/account identity (it's only learned in complete()). The
+   * billing path degrades gracefully regardless — getUsableAccessToken() returns null on expiry and
+   * the user falls back to the free tier / a reconnect prompt.
+   */
   async credentialsExpired(): Promise<void> {}
-
-  /** Transient sign-in grants have no credential state to restore. */
   async credentialsRestored(_expiresAt?: Date): Promise<void> {}
 }

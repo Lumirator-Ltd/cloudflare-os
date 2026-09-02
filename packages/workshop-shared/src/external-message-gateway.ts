@@ -32,7 +32,12 @@ export type ChatGatewayCallback =
 /** Bytes and metadata for an attachment submitted through an external message gateway. */
 export type ExternalMessageAttachment = ChatAttachmentUpload;
 
-type SubmitExternalMessageBase = {
+/** External message submission accepted by the trusted-email backend gateway. */
+export type SubmitExternalMessageInput = {
+  /** Selects routing through a gateway-trusted email address. */
+  identityMode: "trustedEmail";
+  /** Verified account email trusted from the configured gateway binding. */
+  callerEmail: string;
   /** Selects the workspace to create or reuse within the binding-owned source. */
   gadgetKey: string;
   /** Selects the chat to create or reuse within the binding-owned source. */
@@ -49,28 +54,12 @@ type SubmitExternalMessageBase = {
   chatGatewayRpcTarget: ChatGatewayCallback;
 };
 
-/** External message submission accepted by the backend gateway. */
-export type SubmitExternalMessageInput = SubmitExternalMessageBase & (
-  | {
-      /** Selects explicit compatibility routing through a gateway-trusted email address. */
-      identityMode: "trustedEmail";
-      /** Verified account email trusted from the configured gateway binding. */
-      callerEmail: string;
-    }
-  | {
-      /** Selects routing through a pre-linked external identity. */
-      identityMode: "linkedExternalSubject";
-      /** Stable subject identifier issued by the binding-owned external source. */
-      externalSubject: string;
-    }
-);
-
-/** Binding-owned properties that constrain external identity routing. */
+/** Binding-owned properties that constrain external message routing. */
 export type ExternalMessageGatewayProps = {
-  /** Stable namespace for external workspace, chat, message, and identity keys. */
+  /** Stable namespace for external workspace, chat, and message keys. */
   source: string;
-  /** Identity authority accepted from callers of this binding. */
-  identityMode: "trustedEmail" | "linkedExternalSubject";
+  /** Restricts the binding to routing gateway-trusted email addresses. */
+  identityMode: "trustedEmail";
 };
 
 /** Submission result returned by the backend gateway. */
@@ -88,7 +77,7 @@ export type SubmitExternalMessageResult =
       message: string;
     };
 
-/** Service binding RPC interface used by chat gateway workers. */
+/** Service binding RPC interface used by trusted-email gateway workers. */
 export interface ExternalMessageGateway {
   /** Submit an external chat message for Gadget routing and execution. */
   submitExternalMessage(input: SubmitExternalMessageInput): Promise<SubmitExternalMessageResult>;

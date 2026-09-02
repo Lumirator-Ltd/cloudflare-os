@@ -74,6 +74,10 @@ export async function fetchIdentity(token: string): Promise<CloudflareIdentity |
   };
 }
 
+export async function fetchAuthenticatedEmail(token: string): Promise<string | null> {
+  return (await fetchIdentity(token))?.email ?? null;
+}
+
 export interface CloudflareAccount {
   accountId: string;
   accountName: string;

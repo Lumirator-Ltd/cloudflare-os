@@ -15,6 +15,7 @@ import type {
   Overseer,
   ShareLinkInfo,
 } from '@gadgets/workshop-shared/api'
+import i18n from './i18n/config'
 
 const testGlobal = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }
 const previousActEnvironment = testGlobal.IS_REACT_ACT_ENVIRONMENT
@@ -74,7 +75,7 @@ import ShareModal from './ShareModal'
 const METADATA = { id: 'trip-planner', title: 'Trip planner' } as GadgetMetadata
 const WORKSPACE_URL = `${window.location.origin}/workspace/trip-planner`
 
-const CURRENT_USER: AiChatAuthorInfo = { type: 'user', id: 'user_internal_dan', name: 'Dan' }
+const CURRENT_USER: AiChatAuthorInfo = { type: 'user', id: 'dan@example.com', name: 'Dan' }
 
 const DOC_REQUIREMENT: ObserverBindingNeed = {
   gatekeeperId: 7,
@@ -101,6 +102,11 @@ type OverseerOverrides = {
   collaborators?: CollaboratorInfo[]
   requirements?: Partial<Record<CollaboratorRole, ObserverBindingNeed[]>>
   listObserverRequirements?: (role: CollaboratorRole) => Promise<ObserverBindingNeed[]>
+  addCollaborator?: (
+    accountKey: string,
+    role: CollaboratorRole,
+    sharer?: string,
+  ) => Promise<CollaboratorInfo | null>
   shareLinks?: ShareLinkInfo[]
   updateShareLink?: (linkId: string, note?: string) => Promise<void>
 }
@@ -113,11 +119,11 @@ function fakeOverseer(overrides: OverseerOverrides = {}): RpcStub<Overseer> {
     listObserverRequirements:
       overrides.listObserverRequirements ??
       (async (role: CollaboratorRole) => requirements[role] ?? []),
-    addCollaborator: async () => ({
-      profile: { type: 'user', id: 'user_internal_ada', name: 'Ada' },
+    addCollaborator: overrides.addCollaborator ?? (async () => ({
+      profile: { type: 'user', id: 'ada@example.com', name: 'Ada' },
       role: 'use',
       addedBy: [],
-    }),
+    })),
     createShareLink: async () => ({ key: 'secret', linkId: 'link-1' }),
     updateShareLink: overrides.updateShareLink ?? (async () => {}),
   } as unknown as RpcStub<Overseer>
@@ -151,13 +157,20 @@ function verificationSection(rendered: HTMLElement, headingId: string): HTMLElem
   return section
 }
 
-async function invite(rendered: HTMLElement, verifiedEmail: string) {
-  const input = rendered.querySelector<HTMLInputElement>('input[aria-label="Verified email"]')!
+async function enterAccountKey(rendered: HTMLElement, accountKey: string) {
+  const input = rendered.querySelector<HTMLInputElement>('input[aria-label="Username or email"]')
+  expect(input).not.toBeNull()
+  if (!input) return null
   const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!
   await act(async () => {
-    setValue.call(input, verifiedEmail)
+    setValue.call(input, accountKey)
     input.dispatchEvent(new Event('input', { bubbles: true }))
   })
+  return input
+}
+
+async function invite(rendered: HTMLElement, accountKey: string) {
+  await enterAccountKey(rendered, accountKey)
   await click(button(rendered, 'Invite'))
 }
 
@@ -169,11 +182,12 @@ describe('ShareModal', () => {
     copyToClipboard.mockClear()
   })
 
-  afterEach(() => {
+  afterEach(async () => {
     act(() => root?.unmount())
     container?.remove()
     root = undefined
     container = undefined
+    await i18n.changeLanguage('en')
   })
 
   async function render(overseer: RpcStub<Overseer>) {
@@ -197,29 +211,62 @@ describe('ShareModal', () => {
     return container
   }
 
-  it('presents verified email as the only direct-invite discovery input', async () => {
+  it.each(['Ada_User', 'ada@example.com'])(
+    'accepts the account key %s and sends it unchanged for direct discovery',
+    async (accountKey) => {
+      const addCollaborator = vi.fn<NonNullable<OverseerOverrides['addCollaborator']>>(
+        async () => null,
+      )
+      const rendered = await render(fakeOverseer({ addCollaborator }))
+
+      await invite(rendered, accountKey)
+
+      expect(addCollaborator).toHaveBeenCalledExactlyOnceWith(accountKey, 'use', undefined)
+    },
+  )
+
+  it('localizes the username-or-email account key input in Japanese', async () => {
+    await i18n.changeLanguage('ja')
     const rendered = await render(fakeOverseer())
 
-    expect(rendered.querySelector('input[aria-label="Verified email"]')).not.toBeNull()
-    expect(rendered.textContent).not.toContain('Username')
+    expect(rendered.querySelector('input[aria-label="ユーザー名またはメールアドレス"]')).not.toBeNull()
   })
 
-  it('does not present opaque stable IDs as email addresses', async () => {
+  it('does not submit a direct invite while an IME composition is active', async () => {
+    const addCollaborator = vi.fn<NonNullable<OverseerOverrides['addCollaborator']>>(
+      async () => null,
+    )
+    const rendered = await render(fakeOverseer({ addCollaborator }))
+    const input = await enterAccountKey(rendered, 'あだ')
+    if (!input) return
+
+    await act(async () => {
+      input.dispatchEvent(new KeyboardEvent('keydown', {
+        bubbles: true,
+        isComposing: true,
+        key: 'Enter',
+      }))
+    })
+
+    expect(addCollaborator).not.toHaveBeenCalled()
+  })
+
+  it('does not present account keys as secondary profile text', async () => {
     const rendered = await render(fakeOverseer())
 
     expect(rendered.textContent).toContain('Dan')
     expect(rendered.textContent).not.toContain(CURRENT_USER.id)
   })
 
-  it('does not render a direct sharer opaque stable ID', async () => {
-    const opaqueSharerId = 'user_internal_opaque_sharer'
+  it('does not render a direct sharer account key', async () => {
+    const sharerAccountKey = 'sharer@example.com'
     const rendered = await render(fakeOverseer({
       collaborators: [{
-        profile: { type: 'user', id: 'user_internal_ada', name: 'Ada' },
+        profile: { type: 'user', id: 'ada@example.com', name: 'Ada' },
         role: 'use',
         addedBy: [{
           type: 'user',
-          sharer: opaqueSharerId,
+          sharer: sharerAccountKey,
           created: new Date('2026-08-01T00:00:00Z'),
           role: 'use',
         }],
@@ -227,7 +274,7 @@ describe('ShareModal', () => {
     }))
 
     expect(rendered.textContent).toContain('Added directly')
-    expect(rendered.textContent).not.toContain(opaqueSharerId)
+    expect(rendered.textContent).not.toContain(sharerAccountKey)
   })
 
   it('reveals the workspace link to send after a direct invite', async () => {

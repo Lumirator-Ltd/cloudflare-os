@@ -3,7 +3,6 @@
 // Contains no secrets.
 
 import { AuthVendorInfo, ServerConfig, SupportedLanguage } from "@gadgets/workshop-shared/api";
-import { connectorIsConfigured } from "@gadgets/workshop-shared/gatekeeper";
 import { createWorkshopLogger } from "./observability";
 import { getAuthGatekeeperAllowlist, isPasswordAuthEnabled } from "./auth/config.js";
 import { isCloudflareBillingEnabled } from "./ai-gateway-billing/config.js";
@@ -34,7 +33,6 @@ export async function getAuthVendors(env: Cloudflare.Env): Promise<AuthVendorInf
         displayName: desc.displayName,
         logo: desc.logo,
         color: desc.color,
-        configured: connectorIsConfigured(desc),
       };
     } catch (err) {
       logger.error("failed to describe auth gatekeeper", {
@@ -44,13 +42,6 @@ export async function getAuthVendors(env: Cloudflare.Env): Promise<AuthVendorInf
     }
   }));
   return results.filter((v): v is AuthVendorInfo => v !== null);
-}
-
-function passwordAuthEnabled(
-  env: Cloudflare.Env,
-  authVendors: AuthVendorInfo[],
-): boolean {
-  return isPasswordAuthEnabled(env) || !authVendors.some(vendor => vendor.configured);
 }
 
 function defaultLanguage(env: Cloudflare.Env): SupportedLanguage {
@@ -63,10 +54,9 @@ function defaultLanguage(env: Cloudflare.Env): SupportedLanguage {
   );
 }
 
-/** Resolves password availability without allowing unconfigured OAuth connectors to lock users out. */
+/** Resolves password availability from deployment authentication policy. */
 export async function isPasswordAuthAvailable(env: Cloudflare.Env): Promise<boolean> {
-  if (isPasswordAuthEnabled(env)) return true;
-  return passwordAuthEnabled(env, await getAuthVendors(env));
+  return isPasswordAuthEnabled(env);
 }
 
 export async function getServerConfig(env: Cloudflare.Env): Promise<ServerConfig> {
@@ -78,10 +68,9 @@ export async function getServerConfig(env: Cloudflare.Env): Promise<ServerConfig
     getAuthVendors(env),
   ]);
   return {
-    clerkPublishableKey: env.CF_ACCESS_AUD ? undefined : env.CLERK_PUBLISHABLE_KEY,
     defaultLanguage: defaultLanguage(env),
     authVendors,
-    passwordAuthEnabled: passwordAuthEnabled(env, authVendors),
+    passwordAuthEnabled: isPasswordAuthEnabled(env),
     cloudflareLimitsEnabled: isCloudflareBillingEnabled(env),
     signupsEnabled: config.signupsEnabled,
     telegramEnabled: Boolean(env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_WEBHOOK_SECRET),

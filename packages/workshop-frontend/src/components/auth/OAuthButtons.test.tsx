@@ -18,14 +18,11 @@ vi.mock('@cloudflare/kumo', () => ({
 
 import OAuthButtons from './OAuthButtons'
 
-const UNCONFIGURED_MESSAGE =
-  'Ask an administrator to configure this connector.'
-
-function vendor(configured: boolean): AuthVendorInfo {
-  return { vendorId: 'github', displayName: 'GitHub', configured }
+function vendor(vendorId: string, displayName: string): AuthVendorInfo {
+  return { vendorId, displayName }
 }
 
-describe('OAuthButtons connector readiness', () => {
+describe('OAuthButtons', () => {
   let root: Root | undefined
   let container: HTMLDivElement | undefined
 
@@ -36,7 +33,11 @@ describe('OAuthButtons connector readiness', () => {
     container = undefined
   })
 
-  function render(vendors: AuthVendorInfo[], startGatekeeperLogin = vi.fn<() => void>()) {
+  function render(
+    vendors: AuthVendorInfo[],
+    startGatekeeperLogin: (vendorId: string) => unknown =
+      vi.fn<(vendorId: string) => unknown>(),
+  ) {
     container = document.createElement('div')
     document.body.append(container)
     root = createRoot(container)
@@ -49,20 +50,31 @@ describe('OAuthButtons connector readiness', () => {
     return { container, startGatekeeperLogin }
   }
 
-  it('disables unconfigured auth vendors with the shared administrator guidance', () => {
-    const rendered = render([vendor(false)])
+  it('enables every advertised auth vendor without connector readiness metadata', () => {
+    const rendered = render([vendor('github', 'GitHub')])
     const button = rendered.container.querySelector('button') as HTMLButtonElement
 
-    expect(button.disabled).toBe(true)
-    expect(rendered.container.textContent).toContain(UNCONFIGURED_MESSAGE)
+    expect(button.disabled).toBe(false)
+    expect(rendered.container.textContent)
+      .not.toContain('Ask an administrator to configure this connector.')
     button.click()
-    expect(rendered.startGatekeeperLogin).not.toHaveBeenCalled()
+    expect(rendered.startGatekeeperLogin).toHaveBeenCalledWith('github')
   })
 
-  it('keeps configured auth vendors enabled', () => {
-    const rendered = render([vendor(true)])
+  it('disables auth vendor buttons only while a sign-in attempt is pending', async () => {
+    const startGatekeeperLogin = vi.fn<
+      (vendorId: string) => Promise<never>
+    >(() => new Promise<never>(() => {}))
+    const rendered = render([
+      vendor('github', 'GitHub'),
+      vendor('google', 'Google'),
+    ], startGatekeeperLogin)
+    const buttons = [...rendered.container.querySelectorAll('button')]
 
-    expect((rendered.container.querySelector('button') as HTMLButtonElement).disabled).toBe(false)
-    expect(rendered.container.textContent).not.toContain(UNCONFIGURED_MESSAGE)
+    expect(buttons.every(button => !button.disabled)).toBe(true)
+    await act(async () => buttons[0].click())
+
+    expect(buttons.every(button => button.disabled)).toBe(true)
+    expect(startGatekeeperLogin).toHaveBeenCalledExactlyOnceWith('github')
   })
 })

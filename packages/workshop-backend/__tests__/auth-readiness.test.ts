@@ -1,19 +1,23 @@
-import { describe, expect, it } from "vitest";
-import type { GatekeeperVendor } from "@gadgets/workshop-shared/gatekeeper";
-import * as serverModule from "../src/server.js";
-import { getAuthVendors, getServerConfig } from "../src/deployment-config.js";
+import { describe, expect, it, vi } from "vitest";
+import type { GatekeeperVendor, VendorDescription } from "@gadgets/workshop-shared/gatekeeper";
+import { PublicApiImpl } from "../src/server.js";
+import {
+  getAuthVendors,
+  getServerConfig,
+  isPasswordAuthAvailable,
+} from "../src/deployment-config.js";
 
-const UNCONFIGURED_MESSAGE =
-  "This connector is not configured. Ask an administrator to configure it.";
-
-function authVendor(configured: boolean, connect: () => void = () => {}): Service<GatekeeperVendor> {
+function authVendor(
+  description: Partial<VendorDescription> = {},
+  connect: () => void = () => {},
+): Service<GatekeeperVendor> {
   return {
     async describe() {
       return {
         displayName: "GitHub",
         url: "https://github.com",
         providesAuth: true,
-        configuration: { configured },
+        ...description,
       };
     },
     async connectAccount() {
@@ -23,76 +27,83 @@ function authVendor(configured: boolean, connect: () => void = () => {}): Servic
   } as Service<GatekeeperVendor>;
 }
 
-function environment(vendor: Service<GatekeeperVendor>): Cloudflare.Env {
+function environment(vendor?: Service<GatekeeperVendor>): Cloudflare.Env {
   return {
     AUTH_GATEKEEPERS: "github",
-    GATEKEEPER_GITHUB: vendor,
+    ...(vendor ? { GATEKEEPER_GITHUB: vendor } : {}),
     BLUEPRINTS: { get: async () => null },
   } as unknown as Cloudflare.Env;
 }
 
-describe("authentication connector readiness", () => {
-  it("propagates readiness into AuthVendorInfo and restores password fallback", async () => {
-    const env = environment(authVendor(false));
-    env.DISABLE_PASSWORD_AUTH = "true";
+function publicApi(env: Cloudflare.Env) {
+  const pending = { awaitResult: vi.fn() };
+  const ctx = {
+    exports: {
+      UserDurableObject: {},
+      PendingLogin: {
+        newUniqueId: vi.fn(() => ({ toString: () => "pending" })),
+        get: vi.fn(() => pending),
+      },
+      LoginConnectCallbackImpl: vi.fn(() => ({})),
+    },
+    waitUntil: vi.fn(),
+  } as unknown as ExecutionContext;
+  return { api: new PublicApiImpl(ctx, env, vi.fn()), ctx };
+}
+
+describe("upstream authentication policy", () => {
+  it("does not expose connector readiness in sign-in discovery", async () => {
+    const env = environment(authVendor({ configuration: { configured: false } }));
 
     await expect(getAuthVendors(env)).resolves.toEqual([{
       vendorId: "github",
       displayName: "GitHub",
       logo: undefined,
       color: undefined,
-      configured: false,
     }]);
     await expect(getServerConfig(env)).resolves.toMatchObject({
-      authVendors: [{ vendorId: "github", configured: false }],
-      passwordAuthEnabled: true,
+      authVendors: [{ vendorId: "github", displayName: "GitHub" }],
     });
+    expect((await getServerConfig(env)).authVendors[0]).not.toHaveProperty("configured");
   });
 
-  it("allows password login fallback when every allowlisted auth connector is unconfigured", async () => {
-    const env = environment(authVendor(false));
+  it.each([
+    ["is unbound", undefined],
+    ["is unconfigured", authVendor({ configuration: { configured: false } })],
+    ["fails describe", {
+      describe: vi.fn(async () => { throw new Error("vendor unavailable"); }),
+    } as unknown as Service<GatekeeperVendor>],
+  ])("suppresses password fallback when a listed vendor %s", async (_case, vendor) => {
+    const env = environment(vendor);
     env.DISABLE_PASSWORD_AUTH = "true";
-    const PublicApiImpl = Reflect.get(serverModule, "PublicApiImpl");
-    expect(PublicApiImpl).toBeTypeOf("function");
-    const user = { login: async () => "session" };
-    const target = Reflect.construct(PublicApiImpl, [{
-      exports: {
-        UserDurableObject: {
-          idFromName: (name: string) => name,
-          get: () => user,
-        },
-      },
-    }, env, () => {}, new AbortController().signal, async () => {
-      throw new Error("Clerk verification is not expected in this test.");
-    }]);
 
-    await expect(Reflect.apply(target.login, target, ["person", new Uint8Array([1])]))
-      .resolves.toBe("person:session");
+    await expect(isPasswordAuthAvailable(env)).resolves.toBe(false);
+    await expect(getServerConfig(env)).resolves.toMatchObject({ passwordAuthEnabled: false });
   });
 
-  it("rejects PublicApi sign-in before allocating login state or calling the vendor", async () => {
-    let connectCalls = 0;
-    let allocationCalls = 0;
-    const PublicApiImpl = Reflect.get(serverModule, "PublicApiImpl");
-    expect(PublicApiImpl).toBeTypeOf("function");
-    const target = Reflect.construct(PublicApiImpl, [{
-      exports: {
-        UserDurableObject: {},
-        PendingLogin: {
-          newUniqueId() {
-            allocationCalls++;
-            return { toString: () => "pending" };
-          },
-        },
-      },
-    }, environment(authVendor(false, () => { connectCalls++; })), () => {},
-    new AbortController().signal, async () => {
-      throw new Error("Clerk verification is not expected in this test.");
-    }]);
+  it("starts an allowlisted auth vendor without applying connector readiness", async () => {
+    const connect = vi.fn();
+    const env = environment(authVendor({ configuration: { configured: false } }, connect));
+    const { api, ctx } = publicApi(env);
 
-    await expect(Reflect.apply(target.startGatekeeperLogin, target, ["github"]))
-      .rejects.toThrow(UNCONFIGURED_MESSAGE);
-    expect(allocationCalls).toBe(0);
-    expect(connectCalls).toBe(0);
+    await expect(api.startGatekeeperLogin("github")).resolves.toMatchObject({
+      url: "https://github.com/login/oauth",
+    });
+    expect(connect).toHaveBeenCalledOnce();
+    expect(ctx.exports.PendingLogin.newUniqueId).toHaveBeenCalledOnce();
+  });
+
+  it("still requires the auth allowlist, binding, and providesAuth declaration", async () => {
+    const notAllowlisted = environment(authVendor());
+    notAllowlisted.AUTH_GATEKEEPERS = "google";
+    await expect(publicApi(notAllowlisted).api.startGatekeeperLogin("github"))
+      .rejects.toThrow('Sign-in via "github" is not enabled');
+
+    await expect(publicApi(environment()).api.startGatekeeperLogin("github"))
+      .rejects.toThrow("No such auth gatekeeper: github");
+
+    const noAuth = environment(authVendor({ providesAuth: false }));
+    await expect(publicApi(noAuth).api.startGatekeeperLogin("github"))
+      .rejects.toThrow('"github" does not provide authentication');
   });
 });

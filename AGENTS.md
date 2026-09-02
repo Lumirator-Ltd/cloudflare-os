@@ -200,8 +200,8 @@ IMPORTANT: Frontend error reporting is a separate, opt-in path:
 
 ### Authentication and identity
 
-- Treat verified identity, session lifetime, account convergence, and admin authorization as security boundaries. Flag any path that trusts browser-supplied identity, leaves stale capabilities usable past their verified session deadline, silently merges populated identities, or persists mutable email as a durable user key.
-- For Clerk, Gatekeeper, and Cloudflare Access changes, require issuer/origin/lifetime validation, backend-enforced signup policy, stable internal user IDs, and fail-closed collision behavior. Never log tokens, passwords, OAuth payloads, complete identity profiles, or secret configuration.
+- Treat provider-verified email, session authority, account routing, and admin authorization as security boundaries. Flag any path that trusts browser-supplied identity, bypasses backend-enforced signup policy, or mints capabilities before authentication succeeds.
+- Preserve upstream account-key routing: built-in password users are keyed by normalized username, while Gatekeeper and Cloudflare Access users route the provider-verified email unchanged to `UserDurableObject.idFromName(email)`. Require Access issuer, audience, and same-origin validation, and never log tokens, passwords, OAuth payloads, complete identity profiles, or secret configuration.
 
 ### Capability and kernel safety
 

@@ -55,12 +55,8 @@ describe("workshop backend optional feature vars", () => {
     assert.ok(WORKSHOP_BACKEND_OPTIONAL_FEATURE_VARS.includes("TELEGRAM_WEBHOOK_SECRET"));
   });
 
-  it("forwards Clerk verification configuration", () => {
-    assert.ok(WORKSHOP_BACKEND_OPTIONAL_FEATURE_VARS.includes("CLERK_PUBLISHABLE_KEY"));
-    assert.ok(WORKSHOP_BACKEND_OPTIONAL_FEATURE_VARS.includes("CLERK_SECRET_KEY"));
-    assert.ok(WORKSHOP_BACKEND_OPTIONAL_FEATURE_VARS.includes("CLERK_JWT_KEY"));
-    assert.ok(WORKSHOP_BACKEND_OPTIONAL_FEATURE_VARS.includes("CLERK_JWT_AUDIENCE"));
-    assert.ok(WORKSHOP_BACKEND_OPTIONAL_FEATURE_VARS.includes("CLERK_DEV_AUTHORIZED_PARTIES"));
+  it("does not forward Clerk configuration", () => {
+    assert.doesNotMatch(WORKSHOP_BACKEND_OPTIONAL_FEATURE_VARS.join("\n"), /CLERK/);
   });
 });
 
